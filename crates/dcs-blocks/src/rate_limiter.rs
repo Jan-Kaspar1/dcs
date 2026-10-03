@@ -458,6 +458,7 @@ mod tests {
             parameters,
             rationalization: None,
             ports: BTreeMap::new(),
+            parameter_units: BTreeMap::new(),
         };
         let block = RateLimiter::from_parameters("rl", IN, OUT, &instance.parameters).unwrap();
         assert_eq!(block.max_delta, 2.5);

@@ -514,6 +514,7 @@ mod tests {
             parameters,
             rationalization: None,
             ports: BTreeMap::new(),
+            parameter_units: BTreeMap::new(),
         };
         let mut block =
             BoolGate::from_parameters("gate", vec![IN_1, IN_2], OUT, &instance.parameters).unwrap();

@@ -56,8 +56,10 @@ commands:
                             append outcomes to the device's scripted
                             exchange queue — each is one of:
                               complete            the full census answers
-                              miss                the connection drops
-                                                  unanswered
+                              miss                the exchange answers
+                                                  missed and completes
+                                                  nothing — the link
+                                                  stays up
                               late                the census answers with
                                                   the late flag
                               short-station:<n>   station <n>'s registers

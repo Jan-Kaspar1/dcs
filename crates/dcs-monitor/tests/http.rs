@@ -4,18 +4,23 @@
 use dcs_core::{
     Command, CommandError, CommandOutcome, CommandReceipt, CyclicIoDriver, Direction,
     DriverDiagnostics, EmittedEvent, EventValue, ExchangeDiagnostics, ForcedPoint, IoDriver,
-    IoError, IoFault, IoHealth, JournalEvent, LinkState, PointId, Quality, QualityReason, Sample,
-    Tick, Value, ValueKind,
+    IoError, IoFault, IoHealth, JournalEvent, LinkState, PointId, Quality, QualityReason, Role,
+    Sample, Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
-use dcs_monitor::{Monitor, MonitorClient, PAGE, PAIR_FAULT_KINDS_VERSION, PairFaultKind};
+use dcs_monitor::{
+    Driven, HealthReport, Monitor, MonitorClient, PAGE, PAIR_FAULT_KINDS_VERSION, PairFaultKind,
+};
 use dcs_runtime::{
     Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, PointMap, StepError,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::Write;
+use std::net::{Shutdown, TcpStream};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
+use std::time::{Duration, Instant};
 
 /// In-memory driver stub with injectable faults; the same minimal stand-in
 /// the executor tests use — `dcs-monitor` sees only the `IoDriver`
@@ -545,6 +550,39 @@ fn snapshot_roundtrips_over_http() {
 }
 
 #[test]
+fn health_reports_liveness_role_and_scan_age() {
+    with_monitor(|_driver, client| {
+        // Before the first scan the listener already serves its
+        // liveness answer — the shape the container health check
+        // decodes: live, the served role, and the not-yet-scanned
+        // freshness spelled `null`.
+        let health = client.health().unwrap();
+        assert_eq!(
+            health,
+            HealthReport {
+                live: true,
+                role: Role::Active,
+                tick: Tick::ZERO,
+                last_scan_age_ms: None,
+            }
+        );
+
+        // A completed scan stamps the report: the tick advances and
+        // the wall-clock age of the last scan is a small number — the
+        // freshness the liveness declaration alone cannot attest.
+        client.advance(2).unwrap();
+        let health = client.health().unwrap();
+        assert_eq!(health.tick, Tick(2));
+        assert_eq!(health.role, Role::Active);
+        assert!(health.live);
+        assert!(
+            health.last_scan_age_ms.is_some(),
+            "a completed scan stamps the freshness"
+        );
+    });
+}
+
+#[test]
 fn setpoint_command_changes_output_at_the_tick_boundary() {
     with_monitor(|_driver, client| {
         client.advance(1).unwrap();
@@ -560,6 +598,7 @@ fn setpoint_command_changes_output_at_the_tick_boundary() {
                 },
                 actor: None,
                 submission: None,
+                reason: None,
             }
         );
         // Between scans nothing has changed yet.
@@ -586,6 +625,7 @@ fn setpoint_command_changes_output_at_the_tick_boundary() {
                 outcome: CommandOutcome::Applied { tick: Tick(2) },
                 actor: None,
                 submission: None,
+                reason: None,
             }
         );
     });
@@ -810,6 +850,11 @@ fn the_pages_hardcoded_spellings_are_the_emitted_contract() {
                 component: String::new(),
                 command: String::new(),
             }),
+            emitted_spelling(&CommandError::UnknownArgument {
+                component: String::new(),
+                command: String::new(),
+                argument: String::new(),
+            }),
             emitted_spelling(&CommandError::ArgumentTypeMismatch {
                 component: String::new(),
                 command: String::new(),
@@ -874,20 +919,23 @@ fn the_pages_pair_fault_kinds_match_the_versioned_contract() {
         spellings,
         [
             "dual_active",
+            "field_unclaimed",
             "no_active_peer",
             "peer_unreachable",
             "standby_degraded",
             "standby_diverged",
+            "standby_orphaned",
             "standby_unsynchronized_past_grace",
+            "standby_usurped",
         ]
     );
-    assert_eq!(PAIR_FAULT_KINDS_VERSION, 1);
+    assert_eq!(PAIR_FAULT_KINDS_VERSION, 4);
 
     with_monitor(|_driver, client| {
         let page = client.page().unwrap();
         let compact: String = page.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(
-            compact.contains("constPAIR_FAULT_KINDS_VERSION=1;"),
+            compact.contains("constPAIR_FAULT_KINDS_VERSION=4;"),
             "page lacks the version constant"
         );
         assert!(
@@ -1122,6 +1170,7 @@ fn trend_and_journal_feeds_track_the_run() {
                     },
                     actor: None,
                     submission: None,
+                    reason: None,
                 },
             }
         );
@@ -1432,12 +1481,14 @@ fn force_and_release_are_journaled_and_badged_in_the_snapshot() {
                     outcome: CommandOutcome::Applied { tick: Tick(2) },
                     actor: None,
                     submission: None,
+                    reason: None,
                 },
                 CommandReceipt {
                     command: unforce,
                     outcome: CommandOutcome::Applied { tick: Tick(4) },
                     actor: None,
                     submission: None,
+                    reason: None,
                 },
             ]
         );
@@ -1633,6 +1684,182 @@ fn the_paced_loops_overrun_feed_counts_into_io_health() {
         serde_json::from_str::<dcs_core::IoHealth>(&json).unwrap(),
         snapshot.io_health
     );
+}
+
+/// The `POST /scan` batch bound — the crate's `MAX_SCANS_PER_REQUEST`,
+/// restated because integration tests see only the public API: every
+/// accepted batch is a bounded, terminating unit of work inside its
+/// request.
+const SCAN_BATCH_BOUND: u64 = 256;
+
+/// A driven monitor on the standard rig whose `after_scan` hook sleeps
+/// `step` per scan — the stand-in for a slow per-scan pull or plant
+/// step that lets a test observe a batch provably mid-flight instead
+/// of racing past it.
+fn slow_driven_monitor(step: Duration) -> Monitor<'static> {
+    let driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let map = PointMap::new()
+        .with_writable_point(PointId(10), Direction::In, ValueKind::Float)
+        .with_point(PointId(20), Direction::Out, ValueKind::Float)
+        .with_point(PointId(30), Direction::Out, ValueKind::Float);
+    let executor = Executor::new(driver, map, vec![Box::new(Scale)]).unwrap();
+    Monitor::bind("127.0.0.1:0", executor, signal_index())
+        .unwrap()
+        .driven(Driven {
+            track: None,
+            after_scan: Some(Box::new(move |_| {
+                thread::sleep(step);
+                Ok(())
+            })),
+        })
+}
+
+#[test]
+fn post_scan_refuses_a_batch_past_the_declared_bound() {
+    // The unbounded-scan finding's bounded-verdict leg (#1203): a
+    // `scans` past the declared per-request bound answers a refusal
+    // naming it before the first scan — a batch that cannot terminate
+    // is not a request the driven contract accepts.
+    with_monitor(|_driver, client| {
+        for over in [SCAN_BATCH_BOUND + 1, 50_000_000, u64::MAX] {
+            let (status, body) = client
+                .request("POST", "/scan", Some(&format!("{{\"scans\":{over}}}")))
+                .unwrap();
+            assert_eq!(status, 400, "{body}");
+            assert!(body.contains(&SCAN_BATCH_BOUND.to_string()), "{body}");
+        }
+        assert_eq!(client.snapshot().unwrap().tick, Tick(0));
+
+        // The bound itself still runs — it is a ceiling on one
+        // request's work, not a refusal of the endpoint.
+        let snapshot = client.advance(SCAN_BATCH_BOUND).unwrap();
+        assert_eq!(snapshot.tick, Tick(SCAN_BATCH_BOUND));
+        assert_eq!(client.snapshot().unwrap().tick, Tick(SCAN_BATCH_BOUND));
+    });
+}
+
+#[test]
+fn a_scan_batch_terminates_after_its_client_disconnects() {
+    // The finding's disconnect leg: killing the client mid-batch cannot
+    // leave the batch running. tiny_http hands the request no socket
+    // liveness to poll, so the declared bound is the cancellation —
+    // every accepted batch ends inside its own request.
+    const SCAN_STEP: Duration = Duration::from_millis(15);
+    let monitor = slow_driven_monitor(SCAN_STEP);
+    let addr = monitor.local_addr();
+    let client = MonitorClient::new(addr);
+    thread::scope(|scope| {
+        scope.spawn(|| monitor.serve());
+
+        // The reproduction's raw client: posts the batch, then dies
+        // mid-flight — its answer can never land.
+        let mut stream = TcpStream::connect(addr).unwrap();
+        let body = format!("{{\"scans\":{SCAN_BATCH_BOUND}}}");
+        stream
+            .write_all(
+                format!(
+                    "POST /scan HTTP/1.1\r\nHost: {addr}\r\n\
+                     Content-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        // A few scans land — the batch is provably in flight when the
+        // connection dies.
+        thread::sleep(SCAN_STEP * 4);
+        let mid = client.snapshot().unwrap().tick;
+        stream.shutdown(Shutdown::Both).unwrap();
+        drop(stream);
+
+        // The batch still terminates: the tick climbs at most to the
+        // declared bound and stays — a dead client cannot hold the run
+        // open.
+        let deadline =
+            Instant::now() + SCAN_STEP * (SCAN_BATCH_BOUND as u32 + 4) + Duration::from_secs(5);
+        let mut tick = client.snapshot().unwrap().tick;
+        while tick.0 < SCAN_BATCH_BOUND && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(25));
+            tick = client.snapshot().unwrap().tick;
+        }
+        assert_eq!(
+            tick.0, SCAN_BATCH_BOUND,
+            "the orphaned batch never terminated (mid-flight tick was {mid:?})"
+        );
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(
+            client.snapshot().unwrap().tick.0,
+            SCAN_BATCH_BOUND,
+            "the run kept climbing past the dead client's batch"
+        );
+        // The worker freed with the batch's end: the next bounded
+        // request answers.
+        assert_eq!(client.advance(1).unwrap().tick.0, SCAN_BATCH_BOUND + 1);
+
+        monitor.shutdown();
+    });
+}
+
+#[test]
+fn a_submission_workers_pin_on_one_batch_stays_bounded() {
+    // The finding's starvation residual: two concurrent max-bound
+    // batches spend both submission workers at most their bounded
+    // durations — "a second giant batch starves POST /scan entirely"
+    // becomes a bounded wait. The queued request behind them answers
+    // when the earlier bounded work drains, and the pair-liveness
+    // reads never queued behind it at all.
+    const SCAN_STEP: Duration = Duration::from_millis(10);
+    let monitor = slow_driven_monitor(SCAN_STEP);
+    let addr = monitor.local_addr();
+    let client = MonitorClient::new(addr);
+    thread::scope(|scope| {
+        scope.spawn(|| monitor.serve());
+
+        // Both submission workers take max-bound batches.
+        let batches: Vec<_> = (0..2)
+            .map(|_| thread::spawn(move || MonitorClient::new(addr).advance(SCAN_BATCH_BOUND)))
+            .collect();
+        // Wait until the batches are provably on the workers — scans
+        // are already landing.
+        let began = Instant::now();
+        while client.snapshot().unwrap().tick.0 < 4 {
+            assert!(
+                began.elapsed() < Duration::from_secs(5),
+                "the batches never started"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        // The heartbeat lane never queued behind the pin.
+        let began = Instant::now();
+        client.role().unwrap();
+        assert!(
+            began.elapsed() < Duration::from_millis(500),
+            "the liveness read stalled behind the pinned submissions"
+        );
+
+        // A queued submission waits only the pinned batches' bounded
+        // remainder — never the unbounded batch the finding reported.
+        // Both batches serialize on the scan lock, so a worker frees
+        // inside two bounded batches' worth of work.
+        let began = Instant::now();
+        let third = thread::spawn(move || MonitorClient::new(addr).advance(1));
+        third.join().unwrap().unwrap();
+        assert!(
+            began.elapsed() < SCAN_STEP * (SCAN_BATCH_BOUND as u32) * 2 + Duration::from_secs(2),
+            "the queued request outlived the bounded pin: {:?}",
+            began.elapsed()
+        );
+        for batch in batches {
+            batch.join().unwrap().unwrap();
+        }
+
+        monitor.shutdown();
+    });
 }
 
 #[test]

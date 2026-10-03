@@ -57,9 +57,14 @@ pass a served record that dropped or rewrote a declared field.
 
 import argparse
 import json
+import os
 import sys
 
 import alarm_validation
+sys.path.insert(
+    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "legs")
+)
+
 import pair
 import simulate
 

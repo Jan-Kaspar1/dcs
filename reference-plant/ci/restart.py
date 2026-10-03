@@ -4,11 +4,13 @@ lone-controller half of WW-LCM-001's restart evidence (decisions 35
 and 36), run entirely on the released tooling.
 
 The `deploy` stage proves the manifest and the rig definition agree on
-the declared `state_file`/`journal_file` persistence paths and their
-writable mounts; this leg proves the recovery contract itself.
+the declared `state_file`/`journal_file`/`history_file` persistence
+paths and their writable mounts; this leg proves the recovery contract
+itself.
 `dcs-plant-server` serves the checked-in model and dynamics while
 `dcs-controller --driven --remote` launches with the manifest-declared
-`--state-file`/`--journal-file` flags pointed at runner-owned scratch
+`--state-file`/`--journal-file`/`--history-file` flags pointed at
+runner-owned scratch
 paths, runs the deterministic scenario past a leg boundary — far
 enough to leave applied receipts and journaled transitions — is
 stopped, and relaunches onto the same files. The resumed run must:
@@ -52,8 +54,13 @@ import shutil
 import sys
 import tempfile
 
-import pair
 import simulate
+
+sys.path.insert(
+    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "legs")
+)
+
+import pair
 
 
 def eprint(*args):
@@ -112,10 +119,16 @@ def manifest_persistence(path):
     journal_file = duty.get("journal_file")
     if not state_file or not journal_file:
         return None
-    return {
+    persistence = {
         "state_file": os.path.basename(state_file),
         "journal_file": os.path.basename(journal_file),
     }
+    # The durable-history mount is optional: declared, the invocation
+    # carries it like the other persistence flags.
+    history_file = duty.get("history_file")
+    if history_file:
+        persistence["history_file"] = os.path.basename(history_file)
+    return persistence
 
 
 def interrupted_pass(args, scenario, persistence, tamper):
@@ -126,8 +139,12 @@ def interrupted_pass(args, scenario, persistence, tamper):
     legs = scenario["legs"]
     mid = len(legs) // 2
     scratch = tempfile.mkdtemp(prefix="dcs-restart-")
-    state_file = os.path.join(scratch, persistence["state_file"])
-    journal_file = os.path.join(scratch, persistence["journal_file"])
+    files = {
+        field: os.path.join(scratch, basename)
+        for field, basename in persistence.items()
+    }
+    state_file = files["state_file"]
+    journal_file = files["journal_file"]
     digest_entries, evidence, failures = [], {}, []
     monitor = MonitorRef()
     plant = controller = client = None
@@ -145,7 +162,7 @@ def interrupted_pass(args, scenario, persistence, tamper):
                 scenario["dt"],
                 plant_addr,
                 None,
-                {"state_file": state_file, "journal_file": journal_file},
+                files,
             )
             return preamble
 

@@ -20,6 +20,7 @@ use crate::spec::{
     BINARY_CODE_RANGE, CODE_RANGE, FINITE_F64, FRACTION_F64, NONNEGATIVE_F64, NONNEGATIVE_INT,
     POSITIVE_F64, POSITIVE_INT, ParamDecl, Parameters, PortDecl, Spec, optional, port, required,
 };
+use crate::unit;
 use dcs_core::{
     CommandArgument, CommandAvailability, CommandDecl, Direction, EventDecl, EventField,
     EventFieldKind, EventRetention, PointType, ValueKind,
@@ -304,7 +305,7 @@ impl DigitalInputSpec {
     /// The declared parameter set.
     pub const PARAMETERS: &'static [ParamDecl] = &[
         optional("invert", ValueKind::Bool, None),
-        optional("debounce_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+        optional("debounce_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)).with_unit(unit::TICKS),
     ];
 
     /// A spec carrying `parameters` as the instance's parameter map.
@@ -677,7 +678,7 @@ impl ValveSpec {
     /// The declared parameter set.
     pub const PARAMETERS: &'static [ParamDecl] = &[
         required("tolerance", ValueKind::Float, Some(NONNEGATIVE_F64)),
-        optional("discrepancy_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+        optional("discrepancy_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)).with_unit(unit::TICKS),
     ];
 
     /// A spec carrying `parameters` as the instance's parameter map.
@@ -751,11 +752,8 @@ impl MotorSpec {
     pub const KIND: &'static str = "motor";
 
     /// The declared parameter set.
-    pub const PARAMETERS: &'static [ParamDecl] = &[optional(
-        "fault_ticks",
-        ValueKind::Int,
-        Some(NONNEGATIVE_INT),
-    )];
+    pub const PARAMETERS: &'static [ParamDecl] =
+        &[optional("fault_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)).with_unit(unit::TICKS)];
 
     /// A spec carrying `parameters` as the instance's parameter map.
     pub fn new(parameters: Parameters) -> Self {
@@ -825,7 +823,7 @@ impl TimerSpec {
 
     /// The declared parameter set.
     pub const PARAMETERS: &'static [ParamDecl] = &[
-        required("delay_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+        required("delay_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)).with_unit(unit::TICKS),
         optional("off_delay", ValueKind::Bool, None),
     ];
 
@@ -1049,7 +1047,7 @@ impl LatchingAlarmSpec {
         optional("hysteresis", ValueKind::Float, Some(NONNEGATIVE_F64)),
         required("priority", ValueKind::Int, Some(NONNEGATIVE_INT)),
         required("class", ValueKind::Int, Some(NONNEGATIVE_INT)),
-        required("response_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+        required("response_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)).with_unit(unit::TICKS),
     ];
 
     /// A spec carrying `parameters` as the instance's parameter map and
@@ -1104,7 +1102,7 @@ impl Spec for LatchingAlarmSpec {
 /// Spec for the `bool-latching-alarm` kind: the two-flag alarm
 /// lifecycle for Bool-sourced conditions — `latching-alarm`'s Bool
 /// sibling, where `alarm` follows `in` and `unacknowledged` latches a
-/// fresh assertion until `ack` reads `true`.
+/// fresh assertion until `ack`'s rising edge consumes it.
 ///
 /// Ports mirror the descriptor: `in` (`In`, `Bool`), `ack` (`In`,
 /// `Bool`), `alarm` (`Out`, `Bool`), `unacknowledged` (`Out`, `Bool`).
@@ -1146,7 +1144,7 @@ impl BoolLatchingAlarmSpec {
     pub const PARAMETERS: &'static [ParamDecl] = &[
         required("priority", ValueKind::Int, Some(NONNEGATIVE_INT)),
         required("class", ValueKind::Int, Some(NONNEGATIVE_INT)),
-        required("response_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+        required("response_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)).with_unit(unit::TICKS),
     ];
 
     /// A spec carrying `parameters` as the instance's parameter map and
@@ -1253,10 +1251,10 @@ fn managed_output_ports() -> Vec<PortDecl> {
 /// `response_ticks` rationalization fields; all required non-negative
 /// `Int`s.
 const MANAGED_ALARM_PARAMETERS: &[ParamDecl] = &[
-    required("max_shelve_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+    required("max_shelve_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)).with_unit(unit::TICKS),
     required("priority", ValueKind::Int, Some(NONNEGATIVE_INT)),
     required("class", ValueKind::Int, Some(NONNEGATIVE_INT)),
-    required("response_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+    required("response_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)).with_unit(unit::TICKS),
 ];
 
 /// Typed handles for the managed-alarm ports both managed latching
@@ -1352,10 +1350,10 @@ impl ManagedLatchingAlarmSpec {
         required("low_limit", ValueKind::Float, Some(FINITE_F64)),
         required("high_limit", ValueKind::Float, Some(FINITE_F64)),
         optional("hysteresis", ValueKind::Float, Some(NONNEGATIVE_F64)),
-        required("max_shelve_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+        required("max_shelve_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)).with_unit(unit::TICKS),
         required("priority", ValueKind::Int, Some(NONNEGATIVE_INT)),
         required("class", ValueKind::Int, Some(NONNEGATIVE_INT)),
-        required("response_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+        required("response_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)).with_unit(unit::TICKS),
     ];
 
     /// A spec carrying `parameters` as the instance's parameter map;
@@ -1851,18 +1849,55 @@ static SEQUENCER_COMMANDS: LazyLock<Vec<CommandDecl>> = LazyLock::new(|| {
 });
 
 /// The `sequencer` kind's declared emitted events — the spec mirror of
-/// the descriptor's `events`: `step_completed` journals the 1-based
-/// index of each step that ran its `ticks` out.
+/// the descriptor's `events`, one per retention class: `step_completed`
+/// records the 1-based index of each step that ran its `ticks` out —
+/// the bounded operational record `History` retains; `sequence_completed`
+/// journals the table length once the run reaches its end — the durable
+/// run-level audit boundary; and `progress` stands in the
+/// latest-emission view — each scan's newest `step`/`elapsed`/`done`
+/// superseding the last.
 static SEQUENCER_EVENTS: LazyLock<Vec<EventDecl>> = LazyLock::new(|| {
-    vec![EventDecl {
-        name: "step_completed".to_string(),
-        payload: vec![EventField {
-            name: "step".to_string(),
-            kind: EventFieldKind::Value(ValueKind::Int),
-            optional: false,
-        }],
-        retention: EventRetention::Journal,
-    }]
+    vec![
+        EventDecl {
+            name: "step_completed".to_string(),
+            payload: vec![EventField {
+                name: "step".to_string(),
+                kind: EventFieldKind::Value(ValueKind::Int),
+                optional: false,
+            }],
+            retention: EventRetention::History,
+        },
+        EventDecl {
+            name: "sequence_completed".to_string(),
+            payload: vec![EventField {
+                name: "steps".to_string(),
+                kind: EventFieldKind::Value(ValueKind::Int),
+                optional: false,
+            }],
+            retention: EventRetention::Journal,
+        },
+        EventDecl {
+            name: "progress".to_string(),
+            payload: vec![
+                EventField {
+                    name: "step".to_string(),
+                    kind: EventFieldKind::Value(ValueKind::Int),
+                    optional: false,
+                },
+                EventField {
+                    name: "elapsed".to_string(),
+                    kind: EventFieldKind::Value(ValueKind::Int),
+                    optional: false,
+                },
+                EventField {
+                    name: "done".to_string(),
+                    kind: EventFieldKind::Value(ValueKind::Bool),
+                    optional: false,
+                },
+            ],
+            retention: EventRetention::Latest,
+        },
+    ]
 });
 
 /// Spec for the `sequencer` kind: stepping through a declared ordered
@@ -1871,8 +1906,9 @@ static SEQUENCER_EVENTS: LazyLock<Vec<EventDecl>> = LazyLock::new(|| {
 /// Ports mirror the descriptor: `run` (`In`, `Bool`), `reset` (`In`,
 /// `Bool`), `out` (`Out`, `Float`), `step` (`Out`, `Int`), `done`
 /// (`Out`, `Bool`). The kind also declares the native commands
-/// `advance`/`reset` and the emitted `step_completed` event — mirrored
-/// by [`SEQUENCER_COMMANDS`]/[`SEQUENCER_EVENTS`].
+/// `advance`/`reset` and the emitted `step_completed`/
+/// `sequence_completed`/`progress` events — mirrored by
+/// [`SEQUENCER_COMMANDS`]/[`SEQUENCER_EVENTS`].
 ///
 /// The parameter set is *not statically enumerable*: `step_count`
 /// declares the table length `N` and each step `n` in `1..=N` adds
@@ -2142,10 +2178,11 @@ impl PumpGroupSpec {
     /// The declared parameter set.
     pub const PARAMETERS: &'static [ParamDecl] = &[
         required("rotation", ValueKind::Int, Some(CODE_RANGE)),
-        optional("rotation_ticks", ValueKind::Int, Some(POSITIVE_INT)),
-        optional("start_delay_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
-        optional("restage_delay_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
-        optional("min_off_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+        optional("rotation_ticks", ValueKind::Int, Some(POSITIVE_INT)).with_unit(unit::TICKS),
+        optional("start_delay_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)).with_unit(unit::TICKS),
+        optional("restage_delay_ticks", ValueKind::Int, Some(NONNEGATIVE_INT))
+            .with_unit(unit::TICKS),
+        optional("min_off_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)).with_unit(unit::TICKS),
     ];
 
     /// A spec for an instance managing `pumps` pumps and carrying
@@ -2928,7 +2965,7 @@ impl DeviationMonitorSpec {
     /// The declared parameter set.
     pub const PARAMETERS: &'static [ParamDecl] = &[
         required("deviation_limit", ValueKind::Float, Some(NONNEGATIVE_F64)),
-        required("window_ticks", ValueKind::Int, Some(POSITIVE_INT)),
+        required("window_ticks", ValueKind::Int, Some(POSITIVE_INT)).with_unit(unit::TICKS),
     ];
 
     /// A spec carrying `parameters` as the instance's parameter map.
@@ -3468,7 +3505,7 @@ impl HeaderCoordinatorSpec {
         required("pressure_max", ValueKind::Float, Some(FINITE_F64)),
         required("mov_band_lo", ValueKind::Float, Some(FINITE_F64)),
         required("mov_band_hi", ValueKind::Float, Some(FINITE_F64)),
-        required("adjust_ticks", ValueKind::Int, Some(POSITIVE_INT)),
+        required("adjust_ticks", ValueKind::Int, Some(POSITIVE_INT)).with_unit(unit::TICKS),
         required("min_total_airflow", ValueKind::Float, Some(NONNEGATIVE_F64)),
         required("max_pulsing", ValueKind::Int, Some(NONNEGATIVE_INT)),
     ];
@@ -3594,7 +3631,7 @@ impl PhaseMonitorSpec {
     /// The declared parameter set.
     pub const PARAMETERS: &'static [ParamDecl] = &[
         required("bound", ValueKind::Float, Some(NONNEGATIVE_F64)),
-        required("limit_ticks", ValueKind::Int, Some(POSITIVE_INT)),
+        required("limit_ticks", ValueKind::Int, Some(POSITIVE_INT)).with_unit(unit::TICKS),
         required("mode", ValueKind::Int, Some(BINARY_CODE_RANGE)),
     ];
 

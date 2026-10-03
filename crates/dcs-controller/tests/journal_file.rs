@@ -304,6 +304,7 @@ fn a_legacy_spelling_journal_file_replays_through_the_aliases() {
                         outcome: dcs_core::CommandOutcome::Applied { tick: Tick(3) },
                         actor: None,
                         submission: None,
+                        reason: None,
                     },
                 }
             ),
@@ -389,6 +390,7 @@ fn a_receipted_write_and_a_component_transition_journal_side_by_side() {
                 command: receipt.command.clone(),
                 outcome: dcs_core::CommandOutcome::Applied { tick: Tick(2) },
                 actor: None,
+                reason: None,
                 // The journaled settle keeps the issued receipt's
                 // minted submission identity (#775).
                 submission: receipt.submission,

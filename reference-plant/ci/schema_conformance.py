@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""Structural conformance of a served registry document against the
-release record's served-registry JSON Schema.
+"""Structural conformance of a document against a release record's
+JSON Schema artifact.
 
 `ci/check.sh`'s surface stage drives the deterministic run whose
 `GET /schema` answer this script checks against the release record's
 `block-interfaces.schema.json` — the draft 2020-12 artifact `dcs-model
-interface-schema` emits, fetched through the pinned revision's git
-remote and pinned byte-identical to the pinned tooling's emission by
-the tooling stage's `schema-drift` leg.
+interface-schema` emits — and its tooling stage screens the checked-in
+consumer documents the same way: `deploy/manifest.json` against the
+record's `deploy-manifest.schema.json` (`dcs-model deploy-schema`'s
+emission, decision 96) and `model/dynamics.json` against the record's
+`dynamics.schema.json` (`dcs-plant-server --dynamics-schema`'s
+emission, decision 93). Every artifact is fetched through the pinned
+revision's git remote and pinned byte-identical to the pinned
+tooling's emission by the tooling stage's `schema-drift` leg.
 
 The boundary this check documents: it is a required-keys/field-shape
 conformance check in stdlib-only python. Required keys must be
@@ -47,13 +52,13 @@ def die(diagnostic, detail):
     sys.exit(1)
 
 
-def load(path, what):
+def load(path, what, require_object=True):
     try:
         with open(path) as handle:
             document = json.load(handle)
     except (OSError, json.JSONDecodeError) as error:
         die("schema-mismatch", f"the {what} at {path} does not parse: {error}")
-    if not isinstance(document, dict):
+    if require_object and not isinstance(document, dict):
         die("schema-mismatch", f"the {what} at {path} is not an object")
     return document
 
@@ -176,28 +181,35 @@ def main():
     parser.add_argument(
         "--schema",
         required=True,
-        help="the release record's block-interfaces.schema.json",
+        help="the release record's schema artifact to check against",
     )
     parser.add_argument(
         "--document",
         required=True,
-        help="the served GET /schema document to check",
+        help="the document to check — the served GET /schema answer or "
+        "a checked-in consumer document",
+    )
+    parser.add_argument(
+        "--what",
+        default="served document",
+        help="the document's transcript name — labels the summary line "
+        "and the parse diagnostics (default: served document)",
     )
     args = parser.parse_args()
     artifact = load(args.schema, "recorded schema artifact")
-    document = load(args.document, "served document")
+    document = load(args.document, args.what, require_object=False)
     mismatches = []
     check(artifact, document, "$", artifact, mismatches)
     if mismatches:
         for mismatch in mismatches:
             eprint(f"schema-mismatch: {mismatch}")
         sys.exit(1)
-    interfaces = document.get("interfaces")
-    count = len(interfaces) if isinstance(interfaces, list) else 0
-    print(
-        f"the served document conforms to the recorded schema artifact — "
-        f"{count} interfaces checked"
-    )
+    detail = ""
+    if isinstance(document, dict) and isinstance(
+        document.get("interfaces"), list
+    ):
+        detail = f" — {len(document['interfaces'])} interfaces checked"
+    print(f"the {args.what} conforms to the recorded schema artifact{detail}")
 
 
 if __name__ == "__main__":

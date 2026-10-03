@@ -42,37 +42,43 @@
       "id": 10,
       "direction": "in",
       "value_type": "float",
-      "channel": { "device": 1, "name": "lt101a_raw" }
+      "channel": { "device": 1, "name": "lt101a_raw" },
+      "unit": "mA"
     },
 {
       "id": 11,
       "direction": "in",
       "value_type": "float",
-      "channel": { "device": 1, "name": "ly101_raw" }
+      "channel": { "device": 1, "name": "ly101_raw" },
+      "unit": "mA"
     },
 {
       "id": 12,
       "direction": "in",
       "value_type": "float",
-      "channel": { "device": 1, "name": "lt101b_raw" }
+      "channel": { "device": 1, "name": "lt101b_raw" },
+      "unit": "mA"
     },
 {
       "id": 13,
       "direction": "in",
       "value_type": "float",
-      "channel": { "device": 1, "name": "lt101c_raw" }
+      "channel": { "device": 1, "name": "lt101c_raw" },
+      "unit": "mA"
     },
 {
       "id": 14,
       "direction": "in",
       "value_type": "float",
-      "channel": { "device": 1, "name": "ft101_raw" }
+      "channel": { "device": 1, "name": "ft101_raw" },
+      "unit": "mA"
     },
 {
       "id": 20,
       "direction": "out",
       "value_type": "float",
-      "channel": { "device": 2, "name": "lv101_raw" }
+      "channel": { "device": 2, "name": "lv101_raw" },
+      "unit": "mA"
     },
 {
       "id": 30,
@@ -111,7 +117,8 @@
       "direction": "in",
       "value_type": "float",
       "initial": { "float": 60.0 },
-      "writable": true
+      "writable": true,
+      "unit": "%"
     },
 {
       "id": 51,
@@ -125,7 +132,8 @@
       "direction": "in",
       "value_type": "float",
       "initial": { "float": 0.0 },
-      "writable": true
+      "writable": true,
+      "unit": "%"
     },
 {
       "id": 53,
@@ -183,19 +191,22 @@
       "id": 60,
       "direction": "out",
       "value_type": "float",
-      "initial": { "float": 60.0 }
+      "initial": { "float": 60.0 },
+      "unit": "%"
     },
 {
       "id": 61,
       "direction": "in",
       "value_type": "float",
-      "initial": { "float": 60.0 }
+      "initial": { "float": 60.0 },
+      "unit": "%"
     },
 {
       "id": 62,
       "direction": "in",
       "value_type": "float",
-      "initial": { "float": 60.0 }
+      "initial": { "float": 60.0 },
+      "unit": "%"
     },
 {
       "id": 63,
@@ -280,19 +291,22 @@
       "id": 75,
       "direction": "in",
       "value_type": "float",
-      "initial": { "float": 60.0 }
+      "initial": { "float": 60.0 },
+      "unit": "%"
     },
 {
       "id": 76,
       "direction": "out",
       "value_type": "float",
-      "initial": { "float": 60.0 }
+      "initial": { "float": 60.0 },
+      "unit": "%"
     },
 {
       "id": 77,
       "direction": "in",
       "value_type": "float",
-      "initial": { "float": 60.0 }
+      "initial": { "float": 60.0 },
+      "unit": "%"
     },
 {
       "id": 78,
@@ -318,13 +332,15 @@
       "id": 81,
       "direction": "out",
       "value_type": "float",
-      "initial": { "float": 0.0 }
+      "initial": { "float": 0.0 },
+      "unit": "%"
     },
 {
       "id": 82,
       "direction": "in",
       "value_type": "float",
-      "initial": { "float": 0.0 }
+      "initial": { "float": 0.0 },
+      "unit": "%"
     },
 {
       "id": 83,
@@ -351,13 +367,15 @@
       "id": 86,
       "direction": "out",
       "value_type": "float",
-      "initial": { "float": 0.0 }
+      "initial": { "float": 0.0 },
+      "unit": "%"
     },
 {
       "id": 87,
       "direction": "in",
       "value_type": "float",
-      "initial": { "float": 0.0 }
+      "initial": { "float": 0.0 },
+      "unit": "%"
     },
 {
       "id": 88,
@@ -417,6 +435,9 @@
       "ports": {
         "in": { "direction": "in", "value_type": "bool" },
         "out": { "direction": "out", "value_type": "bool" }
+      },
+      "parameter_units": {
+        "debounce_ticks": "ticks"
       }
     },
 {
@@ -428,6 +449,9 @@
       "ports": {
         "in": { "direction": "in", "value_type": "bool" },
         "out": { "direction": "out", "value_type": "bool" }
+      },
+      "parameter_units": {
+        "debounce_ticks": "ticks"
       }
     },
 {
@@ -439,6 +463,9 @@
       "ports": {
         "in": { "direction": "in", "value_type": "bool" },
         "out": { "direction": "out", "value_type": "bool" }
+      },
+      "parameter_units": {
+        "delay_ticks": "ticks"
       }
     },
 {
@@ -452,6 +479,9 @@
         "out": { "direction": "out", "value_type": "bool" },
         "run": { "direction": "in", "value_type": "bool" },
         "fault": { "direction": "out", "value_type": "bool" }
+      },
+      "parameter_units": {
+        "fault_ticks": "ticks"
       }
     },
 {
@@ -464,8 +494,14 @@
         "eng_max": { "float": 100.0 }
       },
       "ports": {
-        "raw": { "direction": "in", "value_type": "float" },
-        "out": { "direction": "out", "value_type": "float" }
+        "raw": { "direction": "in", "value_type": "float", "unit": "mA" },
+        "out": { "direction": "out", "value_type": "float", "unit": "%" }
+      },
+      "parameter_units": {
+        "raw_min": "mA",
+        "raw_max": "mA",
+        "eng_min": "%",
+        "eng_max": "%"
       }
     },
 {
@@ -475,8 +511,11 @@
         "max_delta": { "float": 5.0 }
       },
       "ports": {
-        "in": { "direction": "in", "value_type": "float" },
-        "out": { "direction": "out", "value_type": "float" }
+        "in": { "direction": "in", "value_type": "float", "unit": "%" },
+        "out": { "direction": "out", "value_type": "float", "unit": "%" }
+      },
+      "parameter_units": {
+        "max_delta": "%"
       }
     },
 {
@@ -491,9 +530,13 @@
         "out_max": { "float": 100.0 }
       },
       "ports": {
-        "sp": { "direction": "in", "value_type": "float" },
-        "pv": { "direction": "in", "value_type": "float" },
-        "out": { "direction": "out", "value_type": "float" }
+        "sp": { "direction": "in", "value_type": "float", "unit": "%" },
+        "pv": { "direction": "in", "value_type": "float", "unit": "%" },
+        "out": { "direction": "out", "value_type": "float", "unit": "%" }
+      },
+      "parameter_units": {
+        "out_min": "%",
+        "out_max": "%"
       }
     },
 {
@@ -503,11 +546,14 @@
         "safe_value": { "float": 0.0 }
       },
       "ports": {
-        "in": { "direction": "in", "value_type": "float" },
+        "in": { "direction": "in", "value_type": "float", "unit": "%" },
         "permissive": { "direction": "in", "value_type": "bool" },
         "trip_1": { "direction": "in", "value_type": "bool" },
-        "out": { "direction": "out", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float", "unit": "%" },
         "tripped": { "direction": "out", "value_type": "bool" }
+      },
+      "parameter_units": {
+        "safe_value": "%"
       }
     },
 {
@@ -515,10 +561,10 @@
       "kind": "override-select",
       "parameters": {},
       "ports": {
-        "control": { "direction": "in", "value_type": "float" },
-        "operator": { "direction": "in", "value_type": "float" },
+        "control": { "direction": "in", "value_type": "float", "unit": "%" },
+        "operator": { "direction": "in", "value_type": "float", "unit": "%" },
         "select": { "direction": "in", "value_type": "bool" },
-        "out": { "direction": "out", "value_type": "float" }
+        "out": { "direction": "out", "value_type": "float", "unit": "%" }
       }
     },
 {
@@ -529,10 +575,14 @@
         "discrepancy_ticks": { "int": 3 }
       },
       "ports": {
-        "cmd": { "direction": "in", "value_type": "float" },
-        "out": { "direction": "out", "value_type": "float" },
-        "fb": { "direction": "in", "value_type": "float" },
+        "cmd": { "direction": "in", "value_type": "float", "unit": "%" },
+        "out": { "direction": "out", "value_type": "float", "unit": "%" },
+        "fb": { "direction": "in", "value_type": "float", "unit": "%" },
         "discrepancy": { "direction": "out", "value_type": "bool" }
+      },
+      "parameter_units": {
+        "tolerance": "%",
+        "discrepancy_ticks": "ticks"
       }
     },
 {
@@ -545,8 +595,14 @@
         "eng_max": { "float": 100.0 }
       },
       "ports": {
-        "eng": { "direction": "in", "value_type": "float" },
-        "raw": { "direction": "out", "value_type": "float" }
+        "eng": { "direction": "in", "value_type": "float", "unit": "%" },
+        "raw": { "direction": "out", "value_type": "float", "unit": "mA" }
+      },
+      "parameter_units": {
+        "eng_min": "%",
+        "eng_max": "%",
+        "raw_min": "mA",
+        "raw_max": "mA"
       }
     },
 {
@@ -559,8 +615,14 @@
         "eng_max": { "float": 100.0 }
       },
       "ports": {
-        "raw": { "direction": "in", "value_type": "float" },
-        "out": { "direction": "out", "value_type": "float" }
+        "raw": { "direction": "in", "value_type": "float", "unit": "mA" },
+        "out": { "direction": "out", "value_type": "float", "unit": "%" }
+      },
+      "parameter_units": {
+        "raw_min": "mA",
+        "raw_max": "mA",
+        "eng_min": "%",
+        "eng_max": "%"
       }
     },
 {
@@ -572,8 +634,13 @@
         "hysteresis": { "float": 2.0 }
       },
       "ports": {
-        "in": { "direction": "in", "value_type": "float" },
+        "in": { "direction": "in", "value_type": "float", "unit": "%" },
         "alarm": { "direction": "out", "value_type": "bool" }
+      },
+      "parameter_units": {
+        "low_limit": "%",
+        "high_limit": "%",
+        "hysteresis": "%"
       }
     },
 {
@@ -608,8 +675,14 @@
         "eng_max": { "float": 100.0 }
       },
       "ports": {
-        "raw": { "direction": "in", "value_type": "float" },
-        "out": { "direction": "out", "value_type": "float" }
+        "raw": { "direction": "in", "value_type": "float", "unit": "mA" },
+        "out": { "direction": "out", "value_type": "float", "unit": "%" }
+      },
+      "parameter_units": {
+        "raw_min": "mA",
+        "raw_max": "mA",
+        "eng_min": "%",
+        "eng_max": "%"
       }
     },
 {
@@ -622,8 +695,14 @@
         "eng_max": { "float": 100.0 }
       },
       "ports": {
-        "raw": { "direction": "in", "value_type": "float" },
-        "out": { "direction": "out", "value_type": "float" }
+        "raw": { "direction": "in", "value_type": "float", "unit": "mA" },
+        "out": { "direction": "out", "value_type": "float", "unit": "%" }
+      },
+      "parameter_units": {
+        "raw_min": "mA",
+        "raw_max": "mA",
+        "eng_min": "%",
+        "eng_max": "%"
       }
     },
 {
@@ -633,11 +712,14 @@
         "tolerance": { "float": 8.0 }
       },
       "ports": {
-        "in_1": { "direction": "in", "value_type": "float" },
-        "in_2": { "direction": "in", "value_type": "float" },
-        "in_3": { "direction": "in", "value_type": "float" },
-        "out": { "direction": "out", "value_type": "float" },
+        "in_1": { "direction": "in", "value_type": "float", "unit": "%" },
+        "in_2": { "direction": "in", "value_type": "float", "unit": "%" },
+        "in_3": { "direction": "in", "value_type": "float", "unit": "%" },
+        "out": { "direction": "out", "value_type": "float", "unit": "%" },
         "discrepancy": { "direction": "out", "value_type": "bool" }
+      },
+      "parameter_units": {
+        "tolerance": "%"
       }
     },
 {
@@ -647,8 +729,8 @@
         "alpha": { "float": 0.5 }
       },
       "ports": {
-        "in": { "direction": "in", "value_type": "float" },
-        "out": { "direction": "out", "value_type": "float" }
+        "in": { "direction": "in", "value_type": "float", "unit": "%" },
+        "out": { "direction": "out", "value_type": "float", "unit": "%" }
       }
     },
 {
@@ -670,9 +752,21 @@
       "ports": {
         "run": { "direction": "in", "value_type": "bool" },
         "reset": { "direction": "in", "value_type": "bool" },
-        "out": { "direction": "out", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float", "unit": "%" },
         "step": { "direction": "out", "value_type": "int" },
         "done": { "direction": "out", "value_type": "bool" }
+      },
+      "parameter_units": {
+        "step_1_ticks": "ticks",
+        "step_1_out": "%",
+        "step_2_ticks": "ticks",
+        "step_2_out": "%",
+        "step_3_ticks": "ticks",
+        "step_3_out": "%",
+        "step_4_ticks": "ticks",
+        "step_4_out": "%",
+        "step_5_ticks": "ticks",
+        "step_5_out": "%"
       }
     },
 {
@@ -682,11 +776,14 @@
         "transfer_delta": { "float": 5.0 }
       },
       "ports": {
-        "control": { "direction": "in", "value_type": "float" },
-        "manual": { "direction": "in", "value_type": "float" },
+        "control": { "direction": "in", "value_type": "float", "unit": "%" },
+        "manual": { "direction": "in", "value_type": "float", "unit": "%" },
         "mode": { "direction": "in", "value_type": "bool" },
-        "out": { "direction": "out", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float", "unit": "%" },
         "manual_active": { "direction": "out", "value_type": "bool" }
+      },
+      "parameter_units": {
+        "transfer_delta": "%"
       }
     },
 {
@@ -699,8 +796,14 @@
         "eng_max": { "float": 100.0 }
       },
       "ports": {
-        "raw": { "direction": "in", "value_type": "float" },
-        "out": { "direction": "out", "value_type": "float" }
+        "raw": { "direction": "in", "value_type": "float", "unit": "mA" },
+        "out": { "direction": "out", "value_type": "float", "unit": "%" }
+      },
+      "parameter_units": {
+        "raw_min": "mA",
+        "raw_max": "mA",
+        "eng_min": "%",
+        "eng_max": "%"
       }
     },
 {
@@ -710,7 +813,7 @@
         "rate_unit": { "float": 0.1 }
       },
       "ports": {
-        "rate": { "direction": "in", "value_type": "float" },
+        "rate": { "direction": "in", "value_type": "float", "unit": "%" },
         "reset": { "direction": "in", "value_type": "bool" },
         "total": { "direction": "out", "value_type": "float" }
       }
@@ -732,10 +835,16 @@
         "reference": "level-alarm-latched"
       },
       "ports": {
-        "in": { "direction": "in", "value_type": "float" },
+        "in": { "direction": "in", "value_type": "float", "unit": "%" },
         "ack": { "direction": "in", "value_type": "bool" },
         "alarm": { "direction": "out", "value_type": "bool" },
         "unacknowledged": { "direction": "out", "value_type": "bool" }
+      },
+      "parameter_units": {
+        "low_limit": "%",
+        "high_limit": "%",
+        "hysteresis": "%",
+        "response_ticks": "ticks"
       }
     },
 {

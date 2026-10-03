@@ -261,6 +261,7 @@ fn unmarked_points_reject_with_not_writable_naming_the_point() {
                 },
                 actor: None,
                 submission: None,
+                reason: None,
             },
             "{point:?}"
         );

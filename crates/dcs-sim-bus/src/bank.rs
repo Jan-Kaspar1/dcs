@@ -5,8 +5,11 @@
 //! register-map analogue of `dcs-sim`'s point storage, addressed by
 //! `u16` register index rather than by point. Writes stamp the stored
 //! sample with the bank's current tick; the tick advances only on
-//! [`step`](RegisterBank::step), so identical write and step sequences
-//! produce identical samples on every run. A stored sample's quality is
+//! [`step`](RegisterBank::step), which also re-stamps every register no
+//! element drives — the field's scan stamp, so a stepped bank keeps a
+//! held register's report fresh — and identical write and step
+//! sequences produce identical samples on every run. A stored sample's
+//! quality is
 //! `Good` unless a development-tooling injection stamps it otherwise —
 //! see [`inject_quality`](RegisterBank::inject_quality).
 //!
@@ -51,7 +54,9 @@ use std::fmt;
 /// One register's declaration: its address and initial value. The
 /// initial's [`Value`] variant is the register's declared kind — writes
 /// carrying any other variant fail
-/// [`BusError::KindMismatch`].
+/// [`BusError::KindMismatch`]. A `Float` initial must be finite — the
+/// register's seed sample is representable like every value it can
+/// later hold.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RegisterDecl {
     /// The register address.
@@ -84,6 +89,10 @@ pub enum BankError {
     },
     /// A declared field wire loops a register onto itself.
     SelfWire(u16),
+    /// A declaration's `initial` is a non-finite `Float` — NaN or an
+    /// infinity — which the bank cannot store: every served sample must
+    /// stay representable.
+    NonFiniteInitial(u16),
 }
 
 impl fmt::Display for BankError {
@@ -102,6 +111,9 @@ impl fmt::Display for BankError {
             ),
             Self::SelfWire(register) => {
                 write!(f, "field wire loops register {register} onto itself")
+            }
+            Self::NonFiniteInitial(register) => {
+                write!(f, "register {register} declares a non-finite initial value")
             }
         }
     }
@@ -240,6 +252,11 @@ fn channel_map(decls: impl IntoIterator<Item = RegisterDecl>) -> Result<ChannelM
             Entry::Vacant(slot) => {
                 slot.insert(());
             }
+        }
+        if let Value::Float(initial) = decl.initial
+            && !initial.is_finite()
+        {
+            return Err(BankError::NonFiniteInitial(decl.register));
         }
         map.points.push(PointBinding {
             point: PointId(u64::from(decl.register)),
@@ -432,6 +449,11 @@ impl RegisterBank {
                 expected,
                 found,
             }),
+            // A non-finite `Float` is a request the device cannot
+            // serve — every stored value must stay representable.
+            Err(IoError::InvalidValue { .. }) => Err(BusError::InvalidRequest {
+                detail: format!("register {register} refused a non-finite value"),
+            }),
             // The bank injects quality faults only, and they never
             // refuse a write.
             Err(_) => unreachable!("the bank injects no error faults"),
@@ -499,6 +521,10 @@ impl RegisterBank {
     /// Element state is bank state: it lives here for the bank's
     /// lifetime, shared by every attachment like the `dcs-sim-net`
     /// plant — never checkpointed controller state.
+    ///
+    /// A register no element drives carries its stored value and
+    /// quality forward at the new tick — the field re-scanned, so the
+    /// served report is fresh even though nothing wrote it.
     ///
     /// `dt` must be finite and non-negative.
     ///
@@ -578,10 +604,12 @@ mod tests {
             bank.read(0).unwrap(),
             Sample::good(Value::Float(3.5), Tick(1))
         );
-        // A register untouched by the step keeps its stamped tick.
+        // A register untouched by any write still re-stamps at the
+        // step — the field's scan stamp, so a stepped bank reports the
+        // held value fresh.
         assert_eq!(
             bank.read(4).unwrap(),
-            Sample::good(Value::Bool(false), Tick(0))
+            Sample::good(Value::Bool(false), Tick(1))
         );
     }
 
@@ -599,6 +627,34 @@ mod tests {
         );
         // The failed write leaves the stored value untouched.
         assert_eq!(bank.read(0).unwrap().value, Value::Float(1.5));
+    }
+
+    #[test]
+    fn a_non_finite_float_is_refused_and_the_stored_value_stands() {
+        // The bank holds only representable values — a non-finite
+        // `Float` is a request the device cannot serve, refused before
+        // anything stores, not a register fault.
+        let bank = bank();
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(matches!(
+                bank.write(0, Value::Float(value)),
+                Err(BusError::InvalidRequest { .. })
+            ));
+        }
+        assert_eq!(
+            bank.read(0).unwrap(),
+            Sample::good(Value::Float(1.5), Tick(0))
+        );
+
+        // A declaration seeded non-finite cannot build at all.
+        assert_eq!(
+            RegisterBank::new([RegisterDecl {
+                register: 0,
+                initial: Value::Float(f64::NAN),
+            }])
+            .unwrap_err(),
+            BankError::NonFiniteInitial(0)
+        );
     }
 
     #[test]

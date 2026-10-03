@@ -92,7 +92,7 @@ mod support;
 
 use support::{
     SimTcp, canonicalize_origins, controller_model, image_sample, image_value, kill, pump,
-    settled_receipts, spawn_controller, spawn_controller_logged, spawn_plant,
+    settle_sink_health, settled_receipts, spawn_controller, spawn_controller_logged, spawn_plant,
 };
 
 /// The shared plant's model — the checked-in dosing-skid document
@@ -434,12 +434,31 @@ fn file_boundaries(path: &Path) -> Vec<(u64, u64)> {
         .collect()
 }
 
+/// The durable record covers the served page: `served` was fetched
+/// through `GET /journal`, which waits the sink's drain out, so the
+/// file holds every served entry in order — while the paced run keeps
+/// journaling, the tail a post-flush append may add behind them.
+fn assert_file_covers(path: &Path, served: &[JournalEntry]) {
+    let file = file_entries(path);
+    assert!(
+        file.len() >= served.len(),
+        "the durable journal {} is shorter than the served record",
+        path.display()
+    );
+    assert_eq!(
+        &file[..served.len()],
+        served,
+        "the durable journal {} must hold the served record in order",
+        path.display()
+    );
+}
+
 /// The role transitions a journal stream recorded.
 fn role_changes_in(journal: &[JournalEntry]) -> Vec<(Role, Role)> {
     journal
         .iter()
         .filter_map(|entry| match entry.event {
-            JournalEvent::RoleChanged { from, to } => Some((from, to)),
+            JournalEvent::RoleChanged { from, to, .. } => Some((from, to)),
             _ => None,
         })
         .collect()
@@ -1159,7 +1178,7 @@ fn run_dosing(tag: &str) -> serde_json::Value {
         !before_restart.is_empty(),
         "the pre-restart run must have journaled entries"
     );
-    assert_eq!(file_entries(&journal_active), before_restart);
+    assert_file_covers(&journal_active, &before_restart);
     assert_eq!(file_boundaries(&journal_active), vec![(1, 0)]);
 
     kill(&mut active_process);
@@ -1446,6 +1465,7 @@ fn run_dosing(tag: &str) -> serde_json::Value {
                 command: receipt.command.clone(),
                 outcome: CommandOutcome::Applied { tick: apply_tick },
                 actor: Some(OPERATOR.to_string()),
+                reason: None,
                 // The journaled settle keeps the issued receipt's
                 // minted submission identity (#775) — unchanged
                 // through admission, settle, and the switch's carry.
@@ -1473,7 +1493,7 @@ fn run_dosing(tag: &str) -> serde_json::Value {
         ],
         "the durable journal records the demotion across the restart"
     );
-    assert_eq!(file_entries(&journal_standby), served_standby);
+    assert_file_covers(&journal_standby, &served_standby);
     assert_eq!(file_boundaries(&journal_standby), vec![(1, 0)]);
 
     // -- Close-out: decision 74's durable lifecycle record -------------
@@ -1656,7 +1676,17 @@ fn run_dosing(tag: &str) -> serde_json::Value {
             "pre_promotion_sync": pre_promotion.sync,
         },
         "issued": issued,
-        "final": masked(serde_json::to_value(&image).unwrap(), &masks),
+        // The journal sink's live counters ride the writer thread's
+        // beat — pin the run-stable fields so the digests compare.
+        "final": masked(
+            serde_json::to_value({
+                let mut image = image.clone();
+                settle_sink_health(&mut image);
+                image
+            })
+            .unwrap(),
+            &masks,
+        ),
     });
     canonicalize_origins(&mut digest, &mut Vec::new());
 

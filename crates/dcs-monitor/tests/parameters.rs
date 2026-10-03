@@ -266,6 +266,7 @@ fn a_parameter_edit_applies_at_the_scan_boundary_and_telemetry_reflects_it() {
                 outcome: CommandOutcome::Applied { tick: Tick(2) },
                 actor: None,
                 submission: None,
+                reason: None,
             }]
         );
         assert!(

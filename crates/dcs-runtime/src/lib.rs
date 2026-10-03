@@ -92,5 +92,9 @@ pub use executor::{
     LinkError, PointMap, PointSpec, WiringError,
 };
 pub use gate::WriteGate;
-pub use peer::{ApplyError, Peer, RoleChange, SourceRestart, TrackReport, Transfer};
+pub use peer::{
+    Activation, ApplyError, ClaimBasis, ClaimObservation, ClaimRearm, ForeignClaimPreempt,
+    MAX_CLAIM_LEAD, OrphanReport, Peer, PeerEvent, PeerEvents, PromotionRefusal, RoleChange,
+    SourceRestart, StartupRefusal, TrackReport, Transfer,
+};
 pub use revision::CarryoverError;

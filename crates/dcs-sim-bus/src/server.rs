@@ -7,6 +7,7 @@ use crate::protocol::{
     BusError, BusRequest, BusResponse, ExchangeOutcome, MAX_FRAME, decode_request, encode_response,
     read_frame,
 };
+use dcs_core::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::{self, BufReader, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
@@ -56,13 +57,26 @@ struct Shared {
 /// A held write-ownership claim: the owner token the last preempting
 /// [`BusRequest::ClaimWriter`] asserted plus the live connections
 /// holding it — one field owner's several attachments claim the same
-/// token so all of them write.
+/// token so all of them write — and the monitor endpoint that owner
+/// declared, recorded so the claim's fencing verdicts can hand a
+/// superseded peer the successor's tracking surface.
 struct WriterClaim {
     owner: u64,
     /// The connection ids holding `owner`. An attachment not in this
     /// set is fenced: its `write_register` and `step` requests are
     /// refused while the claim stands.
     holders: HashSet<u64>,
+    /// The monitor endpoint the claim's owner declared — where this
+    /// owner serves the tracking surface a superseded peer re-joins on.
+    /// The field's arbitration is the only authority an unkeyed pair can
+    /// prove, so every fencing verdict the claim produces carries it.
+    /// `None` for a claim that declared none — a tool's, and every
+    /// attachment on a protocol build predating the declaration. The
+    /// stored address is always dialable by construction: a
+    /// wildcard-declared IP lands as the claiming connection's proven
+    /// source ([`dialable_monitor`]), so a verdict never names the
+    /// undialable bind address a peer would read as its own loopback.
+    monitor: Option<SocketAddr>,
 }
 
 impl Shared {
@@ -76,9 +90,14 @@ impl Shared {
         if let Ok(registered) = stream.try_clone() {
             self.clients.lock().unwrap().insert(id, registered);
         }
+        // The connection's proven source address — the substitute a
+        // wildcard monitor declaration resolves to, so a claim bound to
+        // the wildcard never stores a rendezvous no fenced peer can
+        // dial.
+        let remote = stream.peer_addr().ok();
         let shared = Arc::clone(self);
         thread::spawn(move || {
-            serve_connection(&shared, stream, id);
+            serve_connection(&shared, stream, remote, id);
             // The claim is bound to its attachments: the connection's
             // end — orderly close, broken link, or a protocol-violation
             // drop — releases its hold, freeing the field when the
@@ -105,7 +124,12 @@ fn release_claim(writer: &Mutex<Option<WriterClaim>>, connection: u64) {
 /// One client connection's request loop: read a frame, dispatch it,
 /// write the response. Ends when the peer goes away, the link fails,
 /// the peer violates the frame bound, or the server stops.
-fn serve_connection(shared: &Shared, stream: TcpStream, connection: u64) {
+fn serve_connection(
+    shared: &Shared,
+    stream: TcpStream,
+    remote: Option<SocketAddr>,
+    connection: u64,
+) {
     let _ = stream.set_nodelay(true);
     let mut reader = BufReader::new(stream);
     loop {
@@ -119,13 +143,7 @@ fn serve_connection(shared: &Shared, stream: TcpStream, connection: u64) {
             Ok(None) | Err(_) => return,
         };
         let response = match decode_request(&body) {
-            Ok(request) => match dispatch(shared, connection, request) {
-                Some(response) => response,
-                // A scripted missed exchange: the device answers
-                // nothing — the dropped connection is the link
-                // failure the driver's exchange observes.
-                None => return,
-            },
+            Ok(request) => dispatch(shared, connection, remote, request),
             Err(detail) => BusResponse::Error {
                 error: BusError::InvalidRequest { detail },
             },
@@ -140,15 +158,77 @@ fn serve_connection(shared: &Shared, stream: TcpStream, connection: u64) {
     }
 }
 
-/// The refusal a fenced attachment's field-mutating request answers
-/// with — the driver's `write` path surfaces it as the addressed
-/// point's `IoError::Fenced`, the same named failure a fenced
-/// plant-protocol write produces.
-fn fenced_out() -> BusResponse {
+/// The refusal a fenced attachment's request answers with — the
+/// driver's `write` path surfaces it as the addressed point's
+/// `IoError::Fenced`, the same named failure a fenced plant-protocol
+/// write produces.
+///
+/// The verdict names the standing claim it met: the owner token the
+/// device now serves and the monitor endpoint that owner declared, so a
+/// superseded owner's durable audit attributes the preemption to a
+/// named claimant and its tracking path can re-join the successor the
+/// field itself vouches for.
+fn fenced_out(claim: &WriterClaim, detail: &str) -> BusResponse {
     BusResponse::Error {
         error: BusError::Fenced {
-            detail: "another attachment owns register writes".to_string(),
+            detail: detail.to_string(),
+            owner: Some(claim.owner),
+            monitor: claim.monitor,
         },
+    }
+}
+
+/// The dialable form of a claim's declared monitor. A claimant bound
+/// to the wildcard declares its *bind* address, which each fenced peer
+/// would dial as its own loopback, stranding the field-arbitrated
+/// rendezvous the declaration exists to serve. The claiming
+/// connection's proven source is the substitute — the same resolution
+/// the plant protocol's claim monitor gets — keeping the declared port,
+/// which is the claimant's own claim about where it serves. A routable
+/// declaration stands verbatim: unlike an announced monitor address,
+/// the claim's own is not provably about this connection, so only the
+/// address that can never be dialed earns the substitute. `None` stays
+/// `None`, and a declaration whose source cannot be proven keeps what
+/// the claimant sent.
+fn dialable_monitor(monitor: Option<SocketAddr>, remote: Option<SocketAddr>) -> Option<SocketAddr> {
+    match (monitor, remote) {
+        (Some(declared), Some(remote)) if declared.ip().is_unspecified() => {
+            Some(SocketAddr::new(remote.ip(), declared.port()))
+        }
+        _ => monitor,
+    }
+}
+
+/// The unconditional claim grant [`BusRequest::ClaimWriter`] and the
+/// unrefused half of [`BusRequest::ClaimWriterUnlessHeld`] and
+/// [`BusRequest::EnsureWriter`] share: takes the field's write-ownership
+/// under `owner`, preempting whichever claim stood. Claiming the
+/// standing owner joins this attachment to the claim's holders — so one
+/// owner's several connections all write — and a fresh monitor
+/// declaration replaces the standing one, the owner's monitor rebinding
+/// with its claim, while an undeclared join keeps the declaration a
+/// controller attachment already made rather than letting a tool's
+/// claim erase where the owner serves.
+fn grant_writer_claim(
+    writer: &mut Option<WriterClaim>,
+    owner: u64,
+    connection: u64,
+    monitor: Option<SocketAddr>,
+) {
+    match writer.as_mut() {
+        Some(claim) if claim.owner == owner => {
+            claim.holders.insert(connection);
+            if monitor.is_some() {
+                claim.monitor = monitor;
+            }
+        }
+        _ => {
+            *writer = Some(WriterClaim {
+                owner,
+                holders: HashSet::from([connection]),
+                monitor,
+            });
+        }
     }
 }
 
@@ -166,12 +246,24 @@ fn fenced_out() -> BusResponse {
 /// is development tooling, so a test or operator tool not holding the
 /// claim can fault a point while a controller pair owns the field.
 ///
-/// The answer is `Some` for every request but a scripted
-/// [`ExchangeOutcome::Miss`]: the miss is the connection dropping
-/// unanswered, so `None` tells the connection loop to hang up without
-/// a frame.
-fn dispatch(shared: &Shared, connection: u64, request: BusRequest) -> Option<BusResponse> {
-    Some(match request {
+/// The claim refusals name the standing claim — its owner token and the
+/// monitor endpoint that owner declared — so every refusal attributes
+/// the incumbent rather than recording an anonymous fence, whether it
+/// came from the arbitration itself or from a fenced field mutation.
+///
+/// Every request produces its response; a scripted
+/// [`ExchangeOutcome::Miss`] answers [`BusResponse::Missed`] in-band
+/// rather than severing the connection — the exchange did not
+/// complete, but the link a live attachment holds its writer claim
+/// through survives, so the development tooling's scripted outcome
+/// cannot release a claim only disconnect or `release_writer` may.
+fn dispatch(
+    shared: &Shared,
+    connection: u64,
+    remote: Option<SocketAddr>,
+    request: BusRequest,
+) -> BusResponse {
+    match request {
         BusRequest::ReadRegister { register } => match shared.bank.read(register) {
             Ok(sample) => BusResponse::Sample { sample },
             Err(error) => BusResponse::Error { error },
@@ -183,11 +275,11 @@ fn dispatch(shared: &Shared, connection: u64, request: BusRequest) -> Option<Bus
             // is a read and always completes.
             let writer = shared.writer.lock().unwrap();
             if !outputs.is_empty()
-                && writer
+                && let Some(claim) = writer
                     .as_ref()
-                    .is_some_and(|claim| !claim.holders.contains(&connection))
+                    .filter(|claim| !claim.holders.contains(&connection))
             {
-                return Some(fenced_out());
+                return fenced_out(claim, "another attachment owns register writes");
             }
             drop(writer);
             // The exchange applies all of its outputs or none: every
@@ -197,16 +289,29 @@ fn dispatch(shared: &Shared, connection: u64, request: BusRequest) -> Option<Bus
             for output in &outputs {
                 match shared.bank.read(output.register) {
                     Ok(sample) if sample.value.kind() != output.value.kind() => {
-                        return Some(BusResponse::Error {
+                        return BusResponse::Error {
                             error: BusError::KindMismatch {
                                 register: output.register,
                                 expected: sample.value.kind(),
                                 found: output.value,
                             },
-                        });
+                        };
                     }
-                    Ok(_) => {}
-                    Err(error) => return Some(BusResponse::Error { error }),
+                    Ok(_) => {
+                        if let Value::Float(v) = output.value
+                            && !v.is_finite()
+                        {
+                            return BusResponse::Error {
+                                error: BusError::InvalidRequest {
+                                    detail: format!(
+                                        "register {} refused a non-finite value",
+                                        output.register
+                                    ),
+                                },
+                            };
+                        }
+                    }
+                    Err(error) => return BusResponse::Error { error },
                 }
             }
             let outcome = shared
@@ -216,19 +321,23 @@ fn dispatch(shared: &Shared, connection: u64, request: BusRequest) -> Option<Bus
                 .pop_front()
                 .unwrap_or(ExchangeOutcome::Complete);
             let withhold: BTreeSet<u16> = match &outcome {
-                // The miss answers with nothing at all.
-                ExchangeOutcome::Miss => return None,
+                // The missed cycle answers in-band: the exchange
+                // completed nothing — nothing published, no census
+                // latched — but the link stays up, so the
+                // connection-bound writer claim a severed link would
+                // release survives the scripting.
+                ExchangeOutcome::Miss => return BusResponse::Missed,
                 ExchangeOutcome::ShortStation { station } => {
                     match shared.stations.get(station.as_str()) {
                         Some(registers) => registers.clone(),
                         None => {
-                            return Some(BusResponse::Error {
+                            return BusResponse::Error {
                                 error: BusError::InvalidRequest {
                                     detail: format!(
                                         "scripted short exchange names station {station:?} the device does not declare"
                                     ),
                                 },
-                            });
+                            };
                         }
                     }
                 }
@@ -267,19 +376,19 @@ fn dispatch(shared: &Shared, connection: u64, request: BusRequest) -> Option<Bus
                 match outcome {
                     ExchangeOutcome::ShortStation { station } => {
                         if !shared.stations.contains_key(station.as_str()) {
-                            return Some(BusResponse::Error {
+                            return BusResponse::Error {
                                 error: BusError::InvalidRequest {
                                     detail: format!(
                                         "scripted short exchange names station {station:?} the device does not declare"
                                     ),
                                 },
-                            });
+                            };
                         }
                     }
                     ExchangeOutcome::ShortRegisters { registers } => {
                         for &register in registers {
                             if let Err(error) = shared.bank.read(register) {
-                                return Some(BusResponse::Error { error });
+                                return BusResponse::Error { error };
                             }
                         }
                     }
@@ -294,11 +403,11 @@ fn dispatch(shared: &Shared, connection: u64, request: BusRequest) -> Option<Bus
             // claim strictly ordered against a write already in flight
             // on another connection.
             let writer = shared.writer.lock().unwrap();
-            if writer
+            if let Some(claim) = writer
                 .as_ref()
-                .is_some_and(|claim| !claim.holders.contains(&connection))
+                .filter(|claim| !claim.holders.contains(&connection))
             {
-                return Some(fenced_out());
+                return fenced_out(claim, "another attachment owns register writes");
             }
             match shared.bank.write(register, value) {
                 Ok(tick) => BusResponse::Written { tick },
@@ -311,18 +420,18 @@ fn dispatch(shared: &Shared, connection: u64, request: BusRequest) -> Option<Bus
             // named refusal — the same rule the plant protocol's step
             // applies.
             if !dt.is_finite() || dt < 0.0 {
-                return Some(BusResponse::Error {
+                return BusResponse::Error {
                     error: BusError::InvalidRequest {
                         detail: format!("step dt must be finite and non-negative, got {dt}"),
                     },
-                });
+                };
             }
             let writer = shared.writer.lock().unwrap();
-            if writer
+            if let Some(claim) = writer
                 .as_ref()
-                .is_some_and(|claim| !claim.holders.contains(&connection))
+                .filter(|claim| !claim.holders.contains(&connection))
             {
-                return Some(fenced_out());
+                return fenced_out(claim, "another attachment owns register writes");
             }
             BusResponse::Stepped {
                 tick: shared.bank.step(dt),
@@ -331,29 +440,91 @@ fn dispatch(shared: &Shared, connection: u64, request: BusRequest) -> Option<Bus
         BusRequest::ListRegisters => BusResponse::Registers {
             registers: shared.bank.registers(),
         },
-        BusRequest::ClaimWriter { owner } => {
+        BusRequest::ClaimWriter { owner, monitor } => {
             // The grant is unconditional — the promoted peer's claim
             // must beat the old owner's, wherever it still lives.
             // Claiming the held owner joins this attachment to the
             // claim's holders, so one owner's several connections all
-            // write.
+            // write; the claim records the monitor declaration this
+            // request carries, replacing a standing one as the owner's
+            // monitor rebinds with its claim.
+            let monitor = dialable_monitor(monitor, remote);
             let mut writer = shared.writer.lock().unwrap();
-            match writer.as_mut() {
-                Some(claim) if claim.owner == owner => {
-                    claim.holders.insert(connection);
-                }
+            grant_writer_claim(&mut writer, owner, connection, monitor);
+            BusResponse::Done
+        }
+        BusRequest::ClaimWriterUnlessHeld { owner, monitor } => {
+            // The conditional grant a launched controller's startup
+            // claim asks: refuse while a *different* owner's claim
+            // stands — on this protocol a standing claim always has
+            // live holders, so the standing claim is the live
+            // incumbent a born-active restart must not preempt — and
+            // leave it untouched: no preemption, no join. The refusal
+            // names that claim's owner and declared monitor, so the
+            // launched run's refusal record attributes the incumbent
+            // it met. Grant otherwise: the held owner joins this
+            // attachment to its holders exactly as `ClaimWriter` does,
+            // and an unclaimed device takes the claim.
+            let monitor = dialable_monitor(monitor, remote);
+            let mut writer = shared.writer.lock().unwrap();
+            match writer.as_ref() {
+                Some(claim) if claim.owner != owner => fenced_out(
+                    claim,
+                    "a live attachment holds the device's write-ownership claim",
+                ),
                 _ => {
-                    *writer = Some(WriterClaim {
-                        owner,
-                        holders: HashSet::from([connection]),
-                    });
+                    grant_writer_claim(&mut writer, owner, connection, monitor);
+                    BusResponse::Done
                 }
             }
-            BusResponse::Done
         }
         BusRequest::ReleaseWriter => {
             release_claim(&shared.writer, connection);
             BusResponse::Done
+        }
+        BusRequest::EnsureWriter { owner, monitor } => {
+            // The conditional grant a re-attached field owner re-arms
+            // its dropped claim with: granted while the field is
+            // unclaimed or the standing claim already names the token —
+            // binding this connection as a holder like a fresh claim —
+            // and refused while a *different* owner stands, so a
+            // re-attaching attachment never preempts the claim another
+            // owner took during its outage. The re-armed claim records
+            // the monitor declaration this request carries, so a claim
+            // rebuilt across a device restart keeps naming where its
+            // owner serves.
+            let monitor = dialable_monitor(monitor, remote);
+            let mut writer = shared.writer.lock().unwrap();
+            match writer.as_ref() {
+                Some(claim) if claim.owner != owner => fenced_out(
+                    claim,
+                    "another attachment owns the device's write-ownership claim",
+                ),
+                _ => {
+                    grant_writer_claim(&mut writer, owner, connection, monitor);
+                    BusResponse::Done
+                }
+            }
+        }
+        BusRequest::ProbeWriter => {
+            // The claim-status observation: the standing claim's
+            // identity — the owner token it asserts and the monitor
+            // endpoint it declared — or an unclaimed answer naming
+            // neither, which on this protocol is the device's open
+            // pre-claim state rather than a closed field. The probe
+            // touches the holder set not at all, so an unclaimed answer
+            // cannot seize the device it reports.
+            let writer = shared.writer.lock().unwrap();
+            match writer.as_ref() {
+                Some(claim) => BusResponse::ClaimStatus {
+                    owner: Some(claim.owner),
+                    monitor: claim.monitor,
+                },
+                None => BusResponse::ClaimStatus {
+                    owner: None,
+                    monitor: None,
+                },
+            }
         }
         // Quality injection is development tooling, not field
         // ownership: like reads and the census it is never fenced, so
@@ -369,7 +540,7 @@ fn dispatch(shared: &Shared, connection: u64, request: BusRequest) -> Option<Bus
             Ok(()) => BusResponse::Done,
             Err(error) => BusResponse::Error { error },
         },
-    })
+    }
 }
 
 /// A TCP server sharing one [`RegisterBank`] with every connected
@@ -390,9 +561,32 @@ fn dispatch(shared: &Shared, connection: u64, request: BusRequest) -> Option<Bus
 /// write claim to the requesting attachment — preempting whichever
 /// owner held it — and while a claim stands, `write_register` and
 /// `step` from an attachment not holding it answer
-/// [`BusError::Fenced`]. The claim is bound to its attachments: it
+/// [`BusError::Fenced`]. [`BusRequest::ClaimWriterUnlessHeld`] is the
+/// conditional counterpart the born-active startup claim asks:
+/// refused `Fenced` while a different owner's claim stands — which on
+/// this protocol is exactly a live incumbent, the claim dying with
+/// its last holder — granted otherwise. [`BusRequest::EnsureWriter`]
+/// is the same conditional grant a re-attached owner re-arms with:
+/// granted only while the field is unclaimed or already names the
+/// token, never preempting a different owner's standing claim. The
+/// claim is bound to its attachments: it
 /// releases on the holder's disconnect or
 /// [`BusRequest::ReleaseWriter`], the last release reopening the field.
+///
+/// Every claim may carry the claimant's declared monitor endpoint, and
+/// the server records it on the claim: every [`BusError::Fenced`]
+/// verdict the claim produces then names the standing owner *and* that
+/// monitor, so a superseded owner's audit attributes the preemption to
+/// a named claimant and its tracking path can re-join the successor the
+/// field's own arbitration vouches for — the rendezvous no announced
+/// hint proves on an unkeyed pair. A wildcard declaration resolves to
+/// the claiming connection's proven source ([`dialable_monitor`]), so a
+/// stored rendezvous is always dialable.
+/// [`BusRequest::ProbeWriter`] is the read-only half: it answers
+/// [`BusResponse::ClaimStatus`] naming that same standing claim, or an
+/// unclaimed verdict naming neither, while asserting, joining, and
+/// releasing nothing — an observation cannot seize the device it
+/// reports.
 ///
 /// [`serve`](Self::serve) runs the blocking accept loop on the caller's
 /// thread — run it on a dedicated thread — and
@@ -481,6 +675,24 @@ impl BusServer {
                     thread::sleep(std::time::Duration::from_millis(1));
                 }
             }
+        }
+    }
+
+    /// Drops every live client connection without stopping the
+    /// server — the link flap a network fault or a device bounce
+    /// produces: every client observes its connection die, re-attaches
+    /// lazily on its next request, and each holder's connection-bound
+    /// writer claim releases as its handler registers the drop. The
+    /// claim does not re-arm on reconnect — a re-attached attachment
+    /// holds nothing until it claims again.
+    ///
+    /// The drop is asynchronous: the sockets close here, but each
+    /// handler frees its claim hold when its blocked `read` notices —
+    /// a caller needing the claim released observes it through a
+    /// request rather than assuming the teardown has completed.
+    pub fn drop_connections(&self) {
+        for (_, client) in self.shared.clients.lock().unwrap().drain() {
+            let _ = client.shutdown(Shutdown::Both);
         }
     }
 

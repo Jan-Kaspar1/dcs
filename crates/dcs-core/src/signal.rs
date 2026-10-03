@@ -229,9 +229,17 @@ impl Quality {
     }
 }
 
-/// A logical timestamp: the executor's deterministic tick count, not
-/// wall-clock time. Ticks are only comparable within the run that produced
-/// them.
+/// A logical timestamp: a deterministic tick count, not wall-clock time.
+///
+/// The one type serves three distinct tick domains — the executor's *run
+/// tick* (its scan counter and the run's journal, history, and receipt
+/// attribution domain), the simulated field's *plant tick* (its step
+/// counter), and a tracked checkpoint stream's *source tick* — and the
+/// value itself does not record which domain minted it. Ticks are
+/// comparable only within the domain that produced them; cross-domain
+/// ordering or subtraction is meaningful only after explicit translation,
+/// like a tracking apply's `tick + tick_offset`. The repository's
+/// `CONTEXT.md` names the domains.
 #[derive(
     Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
@@ -250,7 +258,10 @@ pub struct Sample {
     pub value: Value,
     /// How much the value can be trusted.
     pub quality: Quality,
-    /// The logical tick at which the value was sampled.
+    /// The logical tick at which the value was sampled, in the tick
+    /// domain of whoever stamped it — a run tick on the scan-image
+    /// samples the executor stamps, the driver's own domain (a sim
+    /// driver's plant tick) on driver-returned samples.
     pub tick: Tick,
 }
 

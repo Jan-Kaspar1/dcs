@@ -43,8 +43,9 @@ pub struct PointBinding {
     pub channel: ChannelId,
     /// Whether the controller reads (`In`) or writes (`Out`) the point.
     ///
-    /// Direction is enforced where it carries meaning — [`Loopback`] ends —
-    /// but not on [`IoDriver`](dcs_core::IoDriver) access: writes to an `In`
+    /// Direction is enforced where it carries meaning — [`Loopback`] ends
+    /// and the point an element drives — but not on
+    /// [`IoDriver`](dcs_core::IoDriver) access: writes to an `In`
     /// point are how tests and field-side models force input values.
     pub direction: Direction,
     /// The channel's value before the first write or element step. Its
@@ -347,7 +348,10 @@ impl Threshold {
 /// reports it; a [`FlowSum`] reads a declared list, the vocabulary's
 /// one multi-input shape, and [`inputs`](Self::inputs) covers every
 /// variant. Every variant drives a `Float` point except a
-/// [`Threshold`], whose contact output is a `Bool` point.
+/// [`Threshold`], whose contact output is a `Bool` point. The driven
+/// point must be an `In` point — field-side physics the controller
+/// reads; driving an `Out` point would rewrite the controller's
+/// command each step, which [`ChannelMap::validate`] rejects.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcessElement {
@@ -494,13 +498,22 @@ impl ChannelMap {
     /// Checks the map's internal consistency, returning the first
     /// [`ConfigError`] found:
     ///
-    /// - point ids and channels are bound at most once;
+    /// - point ids and channels are bound at most once, and a `Float`
+    ///   point's `initial` is finite — the seed sample must be
+    ///   representable like every value the point can later hold;
     /// - every loopback and element names bound points only;
     /// - a loopback runs from an `Out` point to an `In` point of the same
     ///   value kind;
     /// - element ends are `Float` points — except a `bool_flow`'s gate
     ///   input and a `threshold`'s contact output, which must be `Bool`
-    ///   points — `time_constant`, `delay`, and `damping_ratio` are
+    ///   points, the requirement attaching to each leg's role so an
+    ///   element reading and driving the same point faces both legs'
+    ///   checks — and the point an element drives must be an `In`
+    ///   point, since elements model field-side physics answering the
+    ///   controller's commands: driving an `Out` point would rewrite
+    ///   the command itself each step
+    ///   ([`ConfigError::ElementOutputDirection`]);
+    /// - `time_constant`, `delay`, and `damping_ratio` are
     ///   finite and positive, `amplitude` is finite and non-negative,
     ///   `on_rate`, `off_rate`, `gain`, and `bias` are finite, a
     ///   `threshold`'s `on`/`off` bounds are finite and distinct —
@@ -524,6 +537,14 @@ impl ChannelMap {
                 Entry::Vacant(slot) => {
                     slot.insert(binding_.point);
                 }
+            }
+            if let Value::Float(initial) = binding_.initial
+                && !initial.is_finite()
+            {
+                return Err(ConfigError::NonFinitePointInitial {
+                    point: binding_.point,
+                    value: initial,
+                });
             }
         }
 
@@ -556,32 +577,55 @@ impl ChannelMap {
         }
 
         for element in &self.elements {
-            // Every end must name a bound point of the kind the end
+            // Every end must name a bound point of the kind its role
             // requires: Float throughout, except a bool_flow's gate
             // input and a threshold's contact output, which must be
-            // Bool points.
-            for point in element.inputs().iter().copied().chain([element.output()]) {
+            // Bool points. The requirement attaches to the leg, not to
+            // the point's identity, so an element whose input and
+            // output name the same point still faces both legs' checks.
+            for point in element.inputs().iter().copied() {
                 let bound = binding(&points, point)?;
-                let gate = matches!(element, ProcessElement::BoolFlow(flow) if flow.input == point);
-                let contact = matches!(element, ProcessElement::Threshold(threshold) if threshold.output == point);
-                if gate && bound.kind() != ValueKind::Bool {
-                    return Err(ConfigError::ElementGateKind {
-                        point,
-                        kind: bound.kind(),
-                    });
-                }
-                if contact && bound.kind() != ValueKind::Bool {
-                    return Err(ConfigError::ElementContactKind {
-                        point,
-                        kind: bound.kind(),
-                    });
-                }
-                if !gate && !contact && bound.kind() != ValueKind::Float {
+                if matches!(element, ProcessElement::BoolFlow(_)) {
+                    if bound.kind() != ValueKind::Bool {
+                        return Err(ConfigError::ElementGateKind {
+                            point,
+                            kind: bound.kind(),
+                        });
+                    }
+                } else if bound.kind() != ValueKind::Float {
                     return Err(ConfigError::ElementPointKind {
                         point,
                         kind: bound.kind(),
                     });
                 }
+            }
+            let point = element.output();
+            let bound = binding(&points, point)?;
+            if matches!(element, ProcessElement::Threshold(_)) {
+                if bound.kind() != ValueKind::Bool {
+                    return Err(ConfigError::ElementContactKind {
+                        point,
+                        kind: bound.kind(),
+                    });
+                }
+            } else if bound.kind() != ValueKind::Float {
+                return Err(ConfigError::ElementPointKind {
+                    point,
+                    kind: bound.kind(),
+                });
+            }
+            // The driven point must be an `In` point: elements model
+            // field-side physics answering the controller's commands,
+            // so an element driving an `Out` point would rewrite the
+            // command itself each step — the write the operator issued
+            // lost at the next step boundary. Reading an `Out` point
+            // stays legal: it is the actuator-wire seam a `bool_flow`
+            // gate or a `scaled_flow` demand answers.
+            if bound.direction != Direction::In {
+                return Err(ConfigError::ElementOutputDirection {
+                    point,
+                    direction: bound.direction,
+                });
             }
             if let ProcessElement::BoolFlow(flow) = element {
                 for (rate, value) in [("on_rate", flow.on_rate), ("off_rate", flow.off_rate)] {
@@ -740,6 +784,17 @@ pub enum ConfigError {
         /// The kind the point declares.
         kind: ValueKind,
     },
+    /// An element's driven point is not an `In` point. Elements model
+    /// field-side physics answering the controller's commands, so the
+    /// point an element drives must be one the controller reads;
+    /// driving an `Out` point would rewrite the command itself each
+    /// step.
+    ElementOutputDirection {
+        /// The point the element drives.
+        point: PointId,
+        /// The direction `point` actually declares.
+        direction: Direction,
+    },
     /// A lag's `time_constant` is not finite and positive.
     InvalidTimeConstant {
         /// The lag's output point.
@@ -818,6 +873,15 @@ pub enum ConfigError {
         /// The offending value.
         value: f64,
     },
+    /// A point binding's `initial` is a non-finite `Float` — the seed
+    /// sample must be representable like every value the point can
+    /// later hold.
+    NonFinitePointInitial {
+        /// The bound point.
+        point: PointId,
+        /// The offending value.
+        value: f64,
+    },
     /// A point's value is driven by more than one loopback or element.
     ConflictingDriver {
         /// The contested point.
@@ -874,6 +938,11 @@ impl fmt::Display for ConfigError {
                 "a threshold element's contact must drive a Bool point, but point {} is {kind:?}",
                 point.0
             ),
+            Self::ElementOutputDirection { point, direction } => write!(
+                f,
+                "process element driving point {} must drive an in point the controller reads, but the point is {direction} — an element on an out point rewrites the command each step",
+                point.0
+            ),
             Self::InvalidTimeConstant { point, value } => write!(
                 f,
                 "lag driving point {} has non-positive or non-finite time constant {value}",
@@ -928,6 +997,9 @@ impl fmt::Display for ConfigError {
                 "element driving point {} has non-finite initial value {value}",
                 point.0
             ),
+            Self::NonFinitePointInitial { point, value } => {
+                write!(f, "point {} has non-finite initial value {value}", point.0)
+            }
             Self::ConflictingDriver { point } => write!(
                 f,
                 "point {} is driven by more than one loopback or element",

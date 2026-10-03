@@ -35,17 +35,30 @@
 //! [`StandbySync`] wire state.
 //!
 //! Automatic failover, per the failover decision: the checkpoint pull is
-//! also the heartbeat — a produced checkpoint is proof the active
+//! also the heartbeat — a produced checkpoint is proof the source
 //! serves, so [`apply`](Peer::apply) resets the consecutive-miss count
-//! a failed pull (`note_transfer_failed`) increments. Armed with
+//! a failed pull (`note_transfer_failed`) increments; a produced
+//! checkpoint whose serving run owns no field writes still served —
+//! but the tracked owner did not — so the orphan apply counts the
+//! cycle's miss back in. Armed with
 //! [`with_failover`](Peer::with_failover), the peer reports
 //! [`failover_due`](Peer::failover_due) when the misses reach the
 //! configured budget, and [`self_promote`](Peer::self_promote) then
 //! promotes at the scan boundary exactly like a manual request — but
 //! only while the convergence proof still stands: the last applied
-//! verdict was `Tracking` and the misses have not exceeded the budget.
-//! An unconverged or over-budget peer reports its named sync state
-//! instead of promoting.
+//! verdict was `Tracking`. The budget-th miss is always the boundary —
+//! the attempt reports its named refusal rather than promoting on a
+//! voided proof — and past it the boundary stays open exactly while the
+//! proof keeps being re-proven: each landed apply is fresh convergence
+//! evidence, so a correctly-refused or transient attempt cannot disarm
+//! the gate for the rest of the episode — while an evidence-free miss
+//! run past the budget voids the proof for staleness and the peer
+//! reports its named sync state instead of promoting. A self-promotion's
+//! queued [`RoleChange`]s
+//! carry the `failover` origin rather than a request's — the journaled
+//! distinction between an automatic takeover and a requested switch —
+//! and a refused attempt queues one [`PromotionRefusal`] per distinct
+//! refusal cause a refused streak produces.
 //!
 //! A tracking caller runs the whole cycle once per scan through
 //! [`track_once`](Peer::track_once) — the owns-field gate, the pull,
@@ -60,9 +73,10 @@
 //! restarted or replaced source beginning a new tick generation, not a
 //! continuation of the tracked line. Its state still applies — the
 //! tracked source is the live one — but the run resumes it at the run's
-//! own tick, carrying the offset every later checkpoint lands under,
-//! and the boundary queues one [`SourceRestart`] for the journal rather
-//! than silently rewinding scans the run already ran and recorded.
+//! own tick, the live lead over the stream being the offset every
+//! later checkpoint lands under, and the boundary queues one
+//! [`SourceRestart`] for the journal rather than silently rewinding
+//! scans the run already ran and recorded.
 //! The regression heuristic alone cannot tell that boundary from the
 //! peer's own tracking reset — [`demote`](Peer::demote) clears the
 //! alignment, so a demoted peer's first pull on a healthy successor
@@ -70,15 +84,21 @@
 //! decides: the uninterrupted successor still stamps the generation
 //! the demoted run's own captures carried, and a same-generation
 //! regression journals nothing while a different one is the source's
-//! new tick domain. An unidentified generation on either side can
+//! new source-tick domain. An unidentified generation on either side can
 //! prove no continuation, so it keeps the conservative verdict.
-//! The carried offset is re-evaluated on each apply
-//! against the run's live lead over the stream — it covers at most the
-//! gap that remains and clears when the stream recovers to the run's
-//! tick — so a tracking apply can hold or realign the run's clock but
-//! never land it ahead of both clocks, the bound that keeps two
-//! mutually tracking peers' offsets from compounding into each other's
-//! served ticks.
+//! The hold-the-clock rule is not limited to stream regressions: any
+//! apply whose stream tick still lags the run's own lands at the
+//! run's tick, because a stale alignment can leave a lagging stream —
+//! a warm-resumed source continuing its own generation inside the
+//! degraded window's gap — inside the range where the regression
+//! comparison alone would still realign the run backward, re-issuing
+//! ticks the retained history and journal already recorded. The
+//! offset is re-derived on each apply as the gap that remains, so it
+//! clears when the stream recovers to the run's tick and a tracking
+//! apply can hold the run's clock or land it on the stream's, but
+//! never rewinds it and never lands it ahead of both clocks — the
+//! bound that keeps two mutually tracking peers' run ticks from
+//! compounding into each other's served ticks.
 //!
 //! The field-ownership claim installed by
 //! [`with_field_claim`](Peer::with_field_claim) runs at every transition
@@ -96,21 +116,137 @@
 //! role changes — the survivable quiesced state the demote path
 //! defines, not a dead process.
 //!
+//! The claim a promotion asserts is unconditional, so the field's
+//! arbitration resolves it on no basis at all — a rogue tool's hold and
+//! a promoted peer are indistinguishable to it, and the preemption is
+//! by design. What the claim path *does* bound is the claimant: a
+//! promotion refuses with [`SwitchError::FieldClaimFailed`] — the same
+//! named verdict the field's own refusal carries, so the disposition is
+//! legible either way — when the basis it would assert on, the
+//! [`ClaimBasis`] this run declares from its own run tick and the
+//! tracked line's last served stamp, has outgrown
+//! [`MAX_CLAIM_LEAD`] ticks since the current alignment was
+//! established. That is the one quantity pace asymmetry cannot hide: a
+//! run that survives a source outage accrues a large lead while no
+//! transfer lands, and that lead stops growing once the line serves
+//! again, while a claimant whose clock runs ahead of a *live* line keeps
+//! outpacing it transfer after transfer. The bound rides the claim,
+//! not the field: two runs' stamps are not one domain, so the field
+//! cannot translate them and the run that holds both must be the one to
+//! refuse. The refusals are scoped so no documented recovery wedges:
+//! an `Unclaimed` probe and a line that stopped serving this run both
+//! mean nothing stands to preempt, and the conditional claims — the
+//! startup grant, the orphaned promotion, the re-arm, the reclaim —
+//! are untouched, the field arbitrating those on liveness the runtime
+//! cannot see.
+//!
+//! The startup half is narrower than the promotion half: where
+//! [`with_field_startup_claim`](Peer::with_field_startup_claim)
+//! installed the conditional grant, `activate` takes the field only
+//! while no *live* attachment holds a different owner's claim — a dead
+//! owner's standing claim still preempts, the restart-as-active
+//! recovery path — and refuses the start while a live incumbent
+//! stands. A controller restarting into a pair cannot prove its
+//! resumed state is current with that incumbent's: its stale
+//! checkpoint would silently roll back commands the incumbent
+//! receipted and applied, so the takeover is refused rather than
+//! ridden out.
+//!
+//! A cleanly applying checkpoint does not prove the tracked line has a
+//! field owner: two peers can pull each other — the demoted ex-owner
+//! tracking its successor, a restarted successor tracking back — and
+//! every pull succeeds while no peer writes the field, the
+//! mutual-standby wedge a converged `tracking` report would hide. So a
+//! peer stamps each checkpoint it serves with `source_owns_field`, and
+//! a tracking apply whose serving run owns nothing moves the puller to
+//! [`StandbySync::Orphaned`] — still promotable, still following the
+//! line, but never reportable as healthy tracking — and queues one
+//! [`OrphanReport`] per transition for the journal. The wedge then
+//! gets its two responses: a peer that once owned the field probes the
+//! [`with_field_ensure`](Peer::with_field_ensure) claim re-arm — granted
+//! only while the field stands unclaimed or already names its token,
+//! never preempting a standing owner — so a released claim re-arms
+//! instead of leaving the field open, and a failover-armed peer counts
+//! the orphan apply as the heartbeat miss it is — the tracked owner
+//! did not serve — so the budget-th orphaned pull self-promotes the
+//! peer that can prove convergence.
+//!
+//! The wedge's answer needs one more thing the checkpoint layer cannot
+//! supply: whether the writer standing on the field — the pair's own
+//! arbitration names it — belongs to this line at all. On a keyed pair
+//! the monitoring surface holds the only evidence, so it diagnoses the
+//! declared endpoint ([`note_foreign_writer`](Peer::note_foreign_writer))
+//! and the peer reports the narrower
+//! [`StandbySync::Usurped`] verdict, which routes a promotion onto the
+//! unconditional claim: an unattested incumbent has no applied state a
+//! takeover could roll back, so the conditional grant's live-incumbent
+//! refusal has nothing left to protect and would otherwise strand the
+//! pair behind the very process that preempted it.
+//!
 //! Convergence alone does not prove the standby would write the field the
 //! active writes, so a tracking peer also runs the standby-divergence
 //! check of [`crate::divergence`]: each non-field-owning scan's staged
-//! field `Out` image — the writes it would have issued — is stashed, and
-//! each applied checkpoint whose tick matches that image compares it
-//! against the peer's own reads of the same points. A mismatch moves the
-//! peer to [`StandbySync::Diverged`], which promotion refuses like any
-//! non-tracking state; only a same-tick comparison that read the field
-//! and matched returns the peer to `Tracking` — an apply that ran no
-//! comparison, a comparison whose field reads failed, and a pull that
+//! field `Out` image — the writes it would have issued — is stashed
+//! tagged with the stream position it predicts, and an applied
+//! checkpoint at that position compares it against the peer's own reads
+//! of the same points — the field then holds the active's write the
+//! image describes. A mismatch moves the peer to
+//! [`StandbySync::Diverged`], which promotion refuses like any
+//! non-tracking state; only a same-position comparison that read the
+//! field and matched returns the peer to `Tracking` — an apply that ran
+//! no comparison, a comparison whose field reads failed, and a pull that
 //! produced nothing all carry no such evidence, so the verdict stands.
 //! Both transitions queue for the transition journal — the detection
 //! with its mismatches, the resolution with the compared points it
 //! stands on. A diverged peer's gate stays closed throughout — the
 //! check observes, it never writes.
+//!
+//! Beside the tracked-line verdicts the report carries the field's own
+//! arbitration state: [`with_field_probe`](Peer::with_field_probe)
+//! installs a read-only claim observation the peer runs once per scan,
+//! and [`report`](Peer::report) serves its last answer as
+//! `field_claim` — `held` while an owner stands, `unclaimed` while the
+//! field's fail-closed window is open and a `promote` is the documented
+//! remedy. The probe is the claim's observation half only: it asserts,
+//! joins, and releases nothing, so reporting `unclaimed` cannot seize
+//! the field — a peer that observes it keeps its role, its closed
+//! gate, and its sync verdict, and the observation journals nothing.
+//!
+//! Where [`with_failover`](Peer::with_failover) armed the heartbeat-miss
+//! budget the report also carries the failover gate's own evidence —
+//! `failover` serving the standing convergence proof `self_promote`
+//! reads together with the consecutive-miss count and the armed budget
+//! bounding it — so the two promotion gates' recorded divergence is
+//! legible on the wire: a mid-window report reads verdict `degraded`,
+//! proof stands, misses *k* of *N*, where a requested `promote` still
+//! refuses on the fresh-verdict rule while the armed path fires at the
+//! *N*-th miss. An unarmed peer serves no accounting — the flag alone
+//! would survive unbounded misses and bound nothing.
+//!
+//! The *conditional* probes — the orphan cycle's re-arm and the
+//! fencing-loss reclaim — observe too: a refusal means the field's
+//! arbitration found a different owner standing, and where the verdict
+//! names its token [`with_claim_observer`](Peer::with_claim_observer)
+//! queues one [`ClaimObservation`] per distinct claimant for the
+//! journal — deduplicated so a standing foreign claim records once
+//! rather than once per refused probe. A foreign `claim_writer`
+//! preempt-and-release landing between the peer's own writes is thereby
+//! attributed even when it never fenced one — the episode the
+//! probe-only observation would otherwise absorb without a trace.
+//!
+//! Every one of those queued records leaves through a single
+//! producer-owned drain: [`drain_pending`](Peer::drain_pending) takes
+//! all of them at once as a [`PeerEvents`] set whose
+//! [`PeerEvent`] variants are the peer's closed transition vocabulary.
+//! A consumer iterates the set and matches every variant, so the
+//! producer's coverage is a compile-time fact at every consumer rather
+//! than a convention each consumer re-enumerates: a transition kind
+//! the peer starts queueing is a non-exhaustive-match error at the
+//! journal and the recorderless shell alike, instead of a record that
+//! silently never reaches either. That is the named-evidence journal
+//! guarantee's build-time half — the durable record a consumer owes
+//! for everything the peer observed, closed under the peer's own
+//! additions.
 
 use crate::checkpoint::{Checkpoint, RestoreError, SUPPORTED_FORMAT_VERSIONS};
 use crate::divergence::{
@@ -120,11 +256,13 @@ use crate::executor::Executor;
 use crate::gate::WriteGate;
 use crate::revision::CarryoverError;
 use dcs_core::{
-    CarryoverReport, Command, CommandError, CommandOutcome, CommandReceipt, Divergence, PointId,
-    Role, RoleReport, Sample, StandbySync, SwitchError, TelemetrySnapshot, Tick,
+    CarryoverReport, Command, CommandError, CommandOutcome, CommandReceipt, Direction, Divergence,
+    FailoverEvidence, FieldClaim, PointId, Role, RoleReport, Sample, StandbySync, SwitchError,
+    SwitchOrigin, TelemetrySnapshot, Tick, Value,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::net::SocketAddr;
 
 /// A controller instance in a redundant pair: an [`Executor`] plus the
 /// role and write-gate state deciding whether its scans reach the field.
@@ -145,34 +283,37 @@ pub struct Peer<'d> {
     /// while the instance does not own the field; reset to
     /// `Unsynchronized` on demotion.
     sync: StandbySync,
-    /// The last applied checkpoint's tick — in the tracked stream's own
-    /// tick domain — while any transfer has succeeded; kept beside
+    /// The last applied checkpoint's source tick — the tracked stream's
+    /// own counter — while any transfer has succeeded; kept beside
     /// `sync` so `aligned_tick` still reports it across a `Degraded` or
     /// `Diverged` state.
     aligned: Option<Tick>,
-    /// The run tick's lead over the tracked stream's own tick — the
-    /// generation offset [`apply`](Self::apply) lands each checkpoint
-    /// at `tick + tick_offset`. Zero while the stream continues the
-    /// run's generation; a regressed stream — the source restarted
-    /// cold or was replaced — resets it so the apply lands at the
-    /// run's current tick rather than rewinding scans the run already
-    /// ran and journaled. Re-evaluated against the run's live lead on
-    /// every apply — see [`stream_offset`](Self::stream_offset) — so a
-    /// recovering tracked stream shrinks it to the gap that remains
-    /// and clears it at the run's own tick.
-    tick_offset: u64,
+    /// The run tick's lead over the tracked stream at the last apply —
+    /// `landed - checkpoint.tick`. The run's clock may hold above a
+    /// lagging stream while the staged image's truth stays in the
+    /// stream's domain: a scan at run tick `t` predicts the field write
+    /// at stream position `t - applied_offset`, the position the
+    /// divergence check pairs the image against — a checkpoint at
+    /// exactly that position means the field now carries the write the
+    /// staged image describes. `None` before any apply and after a
+    /// demotion — an unaligned staged image has no stream meaning.
+    applied_offset: Option<u64>,
     /// Reported-role transitions not yet consumed for journaling.
     pending_changes: Vec<RoleChange>,
-    /// The last non-field-owning scan's staged field `Out` image and its
-    /// tick — the divergence check's "would have written" evidence,
-    /// compared against the field when a checkpoint lands at that tick.
+    /// The last non-field-owning scan's staged field `Out` image and
+    /// the stream position it predicts — the divergence check's
+    /// "would have written" evidence, compared against the field when
+    /// a checkpoint at that position applies. The tag is a *stream*
+    /// position, not the scan's run tick: under a held clock the
+    /// domains differ, and only a checkpoint at the predicted position
+    /// carries the field write the image describes.
     staged: Option<(Tick, BTreeMap<PointId, Sample>)>,
     /// Divergence detections not yet consumed for journaling — one per
     /// transition into [`StandbySync::Diverged`].
     pending_divergences: Vec<DivergenceReport>,
     /// Divergence resolutions not yet consumed for journaling — one per
     /// `Diverged` → `Tracking` transition, each carrying the applied
-    /// tick and the same-tick field comparison the clear stands on.
+    /// tick and the same-position field comparison the clear stands on.
     pending_resolutions: Vec<ResolutionReport>,
     /// Consecutive checkpoint pulls that produced no applied checkpoint
     /// — the heartbeat miss count the failover budget compares against.
@@ -180,11 +321,13 @@ pub struct Peer<'d> {
     /// rejected: the active served, so it is alive.
     misses: u32,
     /// Whether the convergence proof a self-promotion relies on still
-    /// stands: the last applied verdict was `Tracking` (not diverged,
-    /// not rejected) and the miss count has not exceeded the failover
+    /// stands: the last applied verdict was promotable — `Tracking`,
+    /// `Reinitialized`, or `Orphaned`, each landed apply re-proving it —
+    /// and the run of evidence-free misses has not exceeded the failover
     /// budget. Kept distinct from `sync`, which degrades on the first
     /// miss — the documented rule is that a tracking peer may promote
-    /// itself *within* the budget.
+    /// itself *within* the budget, and while fresh applies keep landing
+    /// the proof does not go stale at all.
     converged: bool,
     /// The consecutive-miss budget arming automatic failover — `None`
     /// keeps the peer manual-promotion-only.
@@ -198,6 +341,146 @@ pub struct Peer<'d> {
     /// field up does not re-assert a stale claim when a re-attach finds
     /// the field's arbitration reset.
     release: Option<Release<'d>>,
+    /// Whether this run has owned the field — `true` from construction
+    /// on a launched `active` (its role already stamps owner
+    /// checkpoints and admits commands, so its image and receipt log
+    /// are the line's audit whether or not `activate` has run), and
+    /// set on any peer when a claim-then-lift succeeded; never
+    /// cleared: it is what distinguishes a demoted ex-owner — which
+    /// may conditionally re-arm the released claim, and whose command
+    /// audit a pulled checkpoint must agree with — from a peer that
+    /// never owned, which has no claim to re-arm and no audit of its
+    /// own to check a pulled document's commanded state against.
+    was_owner: bool,
+    /// Whether the ownership `was_owner` records ended in this run's
+    /// own voluntary demotion — set by an `origin: request` demote's
+    /// release, cleared by the fenced-write demotion's and by every
+    /// granted claim lift. While it stands the orphan cycle's
+    /// conditional re-arm stays off: the released claim — the
+    /// deliberate hand-back the field records as yielded — is the
+    /// successor's to take through the documented conditional paths
+    /// (the fencing-loss reclaim, the conditional promote, the startup
+    /// grant), and re-arming it under this run's token would pin the
+    /// field's arbitration under a member reporting standby. A
+    /// fencing-loss demotion does not yield — the preemption, not this
+    /// run's choice, ended that ownership — so its orphan re-arm keeps
+    /// covering a field the owner lost rather than handed back.
+    yielded: bool,
+    /// The claim's orphan-cycle counterpart — the conditional re-arm a
+    /// demoted ex-owner probes while the tracked line reports no field
+    /// owner: granted only where the field stands unclaimed or already
+    /// names this run's token, so a released claim re-arms without ever
+    /// preempting a standing owner.
+    ensure: Option<Ensure<'d>>,
+    /// Whether the standing orphan-ensure streak already queued its
+    /// [`ClaimRearm`] — one journal record per landing, not one per
+    /// granted probe. A refused probe — a different owner standing
+    /// between landings — clears it, as does every granted claim lift,
+    /// so the next grant after either journals fresh.
+    ensure_granted: bool,
+    /// Landed orphan-cycle re-arms not yet consumed for journaling —
+    /// one [`ClaimRearm`] per ensure grant after the standing streak's
+    /// first.
+    pending_rearms: Vec<ClaimRearm>,
+    /// The claim's startup counterpart — the conditional grant a
+    /// launched active's [`activate`](Self::activate) asserts in place
+    /// of the unconditional [`Claim`]: takes the field's write-ownership
+    /// under this run's token only where no *live* incumbent holds a
+    /// different owner's, refusing the start where one does. A
+    /// restarted controller cannot prove its resumed state is current
+    /// with that incumbent's — a stale `--state-file` would silently
+    /// roll back commands the incumbent receipted and applied — while
+    /// a claim a dead owner left standing is still preempted, the
+    /// restart-as-active recovery path.
+    startup_claim: Option<StartupClaim<'d>>,
+    /// Whether the born-active's conditional startup grant is still
+    /// unsettled — set by [`activate`](Self::activate) when the ask
+    /// produced no verdict (`Err`) and cleared when a retry lands
+    /// one: a grant promotes the run to field owner, a refusal ends
+    /// the pending state on the standby surface the stand-down
+    /// already reported and latches the verdict into
+    /// `startup_refusal` for the run's shell to dispose of — the
+    /// deferred half of [`Activation::Refused`]'s contract. While set
+    /// the peer reports
+    /// `standby`/`unsynchronized`-or-degraded and refuses every
+    /// promotion — the launched run may enter field ownership only
+    /// through the conditional grant, never through an unconditional
+    /// claim that could preempt a live incumbent it lost track of.
+    startup_pending: bool,
+    /// The deferred startup grant's latched refusal verdict — the
+    /// deferred [`Activation::Refused`]: the pending run's re-issued
+    /// ask answered `Ok(false)` inside a scan, where no activation
+    /// result reaches the run's caller to settle. `Some` once — the
+    /// ask never re-issues after a verdict — until
+    /// [`drain_startup_refusal`](Self::drain_startup_refusal) takes it
+    /// for the shell's disposition, the identical one the
+    /// activation-time answer takes. `activate`'s own refusal returns
+    /// through the [`Activation`] result instead, so the latch only
+    /// ever carries the verdict no call could have delivered.
+    startup_refusal: Option<SwitchError>,
+    /// Deferred startup-grant refusals not yet consumed for journaling
+    /// — one [`StartupRefusal`] per run: the `startup_claim_refused`
+    /// entry recording that the pending state settled under a verdict
+    /// rather than standing forever. [`activate`](Self::activate)'s
+    /// own `Ok(false)` queues the same record, so the durable trace
+    /// names the verdict whether it answered at activation or at the
+    /// pending run's first answered contact.
+    pending_startup_refusals: Vec<StartupRefusal>,
+    /// The claim's orphan-promotion counterpart — the conditional grant
+    /// a [`promote`](Self::promote) or [`self_promote`](Self::self_promote)
+    /// from [`StandbySync::Orphaned`] runs in place of the
+    /// unconditional [`Claim`]. An orphaned run cannot tell at the
+    /// checkpoint layer whether the tracked line's missing field owner
+    /// is dead — the mutual-standby wedge the orphan promote exists to
+    /// break — or a live incumbent the run lost track of — the stale
+    /// island whose stale image would silently roll the incumbent back.
+    /// The field's own arbitration answers which: granted while no
+    /// live *controller* attachment holds a different owner's unyielded
+    /// claim — `Ok(true)` — so a dead, deliberately yielded, or
+    /// tool-held claim still preempts, and refused `Ok(false)` while a
+    /// live controller incumbent stands. `Err` where the field could
+    /// not be asked.
+    orphan_claim: Option<OrphanClaim<'d>>,
+    /// The monitor endpoint the monitoring surface diagnosed as the
+    /// field's standing writer while that writer could not prove this
+    /// line's pair key — the attestation the peer itself cannot
+    /// produce, since the key never leaves the monitoring surface's
+    /// own pulls. `Some` renders the orphaned verdict as
+    /// [`StandbySync::Usurped`] instead of
+    /// [`StandbySync::Orphaned`], which is what routes a promotion off
+    /// the conditional orphan grant and onto the unconditional claim:
+    /// an incumbent that cannot prove the line has no applied state a
+    /// takeover of the field could roll back, so the live-incumbent
+    /// refusal has nothing left to protect and only strands the pair.
+    /// Recorded from the field's own arbitration
+    /// ([`claimed_monitor`](Self::claimed_monitor)), re-earned per
+    /// bounded verification window by
+    /// [`note_foreign_writer`](Self::note_foreign_writer) rather than
+    /// latched, and cleared by every granted claim — this run holding
+    /// the field leaves no foreign writer to have preempted.
+    foreign_writer: Option<SocketAddr>,
+    /// Orphan detections not yet consumed for journaling — one
+    /// [`OrphanReport`] per transition into the tracked line's
+    /// ownerless verdicts, [`StandbySync::Orphaned`] or
+    /// [`StandbySync::Usurped`].
+    pending_orphans: Vec<OrphanReport>,
+    /// Granted preemptions of a diagnosed foreign writer's standing
+    /// claim not yet consumed for journaling — one
+    /// [`ForeignClaimPreempt`] each, the audit counterpart of the
+    /// [`FencingLoss`] naming the run that lost the claim.
+    pending_foreign_claims: Vec<ForeignClaimPreempt>,
+    /// Refused armed self-promotions not yet consumed for journaling —
+    /// one [`PromotionRefusal`] per distinct refusal cause a continuous
+    /// refused streak produces, so a gate left armed and retrying does
+    /// not journal the attempt once per scan.
+    pending_refusals: Vec<PromotionRefusal>,
+    /// The standing refused streak's last journaled cause — the dedup
+    /// `pending_refusals` reads: a refused attempt naming the same
+    /// error queues nothing further, and any tracking outcome that is
+    /// not a refused self-promotion — a landed apply, a plain miss,
+    /// the granted promotion — ends the streak, so the next refusal
+    /// episode journals fresh.
+    open_refusal: Option<SwitchError>,
     /// Whether this peer rolls a revised model into production — armed
     /// by [`with_revision`](Peer::with_revision): a pulled checkpoint
     /// whose fingerprint differs from this run's crosses the model
@@ -208,6 +491,10 @@ pub struct Peer<'d> {
     /// transition into [`StandbySync::Reinitialized`], each carrying the
     /// crossing's [`CarryoverReport`].
     pending_reinits: Vec<CarryoverReport>,
+    /// The attribution [`change`](Self::change) stamps onto every queued
+    /// [`RoleChange`] — set by the initiating switch request so the
+    /// request and settle transitions of one switchover journal alike.
+    attribution: SwitchAttribution,
     /// Tracked-source restarts not yet consumed for journaling — one
     /// [`SourceRestart`] per regressed-stream adoption that crossed a
     /// generation boundary.
@@ -228,7 +515,7 @@ pub struct Peer<'d> {
     /// already settled `Rejected` carrying [`CommandError::Superseded`]
     /// and queued for the journal. Abandoned means adjudicated: the
     /// adopted window's submission high-water passed the receipt's
-    /// index without carrying the command, so the line demonstrably
+    /// index without carrying the submission, so the line demonstrably
     /// moved on without it — a stale checkpoint that never observed
     /// the submission drops nothing, `Executor::adopt_receipts`
     /// restoring the unreached tail suspended instead. A genuinely
@@ -249,6 +536,171 @@ pub struct Peer<'d> {
     /// Still-`Accepted` entries the re-mint settled `superseded` are
     /// news instead and route through `pending_superseded`.
     pending_rehomed: Vec<(u64, u64, CommandReceipt)>,
+    /// Point-state changes a checkpoint adoption made that no settled
+    /// receipt in the merged log accounts for — force-set changes and
+    /// held-value reverts alike — each queued as a [`CommandReceipt`]
+    /// whose actor names the adopting source, for the journal. A
+    /// receipted change the adopted log carries — the force pair's or
+    /// the write's own durable audit — journals through the ordinary
+    /// settle path instead.
+    pending_adoption_receipts: Vec<CommandReceipt>,
+    /// The claim's observational counterpart — the read-only probe the
+    /// peer runs once per scan to learn the field's write-ownership
+    /// state without disturbing it, installed by
+    /// [`with_field_probe`](Self::with_field_probe).
+    probe: Option<Probe<'d>>,
+    /// The claimant-attribution lookup the fencing path asks at the
+    /// scan whose field write the field fenced — the owner token the
+    /// field's arbitration named when it refused, carried on the
+    /// queued [`FencingLoss`] so the journaled `field_claim_lost`
+    /// attributes the preemption. Installed by
+    /// [`with_field_claimant`](Self::with_field_claimant); a peer built
+    /// without it records each loss unattributed.
+    claimant: Option<Claimant<'d>>,
+    /// The observed-claimant lookup the conditional grant probes consult
+    /// on a refusal — the standing-owner tokens the field's arbitration
+    /// named — so a foreign `claim_writer` episode the peer only ever
+    /// met through its probes journals one attributed
+    /// [`ClaimObservation`] rather than passing silently. Installed by
+    /// [`with_claim_observer`](Self::with_claim_observer); a peer built
+    /// without it observes nothing.
+    observer: Option<Observer<'d>>,
+    /// The field-arbitrated successor lookup the monitor's
+    /// tracking-source resolution consults after a demotion — the
+    /// monitor endpoint the field's standing claim declared, as this
+    /// run's own fencing verdicts recorded it. Installed by
+    /// [`with_claimed_monitor`](Self::with_claimed_monitor); a peer
+    /// built without it reports no field-arbitrated successor.
+    claimed_monitor: Option<ClaimedMonitor<'d>>,
+    /// The claimant tokens this ownership epoch has already journaled —
+    /// seeded by the fenced-write verdict's claimant (the `field_claim_lost`
+    /// entry already attributes that episode) and grown by each queued
+    /// [`ClaimObservation`]: the dedup that keeps a standing foreign
+    /// claim to one entry rather than one per refused probe. Cleared by
+    /// every granted claim lift — a claimant observed after this run
+    /// retook the field is a new episode.
+    observed_claimants: BTreeSet<u64>,
+    /// The point the standing fencing-loss mark was recorded on — the
+    /// claim domain the reclaim probes — so an observation's journal
+    /// `point` attributes the refusal through the point whose write the
+    /// field fenced rather than an arbitrary one.
+    fencing_point: Option<PointId>,
+    /// Foreign-claim observations not yet consumed for journaling — one
+    /// [`ClaimObservation`] per distinct claimant a refused conditional
+    /// grant probe named.
+    pending_observations: Vec<ClaimObservation>,
+    /// The claim's fencing-loss counterpart — the *bound* conditional
+    /// re-grant a fencing-demoted ex-owner probes each scan while its
+    /// loss mark stands, or while an orphaned tracked line reports the
+    /// field ownerless over an ownership the run did not hand back,
+    /// installed by
+    /// [`with_field_reclaim`](Self::with_field_reclaim). Granted where
+    /// the field stands unclaimed, already names this run's token, or
+    /// stands under a different owner's holderless claim — the
+    /// dead-owner or orphan-placeholder shape, whose refusal would
+    /// wedge the pair the claim was raised to fence — so the reclaim
+    /// never preempts a live attachment: a still-held rogue claim
+    /// keeps the field until it releases. The grant is bound, unlike
+    /// the orphan cycle's unbound probe, because the peer's gate lifts
+    /// on it: the run's attachments must stand in the claim's holders
+    /// for its writes to pass the arbitration it just re-took. The ask
+    /// issues only where the field just probed `unclaimed` — nothing
+    /// stands to preempt — or the run's standing convergence proof
+    /// holds, so an unconverged ex-owner never preempts a merely
+    /// transport-frozen incumbent's standing claim.
+    reclaim: Option<Reclaim<'d>>,
+    /// The field's write-ownership claim as the last probe observed it
+    /// — what [`report`](Self::report) serves as `field_claim`. `None`
+    /// until a probe answers (or when none is installed): "no claim
+    /// question was answered" stays distinct from
+    /// [`FieldClaim::Held`] — an uninstrumented driver surface must
+    /// never read as "an owner stands".
+    field_claim: Option<FieldClaim>,
+    /// The declared lead the current alignment was established at — this
+    /// run's own run tick measured from the source tick of the
+    /// checkpoint that first landed under it, in the same signed form
+    /// [`claim_basis`](Self::claim_basis) reports. The baseline the
+    /// claim-bound's growth reads against, cleared wherever the
+    /// alignment itself is (`applied_offset`), so a demotion or a
+    /// tracking reset re-bases it on the next transfer.
+    claim_lead_base: Option<i64>,
+    /// Whether the most recent scan's own claim probe answered
+    /// `unclaimed` and no grant that scan landed changed the posture
+    /// since — the fresh "nothing stands to preempt" observation the
+    /// claim-bound's escape reads. An absent probe hook, an unanswered
+    /// probe, a posture a grant flipped, and a scan that never ran all
+    /// read `false`, fail-closed like the served report's
+    /// absent-vs-unclaimed distinction.
+    unclaimed_observed: bool,
+}
+
+/// The bound over the claim basis a promotion declares: the number of
+/// run ticks this run's own clock may outpace the tracked line whose
+/// field its claim would take, measured from the lead the current
+/// alignment was established at, before the claim is refused by name.
+///
+/// Sized at 64 ticks — the window the QA lane's
+/// `2490_claim_skew_bound` stages a four-times-paced claimant against.
+/// A pair at one cadence outpaces nothing (its outpace is the
+/// pull-period jitter of a scan or two), while a claimant whose clock
+/// runs a measurable fraction ahead of the line crosses the window in
+/// seconds and is refused: the field's arbitration cannot translate
+/// one run's stamp into another's, so a claim resolved on such a basis
+/// is resolved on a pair `CONTEXT.md`'s same-domain comparability rule
+/// forbids ordering.
+pub const MAX_CLAIM_LEAD: i64 = 64;
+
+/// The basis a peer declares alongside the write-ownership claim a
+/// promotion asserts: what the claimant's own run tick says about its
+/// standing with the tracked line whose field the claim would take.
+///
+/// The stamps are *measured*, never resolved: `run` is this run's own
+/// attribution domain and `source` is the tracked stream's counter,
+/// and no site in the platform subtracts one from the other to decide
+/// anything except the bound below. `growth` is the difference the
+/// bound reads, and it is the one quantity pace asymmetry cannot hide:
+/// a run that survives a source outage accrues a large `lead` while no
+/// transfer lands — an honest accrued lead the claim path honors — but
+/// that lead stops growing the moment the line serves again, whereas a
+/// claimant whose clock runs ahead of a *live* line keeps outpacing it
+/// transfer after transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaimBasis {
+    /// This run's own run tick — the claimant's attribution domain.
+    pub run: Tick,
+    /// The tracked line's last served stamp, in the source-tick domain:
+    /// the source tick of the checkpoint this run last applied.
+    pub source: Tick,
+    /// The declared lead — this run's own tick measured from that
+    /// stamp. Negative while the run trails the line it tracks.
+    pub lead: i64,
+    /// The lead the current alignment was established at, in the same
+    /// signed form as [`lead`](Self::lead).
+    pub baseline: i64,
+    /// How far the lead has outgrown its baseline since the alignment
+    /// was established — the quantity [`MAX_CLAIM_LEAD`] bounds.
+    pub growth: i64,
+}
+
+impl ClaimBasis {
+    /// Whether the declared basis sits inside [`MAX_CLAIM_LEAD`] — the
+    /// condition a claim against a standing field claim may be
+    /// asserted on.
+    pub fn within_bound(&self) -> bool {
+        self.growth <= MAX_CLAIM_LEAD
+    }
+}
+
+impl fmt::Display for ClaimBasis {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "run tick {} against the tracked line's stamp {} — a lead of {} \
+             ticks, {} of them outgrown since the alignment was established \
+             at {} (bound {MAX_CLAIM_LEAD})",
+            self.run.0, self.source.0, self.lead, self.growth, self.baseline
+        )
+    }
 }
 
 /// The field-side write-ownership claim a promotion runs before the
@@ -276,9 +728,165 @@ impl fmt::Debug for Release<'_> {
     }
 }
 
+/// The conditional counterpart of [`Claim`]: the orphan-cycle probe a
+/// demoted ex-owner runs while the tracked line reports no field
+/// owner — [`StandbySync::Orphaned`]. It re-arms the field's
+/// write-claim under this run's recorded token only where the field
+/// stands unclaimed or already names that token — `Ok(true)` —
+/// answering `Ok(false)` where a different owner stands and `Err`
+/// where the field could not be asked, so a released claim re-arms
+/// rather than leaving the field open to a foreign grab while no
+/// probe ever preempts a standing owner.
+struct Ensure<'d>(Box<dyn Fn() -> Result<bool, String> + Send + Sync + 'd>);
+
+impl fmt::Debug for Ensure<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("field ensure")
+    }
+}
+
+/// The conditional counterpart of [`Claim`] an orphaned
+/// [`promote`](Peer::promote)/[`self_promote`](Peer::self_promote)
+/// runs: takes the field's write-ownership under this run's token only
+/// where no *live* attachment holds a different owner's unyielded
+/// claim — `Ok(true)` — answering `Ok(false)` where a live incumbent
+/// stands and `Err` where the field could not be asked. A dead owner's
+/// standing claim and a claim its owner deliberately yielded still
+/// preempt — the wedge escapes the orphan promote exists for — while
+/// a live incumbent's claim refuses it: the orphaned run cannot prove
+/// its tracked line is the field's, and preempting the real owner
+/// would silently roll back the state and outputs it applied.
+struct OrphanClaim<'d>(Box<dyn Fn() -> Result<bool, String> + Send + Sync + 'd>);
+
+impl fmt::Debug for OrphanClaim<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("field orphan claim")
+    }
+}
+
+/// The conditional counterpart of [`Claim`] a launched active's
+/// [`activate`](Peer::activate) runs at startup: takes the field's
+/// write-ownership under this run's token only where no *live*
+/// attachment holds a different owner's claim — `Ok(true)` — answering
+/// `Ok(false)` where a live incumbent stands and `Err` where the field
+/// could not be asked. A restarted controller cannot prove its resumed
+/// state is current with a live incumbent's — preempting it would
+/// silently roll back commands the incumbent receipted and applied —
+/// so the start refuses rather than taking the field; a claim a dead
+/// owner left standing is still preempted, the restart-as-active
+/// recovery path. A peer built without the hook claims unconditionally,
+/// the pre-hook contract.
+struct StartupClaim<'d>(Box<dyn Fn() -> Result<bool, String> + Send + Sync + 'd>);
+
+impl fmt::Debug for StartupClaim<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("field startup claim")
+    }
+}
+
+/// The read-only half of [`Claim`]: the claim-state observation the
+/// peer runs once per scan — the verdict a mutation from this run's
+/// attachments would meet, asked without mutating. `Ok` carries the
+/// field's answer — [`FieldClaim::Held`] while an owner stands (this
+/// run's own hold or a standing owner's, which the report need not
+/// distinguish), [`FieldClaim::Unclaimed`] while no claim stands —
+/// and `Err` reports the field could not be asked, which is no
+/// observation: the last answer stands. The probe asserts, joins, and
+/// releases nothing — an observation cannot seize the field it
+/// reports.
+struct Probe<'d>(Box<dyn Fn() -> Result<FieldClaim, String> + Send + Sync + 'd>);
+
+impl fmt::Debug for Probe<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("field claim probe")
+    }
+}
+
+/// The claimant-attribution counterpart of [`Probe`]: asked at the
+/// scan whose field write the field fenced, it answers the owner token
+/// the field's arbitration named when it refused — the claimant a
+/// [`FencingLoss`] carries so the journaled `field_claim_lost`
+/// attributes the preemption. `None` answers mean the verdict named
+/// no claimant — a driver surface whose fencing answer carries no
+/// owner identity — and the loss records unattributed rather than
+/// guessing.
+struct Claimant<'d>(Box<dyn Fn(PointId) -> Option<u64> + Send + Sync + 'd>);
+
+impl fmt::Debug for Claimant<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("fencing claimant")
+    }
+}
+
+/// The fencing-loss counterpart of [`Ensure`]: the *bound* conditional
+/// re-grant a fencing-demoted ex-owner probes each scan while its loss
+/// mark stands — the wedge escape a released preemption owes the pair.
+/// Granted where the field stands unclaimed, already names this run's
+/// token, or stands under a different owner's *holderless* claim —
+/// `Ok(true)` — answering `Ok(false)` only while a different owner's
+/// claim has live holders and `Err` where the field could not be
+/// asked, so the reclaim never preempts a live attachment: a live
+/// incumbent — even a rogue's still-held claim — keeps the field until
+/// it releases. A different owner's holderless claim protects no one —
+/// the dead-owner shape, and the orphan placeholder a sibling
+/// ex-owner's unbound probe raises — so the re-grant preempts it
+/// rather than wedging the pair the claim was raised to fence. The
+/// grant is bound, unlike the orphan cycle's unbound probe, because
+/// the peer's gate lifts on it: the run's attachments must stand in
+/// the claim's holders for its writes to pass the arbitration it just
+/// re-took. The bound ask may preempt a standing claim, so the peer
+/// issues it only where its own fresh probe answered `unclaimed` or
+/// the standing convergence proof `self_promote` reads still stands —
+/// an unconverged ex-owner's probe never preempts a merely
+/// transport-frozen incumbent's epoch.
+struct Reclaim<'d>(Box<dyn Fn() -> Result<bool, String> + Send + Sync + 'd>);
+
+impl fmt::Debug for Reclaim<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("field reclaim")
+    }
+}
+
+/// The observed-claimant counterpart of [`Ensure`]/[`Reclaim`]: asked
+/// only after one of those conditional grant probes answers
+/// `Ok(false)` — a refusal means a different owner's claim stands — it
+/// answers the owner token(s) the refusing verdicts named, so the
+/// journaled `field_claim_observed` attributes the foreign claim the
+/// peer observed rather than recording nothing of the episode. An
+/// empty answer means no refusal carried an owner identity — the
+/// episode then journals unattributed nowhere rather than guessing.
+struct Observer<'d>(Box<dyn Fn() -> Vec<u64> + Send + Sync + 'd>);
+
+impl fmt::Debug for Observer<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("claim observer")
+    }
+}
+
+/// The field-arbitrated successor lookup the monitor's tracking-source
+/// resolution consults: answers the monitor endpoint the field's
+/// standing write-ownership claim declared — recorded from the driver
+/// surface's own fencing verdicts, so the address is the claim
+/// arbitration's word for where the successor serves, not a peer's
+/// unprovable announcement. `None` answers mean no verdict has named
+/// one — the field's claim declared no monitor, or the driver surface
+/// reports none — and the tracking path resolves as if the lookup did
+/// not exist.
+struct ClaimedMonitor<'d>(Box<dyn Fn() -> Option<SocketAddr> + Send + Sync + 'd>);
+
+impl fmt::Debug for ClaimedMonitor<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("claimed monitor")
+    }
+}
+
 /// One reported-role transition, queued for the transition journal: the
-/// tick it is attributed to and the reported roles before and after.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// tick it is attributed to, the reported roles before and after, and
+/// the switch's attribution — `origin` distinguishing a requested
+/// switch from the peer's own failover promotion, `actor` the declared
+/// identity a request carried (`None` for an unattributed request and
+/// always for a failover origin).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoleChange {
     /// The run tick the transition is attributed to: the serving scan's
     /// tick for a settle, the run's current tick for a request.
@@ -287,6 +895,23 @@ pub struct RoleChange {
     pub from: Role,
     /// The newly reported role.
     pub to: Role,
+    /// What initiated the switch this transition belongs to.
+    pub origin: SwitchOrigin,
+    /// The declared actor a requested switch carried.
+    pub actor: Option<String>,
+}
+
+/// The attribution stamped onto every [`RoleChange`] a switch queues:
+/// set by the initiating `promote_as`/`demote_as`/`self_promote` and
+/// carried onto both the request and the settle transitions, so a
+/// failover's settle entry reads `failover` too rather than as an
+/// unattributed request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SwitchAttribution {
+    /// What initiated the switch.
+    origin: SwitchOrigin,
+    /// The declared actor a requested switch carried.
+    actor: Option<String>,
 }
 
 /// The field's single-writer claim was preempted while this peer owned
@@ -301,14 +926,135 @@ pub struct FencingLoss {
     pub tick: Tick,
     /// The point whose write the field fenced.
     pub point: PointId,
+    /// The owner token the preempting claim was taken under — the
+    /// claimant the field's own arbitration named in its fencing
+    /// verdict, recorded so the `field_claim_lost` journal entry
+    /// attributes the takeover rather than an anonymous "another".
+    /// `None` where no verdict named a claimant: a driver surface
+    /// whose fencing answer carries no owner identity, or a peer built
+    /// without the claimant hook.
+    pub claimant: Option<u64>,
+}
+
+/// A conditional claim probe — the orphan cycle's re-arm or the bound
+/// fencing-loss reclaim — was refused while a foreign owner stands:
+/// the observed-claimant record carrying the token the field's
+/// arbitration named, so a `claim_writer` preempt-and-release episode
+/// the peer only ever met through its probes is not silent in the
+/// audit. One report queues per distinct claimant the run observes —
+/// a standing foreign claim journals once, not once per refused probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaimObservation {
+    /// The run tick the refused probe was observed at.
+    pub tick: Tick,
+    /// The field point the observation attributes through — the point
+    /// the fencing-loss mark was recorded on where one stands, else a
+    /// field-served point of this run's map.
+    pub point: PointId,
+    /// The standing claim's owner token the refusal named.
+    pub claimant: u64,
+}
+
+/// A tracking peer's applied checkpoint reported its serving run owns
+/// no field writes — the `source_owns_field` stamp a field-owning
+/// source sets `true` — meaning the tracked line has no field owner:
+/// the mutual-standby wedge, where every peer's pull applies cleanly
+/// and reports converged while the field stands unwritten. One report
+/// queues per transition into [`StandbySync::Orphaned`], like
+/// [`DivergenceReport`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OrphanReport {
+    /// The run tick the detection is attributed to — the tick the
+    /// orphaned checkpoint's state landed at.
+    pub tick: Tick,
+    /// The applied checkpoint's source tick — where the tracked line
+    /// stood when the observation landed.
+    pub aligned: Tick,
+}
+
+/// A promotion took the field's write-ownership claim away from a live
+/// standing writer this run had diagnosed as unable to prove this
+/// line's pair key — the unconditional claim the
+/// [`StandbySync::Usurped`] verdict arms, queued on the grant that
+/// took it. The [`FencingLoss`] mirror image: that record names the run
+/// that lost the claim, this one names the endpoint it was taken from,
+/// so the journal says which process held the field across the whole
+/// episode. One report queues per granted claim taken this way — the
+/// takeover is a scan boundary, so a run that lands it once journals
+/// once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForeignClaimPreempt {
+    /// The run tick the promotion's claim ran at.
+    pub tick: Tick,
+    /// The monitor endpoint the field's arbitration named for the
+    /// standing writer whose claim this run's claim preempted.
+    pub writer: SocketAddr,
+}
+
+/// An orphan-cycle ensure probe landed — the field's write-ownership
+/// claim stands under this run's recorded token again, re-armed while
+/// the tracked line reported no field owner. The journal's durable
+/// record of who re-took the claim: the re-arm the orphan transition
+/// alone cannot attribute. One report queues per landing — a granted
+/// probe confirming the standing re-arm queues nothing further until a
+/// refusal ends the streak — and the report names the field point the
+/// claim domain arbitrates through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaimRearm {
+    /// The run tick the granted probe landed at.
+    pub tick: Tick,
+    /// The field point the record attributes through — the point the
+    /// standing fencing-loss mark was recorded on where one stands,
+    /// else a field-served point of this run's map.
+    pub point: PointId,
+}
+
+/// An armed peer's failover self-promotion at the miss boundary was
+/// refused — the durable record of the attempt the gate made: the run
+/// tick it ran at, the consecutive-miss count it fired on, and the
+/// named refusal. One report queues per distinct refusal cause a
+/// continuous refused streak produces — the gate stays armed and keeps
+/// retrying while the convergence proof stands, so a standing refusal
+/// journals once rather than once per scan — and the next outcome that
+/// is not a refused self-promotion ends the streak.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PromotionRefusal {
+    /// The run tick the refused attempt is attributed to.
+    pub tick: Tick,
+    /// The consecutive-miss count the armed gate fired at — at or past
+    /// the armed budget.
+    pub misses: u32,
+    /// The named refusal the self-promotion returned.
+    pub error: SwitchError,
+}
+
+/// The pending born-active's deferred conditional grant met the
+/// field's refusal — a live incumbent's claim answering the re-issued
+/// ask at the first contact the field took — the deferred half of the
+/// born-active contract's [`Activation::Refused`] verdict. One report
+/// queues per run, attributed to the tick the verdict landed on: the
+/// durable record that the pending state's settle *happened*, beside
+/// the [`ClaimObservation`] attributing *who* refused it. The run's
+/// disposition is the shell's — the sibling `startup_refusal` latch
+/// carries the same verdict to the run loop that settles it: the
+/// declared pair's standby rejoin, or the pairless run's exit the
+/// activation-time answer already takes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StartupRefusal {
+    /// The run tick the refused ask answered at.
+    pub tick: Tick,
+    /// The named refusal — the same
+    /// [`SwitchError::FieldClaimFailed`] verdict [`Activation::Refused`]
+    /// carries at activation.
+    pub error: SwitchError,
 }
 
 /// The tracked checkpoint stream regressed across a generation
-/// boundary — the tick it served fell below the run's last alignment
-/// (or, before any alignment stood, below the run's own tick) while
-/// naming a generation the run's own stream does not carry: the
+/// boundary — the source tick it served fell below the run's last
+/// alignment (or, before any alignment stood, below the run's own tick)
+/// while naming a generation the run's own stream does not carry: the
 /// signature of a cold-restarted or replaced source beginning a new
-/// tick generation. The run adopted the checkpoint's state without
+/// source-tick generation. The run adopted the checkpoint's state without
 /// rewinding its own tick — the resync this report names — so the scan
 /// history stays newest-last and the journal's attribution monotonic.
 /// A regression on the run's own generation is the peer's tracking
@@ -321,14 +1067,410 @@ pub struct SourceRestart {
     /// regressed checkpoint's state landed at, which the run's clock
     /// never rewound across.
     pub tick: Tick,
-    /// The last applied checkpoint's tick before the regression —
+    /// The last applied checkpoint's source tick before the regression —
     /// where the previous alignment stood; `None` when the run had
     /// none (a demoted peer's first pull), the regression then being
     /// measured against the run's own tick.
     pub was_aligned: Option<Tick>,
-    /// The regressed checkpoint's own tick — where the new
+    /// The regressed checkpoint's source tick — where the new
     /// generation's stream resumed.
     pub resumed_at: Tick,
+}
+
+/// One queued transition record, drained from a [`Peer`] by
+/// [`drain_pending`](Peer::drain_pending): the producer's own account of
+/// what changed since the consumer's last drain.
+///
+/// The enum is the drain's closed vocabulary. A consumer iterates the
+/// drained [`PeerEvents`] and matches every variant, so a transition
+/// kind the producer queues and a consumer does not name is a
+/// non-exhaustive-match error at that consumer rather than a record
+/// that silently never reaches the journal — the missed-drain class a
+/// hand-enumerated list of per-kind drain calls cannot catch, and the
+/// one the named-evidence journal guarantee
+/// ([`WW-FND-004`](docs/requirements/water-wastewater.md)) turns from a
+/// runtime gap into a build failure.
+///
+/// The variants are declared, and
+/// [`PeerEvents::into_events`](PeerEvents::into_events) yields them, in
+/// the drain's own category order: the applied-checkpoint evidence
+/// first (a divergence, its resolution, a model-boundary crossing, an
+/// orphan detection), then the claim-domain evidence the peer
+/// gathered while responding (a fenced-out claim, a landed re-arm, an
+/// observed foreign owner, a preempted foreign writer, a refused
+/// startup grant), then the stream
+/// and switch evidence (a regressed source, a refused promotion), then
+/// the reported transition itself, then the command settlements that
+/// transition carried.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PeerEvent {
+    /// A staged field `Out` image the applied checkpoint's tick
+    /// contradicts — the divergence detection, carrying the run tick
+    /// the apply landed on.
+    Divergence(DivergenceReport),
+    /// A `Diverged` → `Tracking` transition — the resolution, carrying
+    /// the applied tick and the same-position comparison it stands on.
+    Resolution(ResolutionReport),
+    /// A pulled checkpoint crossed the rolling model boundary — the
+    /// crossing's carryover report.
+    Reinitialization(CarryoverReport),
+    /// The tracked line reported no field owner — the orphan detection,
+    /// carrying the tick the orphaned apply landed at.
+    Orphan(OrphanReport),
+    /// The field's single-writer claim was preempted while this peer
+    /// owned the field — the loss, with the claimant the field's own
+    /// arbitration named where it named one.
+    FencingLoss(FencingLoss),
+    /// The orphan cycle's conditional re-arm landed — who re-took the
+    /// claim the orphan detection alone cannot attribute.
+    ClaimRearm(ClaimRearm),
+    /// A refused conditional claim probe met a standing foreign owner —
+    /// the observed-claimant record, one per distinct claimant.
+    ClaimObservation(ClaimObservation),
+    /// A promotion took the field's claim from a live writer this run
+    /// had diagnosed as unable to prove this line's pair key — the
+    /// audit counterpart of [`FencingLoss`](PeerEvent::FencingLoss),
+    /// naming the endpoint the claim was taken from.
+    ForeignClaimPreempt(ForeignClaimPreempt),
+    /// The pending born-active's deferred startup grant met the
+    /// field's refusal — the durable record that the pending state's
+    /// settle happened. The run's disposition is the shell's, carried
+    /// by the separate [`startup_refusal`](Peer::startup_refusal) latch.
+    StartupRefusal(StartupRefusal),
+    /// The tracked checkpoint stream regressed across a generation
+    /// boundary — the resync this record names.
+    SourceRestart(SourceRestart),
+    /// An armed failover self-promotion was refused at the miss
+    /// boundary — one per distinct refusal cause a refused streak
+    /// produces.
+    PromotionRefusal(PromotionRefusal),
+    /// A reported-role transition — the tick it is attributed to, the
+    /// roles before and after, and the switch's attribution.
+    RoleChange(RoleChange),
+    /// A pending command a checkpoint adoption abandoned, settled
+    /// `Rejected` carrying [`CommandError::Superseded`] — paired with
+    /// its absolute submission index, the identity the settle journal's
+    /// dedup keys on.
+    SupersededCommand {
+        /// The abandoned admission's absolute submission index — the
+        /// settle's dedup identity, so a repeat drain of the same
+        /// adjudication never re-journals it.
+        index: u64,
+        /// The terminal receipt the adoption rewrote.
+        receipt: CommandReceipt,
+    },
+    /// A settled receipt a checkpoint adoption displaced by
+    /// submission-index collision and re-minted past the adopted
+    /// window's high-water — the submission-index collision's re-home,
+    /// carrying the index the receipt's verdict journaled under and
+    /// the index the served window now carries it at. Nothing re-emits
+    /// for it: the verdict is unchanged, so the consumer only re-keys
+    /// the settle it already recorded.
+    RehomedReceipt {
+        /// The absolute submission index the receipt's settle was
+        /// journaled under.
+        prior: u64,
+        /// The absolute submission index the served window now carries
+        /// the receipt at.
+        index: u64,
+        /// The receipt as re-minted — command, actor, and terminal
+        /// verdict unchanged.
+        receipt: CommandReceipt,
+    },
+    /// A point-state change a checkpoint adoption made that no settled
+    /// receipt in the merged log accounts for — a force-set change or a
+    /// held-value revert — `Applied` at the landing tick with `actor`
+    /// naming the adopting checkpoint.
+    AdoptionReceipt(CommandReceipt),
+}
+
+/// Everything a [`Peer`] queued for its consumer since the last
+/// [`drain_pending`](Peer::drain_pending) — one drained set covering
+/// every pending transition queue.
+///
+/// Consumers iterate the whole set (`for event in peer.drain_pending()`)
+/// and match every [`PeerEvent`] variant, which is what makes the
+/// producer's coverage a compile-time fact at every consumer; the
+/// per-kind accessors are for the readers that want one category out of
+/// a drained set — a test asserting on the reported transitions alone —
+/// and read the set without consuming it, so reading two kinds of one
+/// drain cannot silently drop the other.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PeerEvents {
+    divergences: Vec<DivergenceReport>,
+    resolutions: Vec<ResolutionReport>,
+    reinits: Vec<CarryoverReport>,
+    orphans: Vec<OrphanReport>,
+    fencing: Vec<FencingLoss>,
+    rearms: Vec<ClaimRearm>,
+    observations: Vec<ClaimObservation>,
+    foreign_claims: Vec<ForeignClaimPreempt>,
+    startup_refusals: Vec<StartupRefusal>,
+    restarts: Vec<SourceRestart>,
+    promotion_refusals: Vec<PromotionRefusal>,
+    changes: Vec<RoleChange>,
+    superseded: Vec<(u64, CommandReceipt)>,
+    rehomed: Vec<(u64, u64, CommandReceipt)>,
+    adoption_receipts: Vec<CommandReceipt>,
+}
+
+impl PeerEvents {
+    /// Every drained record, one per kind the producer queued, in the
+    /// drain's category order — the sequence a consumer iterating the
+    /// set hands to its recorder or logger.
+    pub fn into_events(self) -> Vec<PeerEvent> {
+        let PeerEvents {
+            divergences,
+            resolutions,
+            reinits,
+            orphans,
+            fencing,
+            rearms,
+            observations,
+            foreign_claims,
+            startup_refusals,
+            restarts,
+            promotion_refusals,
+            changes,
+            superseded,
+            rehomed,
+            adoption_receipts,
+        } = self;
+        let mut events = Vec::with_capacity(
+            divergences.len()
+                + resolutions.len()
+                + reinits.len()
+                + orphans.len()
+                + fencing.len()
+                + rearms.len()
+                + observations.len()
+                + foreign_claims.len()
+                + startup_refusals.len()
+                + restarts.len()
+                + promotion_refusals.len()
+                + changes.len()
+                + superseded.len()
+                + rehomed.len()
+                + adoption_receipts.len(),
+        );
+        events.extend(divergences.into_iter().map(PeerEvent::Divergence));
+        events.extend(resolutions.into_iter().map(PeerEvent::Resolution));
+        events.extend(reinits.into_iter().map(PeerEvent::Reinitialization));
+        events.extend(orphans.into_iter().map(PeerEvent::Orphan));
+        events.extend(fencing.into_iter().map(PeerEvent::FencingLoss));
+        events.extend(rearms.into_iter().map(PeerEvent::ClaimRearm));
+        events.extend(observations.into_iter().map(PeerEvent::ClaimObservation));
+        events.extend(
+            foreign_claims
+                .into_iter()
+                .map(PeerEvent::ForeignClaimPreempt),
+        );
+        events.extend(startup_refusals.into_iter().map(PeerEvent::StartupRefusal));
+        events.extend(restarts.into_iter().map(PeerEvent::SourceRestart));
+        events.extend(
+            promotion_refusals
+                .into_iter()
+                .map(PeerEvent::PromotionRefusal),
+        );
+        events.extend(changes.into_iter().map(PeerEvent::RoleChange));
+        events.extend(
+            superseded
+                .into_iter()
+                .map(|(index, receipt)| PeerEvent::SupersededCommand { index, receipt }),
+        );
+        events.extend(rehomed.into_iter().map(|(prior, index, receipt)| {
+            PeerEvent::RehomedReceipt {
+                prior,
+                index,
+                receipt,
+            }
+        }));
+        events.extend(
+            adoption_receipts
+                .into_iter()
+                .map(PeerEvent::AdoptionReceipt),
+        );
+        events
+    }
+
+    /// How many records the drain carried, across every kind.
+    pub fn len(&self) -> usize {
+        self.divergences.len()
+            + self.resolutions.len()
+            + self.reinits.len()
+            + self.orphans.len()
+            + self.fencing.len()
+            + self.rearms.len()
+            + self.observations.len()
+            + self.foreign_claims.len()
+            + self.startup_refusals.len()
+            + self.restarts.len()
+            + self.promotion_refusals.len()
+            + self.changes.len()
+            + self.superseded.len()
+            + self.rehomed.len()
+            + self.adoption_receipts.len()
+    }
+
+    /// Whether the drain carried nothing — no queued transition of any
+    /// kind since the consumer's last drain.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The drained divergence detections.
+    pub fn divergences(&self) -> &[DivergenceReport] {
+        &self.divergences
+    }
+
+    /// The drained divergence resolutions.
+    pub fn resolutions(&self) -> &[ResolutionReport] {
+        &self.resolutions
+    }
+
+    /// The drained reinitialization reports.
+    pub fn reinits(&self) -> &[CarryoverReport] {
+        &self.reinits
+    }
+
+    /// The drained orphan detections.
+    pub fn orphans(&self) -> &[OrphanReport] {
+        &self.orphans
+    }
+
+    /// The drained field-claim losses.
+    pub fn fencing_losses(&self) -> &[FencingLoss] {
+        &self.fencing
+    }
+
+    /// The drained landed orphan-cycle re-arms.
+    pub fn claim_rearms(&self) -> &[ClaimRearm] {
+        &self.rearms
+    }
+
+    /// The drained foreign-claim observations.
+    pub fn claim_observations(&self) -> &[ClaimObservation] {
+        &self.observations
+    }
+
+    /// The drained preemptions of a diagnosed foreign writer's claim.
+    pub fn foreign_claims(&self) -> &[ForeignClaimPreempt] {
+        &self.foreign_claims
+    }
+
+    /// The drained deferred startup-grant refusals.
+    pub fn startup_refusals(&self) -> &[StartupRefusal] {
+        &self.startup_refusals
+    }
+
+    /// The drained tracked-source restarts.
+    pub fn source_restarts(&self) -> &[SourceRestart] {
+        &self.restarts
+    }
+
+    /// The drained refused armed self-promotions.
+    pub fn promotion_refusals(&self) -> &[PromotionRefusal] {
+        &self.promotion_refusals
+    }
+
+    /// The drained reported-role transitions.
+    pub fn role_changes(&self) -> &[RoleChange] {
+        &self.changes
+    }
+
+    /// The drained superseded settlements, each beside the absolute
+    /// submission index the settle journal's dedup keys on.
+    pub fn superseded_commands(&self) -> &[(u64, CommandReceipt)] {
+        &self.superseded
+    }
+
+    /// The drained collision re-homes, each beside the index its settle
+    /// journaled under and the index the served window now carries it
+    /// at.
+    pub fn rehomed_receipts(&self) -> &[(u64, u64, CommandReceipt)] {
+        &self.rehomed
+    }
+
+    /// The drained adoption-audit receipts.
+    pub fn adoption_receipts(&self) -> &[CommandReceipt] {
+        &self.adoption_receipts
+    }
+}
+
+impl IntoIterator for PeerEvents {
+    type Item = PeerEvent;
+    type IntoIter = std::vec::IntoIter<PeerEvent>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.into_events().into_iter()
+    }
+}
+
+/// The commanded-state element a pulled checkpoint claims that this
+/// run's command audit disproves — [`Peer::unaccounted`]'s named
+/// findings, carried by [`ApplyError::Unaccounted`]. Each is a shape
+/// only a run that once owned the field can convict: its own image
+/// and receipt log *are* the line's audit, so a document disagreeing
+/// with them is forged rather than a tracked continuation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UnaccountedDetail {
+    /// The pulled receipt log names a different command at a
+    /// submission index this run's own log already *settled* — a
+    /// verdict is durable truth the line's one submission sequence
+    /// cannot contradict, so the document's history is rewritten, not
+    /// tracked. A still-`Accepted` own entry is different: it is the
+    /// demoted run's un-adjudicated submission, which the tracked
+    /// line may legitimately have passed by with an admission of its
+    /// own — the orphan-supersession machinery settles which, not
+    /// this check. Receipts past this run's high-water are the
+    /// source's own later admissions, and entries evicted before this
+    /// run's window are unverifiable either way: only a covered,
+    /// settled index can convict.
+    Receipt {
+        /// The absolute submission index the fork appears at.
+        index: u64,
+        /// The command this run's log recorded at `index`.
+        expected: Command,
+        /// The command the pulled log claims there.
+        found: Command,
+    },
+    /// An internal `In` point's checkpointed value is none of the
+    /// values the audit can produce: not the one this run's own image
+    /// holds, not the one the document's own force set pins, not the
+    /// one the pulled receipt window's newest settled write or force
+    /// verdict landed, and the point is no link's carrier — the
+    /// planted operator state a forged document carries. (`Accepted`
+    /// and `Rejected` entries move no held value; an `UnforcePoint`
+    /// produces none either — the internal sample keeps its last
+    /// stamp once the substitute reads stop.)
+    Internal {
+        /// The point whose checkpointed value has no receipted cause.
+        point: PointId,
+        /// The value the checkpoint plants.
+        found: Value,
+    },
+}
+
+impl fmt::Display for UnaccountedDetail {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Receipt {
+                index,
+                expected,
+                found,
+            } => write!(
+                f,
+                "receipt log forks at submission {index}: the line recorded \
+                 {expected:?}, the document claims {found:?}"
+            ),
+            Self::Internal { point, found } => write!(
+                f,
+                "internal point {} holds {found:?} — no settled write or force \
+                 produced it and this run never held it",
+                point.0
+            ),
+        }
+    }
 }
 
 /// Why [`Peer::apply`] or [`Peer::transfer`] did not consume a
@@ -346,6 +1488,12 @@ pub enum ApplyError {
     /// point or an unservable force. Nothing applied and the peer
     /// reports [`StandbySync::Degraded`] carrying the named error.
     Carryover(CarryoverError),
+    /// The checkpoint carries commanded state this run's audit
+    /// disproves — forged rather than the tracked line's production.
+    /// Nothing applied; the peer reports [`StandbySync::Degraded`].
+    /// Boxed: a `Receipt` detail carries two commands, which would
+    /// otherwise dominate the error's size.
+    Unaccounted(Box<UnaccountedDetail>),
 }
 
 impl fmt::Display for ApplyError {
@@ -356,6 +1504,9 @@ impl fmt::Display for ApplyError {
             }
             Self::Restore(error) => write!(f, "checkpoint apply failed: {error}"),
             Self::Carryover(error) => write!(f, "model-boundary carryover failed: {error}"),
+            Self::Unaccounted(detail) => {
+                write!(f, "checkpoint carries state the audit disproves: {detail}")
+            }
         }
     }
 }
@@ -363,7 +1514,7 @@ impl fmt::Display for ApplyError {
 impl std::error::Error for ApplyError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::OwnsField => None,
+            Self::OwnsField | Self::Unaccounted(_) => None,
             Self::Restore(error) => Some(error),
             Self::Carryover(error) => Some(error),
         }
@@ -393,8 +1544,8 @@ pub enum Transfer {
 /// logs. The cycle's ordering — the owns-field gate, the pull routing
 /// through [`Peer::transfer`], the heartbeat miss accounting, and the
 /// promote-on-budget sequence — lives in the peer; this report carries
-/// the outcome, and the journaled transitions still drain through the
-/// `take_*` queues.
+/// the outcome, and the journaled transitions still drain through
+/// [`drain_pending`](Peer::drain_pending).
 #[derive(Debug, Clone, PartialEq)]
 pub enum TrackReport {
     /// The peer owns the field — `active` or `promoting` — so the cycle
@@ -427,13 +1578,69 @@ pub enum TrackReport {
     },
     /// The miss run reached the failover budget but self-promotion was
     /// refused — `error` names why; the peer keeps reporting the sync
-    /// state the refusal carried.
+    /// state the refusal carried. The refusal does not close the armed
+    /// gate: while the convergence proof stands the boundary stays live
+    /// and the next due cycle retries, and the episode queues one
+    /// [`PromotionRefusal`] per distinct refusal cause the streak
+    /// produces for the journal.
     PromotionRefused {
         /// What the failed pull reported — the `Degraded` detail.
         detail: String,
         /// The named refusal.
         error: SwitchError,
     },
+}
+
+/// What a launched active's [`Peer::activate`] settled the startup to —
+/// the three verdicts the born-active startup-failure contract records
+/// for the conditional startup grant, each already carried into the
+/// peer's reported state before the caller learns it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Activation {
+    /// The startup claim granted — or no conditional grant was asked —
+    /// and the gate lifted: the run owns the field, `role: active`.
+    Granted,
+    /// The startup claim produced no verdict — the field could not be
+    /// asked, or the ask failed without an answer. The run stands
+    /// pending: reported `standby`/`unsynchronized`, gate closed,
+    /// non-promotable, the conditional grant re-issuing once per
+    /// answered field contact until a verdict lands. `detail` is the
+    /// claim ask's own report — the served evidence of why the run
+    /// waits.
+    Pending {
+        /// What the inconclusive ask reported.
+        detail: String,
+    },
+    /// A live incumbent holds the field's write-ownership claim — the
+    /// refusal verdict. The run already settled `active` → `standby`
+    /// and journaled the refusal's observed claimant; `error` is the
+    /// [`SwitchError::FieldClaimFailed`] the caller's disposition
+    /// decides on — rejoin the declared pair as its standby where one
+    /// was configured, or exit where none was.
+    Refused {
+        /// The refusal the startup claim met.
+        error: SwitchError,
+    },
+}
+
+/// The named refusal the conditional startup grant's `Ok(false)`
+/// produces — one verdict shared by [`Peer::activate`]'s
+/// activation-time ask and the pending run's deferred retry, so both
+/// timings of the same answer settle under the identical
+/// [`SwitchError::FieldClaimFailed`]. The remedy is named by its flag:
+/// `--standby` is the relaunch an operator actually types, and the
+/// message is what a stranded run's only last words would have been —
+/// so it names the remedy the launch must carry, not merely the
+/// standby role it would land in.
+fn startup_claim_refused() -> SwitchError {
+    SwitchError::FieldClaimFailed {
+        detail: "a live peer holds the field's write-ownership claim — a \
+                 controller restarting into a pair cannot prove its resumed \
+                 state is current with the incumbent's and must not preempt \
+                 it; relaunch with --standby ADDRESS to rejoin as the \
+                 incumbent's tracking standby instead"
+            .to_string(),
+    }
 }
 
 impl<'d> Peer<'d> {
@@ -446,7 +1653,11 @@ impl<'d> Peer<'d> {
     /// lifts it — a launched active takes the field in the same
     /// claim-then-lift order a promotion does, so a shared field is
     /// fenced for this owner from the first scan rather than left open
-    /// until the first promotion.
+    /// until the first promotion. The instance is the line's owner
+    /// from construction either way — its checkpoints stamp
+    /// `source_owns_field` and it admits commands — so `was_owner`
+    /// starts set: the commanded-state audit a demotion later relies
+    /// on is this run's log from the first scan.
     pub fn active(executor: Executor<'d>, gate: Option<&'d WriteGate<'d>>) -> Self {
         Self {
             executor,
@@ -454,7 +1665,7 @@ impl<'d> Peer<'d> {
             role: Role::Active,
             sync: StandbySync::Unsynchronized,
             aligned: None,
-            tick_offset: 0,
+            applied_offset: None,
             pending_changes: Vec::new(),
             staged: None,
             pending_divergences: Vec::new(),
@@ -464,13 +1675,44 @@ impl<'d> Peer<'d> {
             failover: None,
             claim: None,
             release: None,
+            was_owner: true,
+            yielded: false,
+            ensure: None,
+            ensure_granted: false,
+            pending_rearms: Vec::new(),
+            startup_claim: None,
+            startup_pending: false,
+            startup_refusal: None,
+            pending_startup_refusals: Vec::new(),
+            orphan_claim: None,
+            foreign_writer: None,
+            pending_orphans: Vec::new(),
+            pending_foreign_claims: Vec::new(),
+            pending_refusals: Vec::new(),
+            open_refusal: None,
             revision: false,
             pending_reinits: Vec::new(),
+            attribution: SwitchAttribution {
+                origin: SwitchOrigin::Request,
+                actor: None,
+            },
             pending_restarts: Vec::new(),
             fencing_lost: false,
             pending_fencing: Vec::new(),
             pending_superseded: Vec::new(),
             pending_rehomed: Vec::new(),
+            pending_adoption_receipts: Vec::new(),
+            probe: None,
+            claimant: None,
+            observer: None,
+            claimed_monitor: None,
+            observed_claimants: BTreeSet::new(),
+            fencing_point: None,
+            pending_observations: Vec::new(),
+            reclaim: None,
+            field_claim: None,
+            claim_lead_base: None,
+            unclaimed_observed: false,
         }
     }
 
@@ -497,6 +1739,266 @@ impl<'d> Peer<'d> {
     /// matters only for driver surfaces that re-arm claims on reconnect.
     pub fn with_field_release(mut self, release: impl Fn() + Send + Sync + 'd) -> Self {
         self.release = Some(Release(Box::new(release)));
+        self
+    }
+
+    /// Arms the claim's orphan-cycle counterpart — run while a tracking
+    /// apply reports the tracked line has no field owner
+    /// ([`StandbySync::Orphaned`]). `ensure` probes the field's
+    /// write-claim arbitration for this run's recorded token, re-arming
+    /// it only where the claim stands unclaimed or already names the
+    /// token — `Ok(true)` — and refusing where a different owner
+    /// stands — `Ok(false)` — so a demoted ex-owner's released claim
+    /// re-arms once the field frees instead of leaving it open to a
+    /// foreign grab, while no probe ever preempts a standing owner.
+    /// A peer that never owned the field has no claim to re-arm; a
+    /// peer built without the hook probes nothing.
+    pub fn with_field_ensure(
+        mut self,
+        ensure: impl Fn() -> Result<bool, String> + Send + Sync + 'd,
+    ) -> Self {
+        self.ensure = Some(Ensure(Box::new(ensure)));
+        self
+    }
+
+    /// Arms the claim's startup counterpart — run once by
+    /// [`activate`](Self::activate) in place of the unconditional
+    /// [`with_field_claim`](Self::with_field_claim) hook: `claim` takes
+    /// the field's write-ownership under this run's token only where no
+    /// *live* attachment holds a different owner's claim — `Ok(true)` —
+    /// answering `Ok(false)` where a live incumbent stands. A restarted
+    /// controller cannot prove its resumed state is current with that
+    /// incumbent's — a stale checkpoint would silently roll back
+    /// commands the incumbent receipted and applied — so `Ok(false)`
+    /// refuses the start as [`SwitchError::FieldClaimFailed`] with the
+    /// gate still closed. A claim a dead owner left standing is still
+    /// preempted, the restart-as-active recovery path. A peer built
+    /// without the hook claims unconditionally at activation, the
+    /// pre-hook contract; promotions keep the unconditional claim
+    /// either way — a deliberate takeover, not a stale restart.
+    pub fn with_field_startup_claim(
+        mut self,
+        claim: impl Fn() -> Result<bool, String> + Send + Sync + 'd,
+    ) -> Self {
+        self.startup_claim = Some(StartupClaim(Box::new(claim)));
+        self
+    }
+
+    /// Arms the claim's orphan-promotion counterpart — run by
+    /// [`promote`](Self::promote) and [`self_promote`](Self::self_promote)
+    /// while the reported convergence is [`StandbySync::Orphaned`], in
+    /// place of the unconditional [`with_field_claim`](Self::with_field_claim)
+    /// hook. An orphaned run's tracking evidence proves only that it
+    /// follows *some* line: it cannot tell the mutual-standby wedge —
+    /// the tracked line's owner dead or never claimed — from a stale
+    /// island — the line's real owner running elsewhere while the
+    /// tracked pair orphaned-loop on each other. The field's own
+    /// arbitration answers which: `claim` takes write-ownership under
+    /// this run's token only where no live *controller* attachment
+    /// holds a different owner's unyielded claim — `Ok(true)` — so the
+    /// wedge's dead, deliberately yielded, or tool-held claim still
+    /// preempts and the escape works; `Ok(false)` where a live
+    /// controller incumbent stands refuses
+    /// the promotion as [`SwitchError::FieldClaimFailed`] with the gate
+    /// still closed, so an islanded run's stale image never preempts —
+    /// and silently rolls back — the real owner's applied state and
+    /// outputs. A peer built without the hook keeps the unconditional
+    /// claim — the pre-hook contract — and field kinds that cannot
+    /// arbitrate live holders fall back to it.
+    pub fn with_field_orphan_claim(
+        mut self,
+        claim: impl Fn() -> Result<bool, String> + Send + Sync + 'd,
+    ) -> Self {
+        self.orphan_claim = Some(OrphanClaim(Box::new(claim)));
+        self
+    }
+
+    /// Arms the claim's observational counterpart — run once per scan
+    /// to learn the field's write-ownership state without disturbing
+    /// it. `probe` answers the verdict a mutation from this run's
+    /// attachments would meet — [`FieldClaim::Held`] while an owner
+    /// stands, [`FieldClaim::Unclaimed`] while none does — asserting,
+    /// joining, and releasing nothing, so the observation cannot seize
+    /// the field it reports. The last answered verdict is what
+    /// [`report`](Self::report) serves as `field_claim`: a probe that
+    /// fails is no observation and leaves the last answer standing, and
+    /// a peer built without the hook reports `None` — on a driver
+    /// surface that cannot be asked, no claim question was answered.
+    pub fn with_field_probe(
+        mut self,
+        probe: impl Fn() -> Result<FieldClaim, String> + Send + Sync + 'd,
+    ) -> Self {
+        self.probe = Some(Probe(Box::new(probe)));
+        self
+    }
+
+    /// Arms the claimant-attribution lookup the fencing path asks at
+    /// the scan whose field write the field fenced: `claimant` answers
+    /// the owner token the field's arbitration named when it refused
+    /// the point's mutation — carried on the queued [`FencingLoss`] so
+    /// the journaled `field_claim_lost` attributes the preemption
+    /// rather than an anonymous loss. `None` answers record the loss
+    /// unattributed — a driver surface whose fencing verdict carries
+    /// no owner identity — rather than guessing a claimant. See
+    /// [`Claimant`].
+    pub fn with_field_claimant(
+        mut self,
+        claimant: impl Fn(PointId) -> Option<u64> + Send + Sync + 'd,
+    ) -> Self {
+        self.claimant = Some(Claimant(Box::new(claimant)));
+        self
+    }
+
+    /// Arms the claim-observation hook — consulted each time a
+    /// conditional grant probe, the orphan cycle's
+    /// [`with_field_ensure`](Self::with_field_ensure) re-arm or the
+    /// loss-marked [`with_field_reclaim`](Self::with_field_reclaim),
+    /// answers `Ok(false)`. A refusal means the field's arbitration
+    /// found a different owner standing; `observer` answers the owner
+    /// token(s) the refusing verdicts named — one per refusing claim
+    /// domain — so the peer queues a [`ClaimObservation`] for the
+    /// journal's `field_claim_observed` entry rather than letting a
+    /// foreign `claim_writer` episode the peer only ever probed pass
+    /// silently. Observations deduplicate on the observed token: a
+    /// claimant this run already journaled — whether by an earlier
+    /// observation or by the fencing-loss verdict that marked the
+    /// claim — queues nothing further. An empty answer means no
+    /// refusal named a claimant, and the episode records nothing it
+    /// cannot attribute. A peer built without the hook leaves
+    /// probe-only episodes unobserved.
+    pub fn with_claim_observer(
+        mut self,
+        observer: impl Fn() -> Vec<u64> + Send + Sync + 'd,
+    ) -> Self {
+        self.observer = Some(Observer(Box::new(observer)));
+        self
+    }
+
+    /// Arms the field-arbitrated successor lookup — the monitor's
+    /// tracking-source resolution asks it after a demotion that left
+    /// this run sourceless: `claimed_monitor` answers the monitor
+    /// endpoint the field's standing write-ownership claim declared,
+    /// recorded from the driver surface's own fencing verdicts. The
+    /// field's arbitration is the identity claim no announced `?peer=`
+    /// hint could ever carry — only actually holding the claim puts a
+    /// monitor under it — so a demoted peer may pull toward the
+    /// endpoint on the field's word and let the pulled checkpoint's
+    /// own verification do the rest. `None` answers mean no verdict
+    /// has named one — the claim declared no monitor, or the driver
+    /// surface reports none — and the resolution answers as if the
+    /// hook did not exist. See [`ClaimedMonitor`].
+    pub fn with_claimed_monitor(
+        mut self,
+        claimed_monitor: impl Fn() -> Option<SocketAddr> + Send + Sync + 'd,
+    ) -> Self {
+        self.claimed_monitor = Some(ClaimedMonitor(Box::new(claimed_monitor)));
+        self
+    }
+
+    /// The monitor endpoint the field's standing write-ownership claim
+    /// declared, as this run's fencing verdicts recorded it — the
+    /// field-arbitrated successor a demoted peer's tracking path
+    /// re-joins on, or `None` while no verdict has named one (or no
+    /// [`with_claimed_monitor`](Self::with_claimed_monitor) hook is
+    /// installed).
+    pub fn claimed_monitor(&self) -> Option<SocketAddr> {
+        self.claimed_monitor
+            .as_ref()
+            .and_then(|claimed_monitor| (claimed_monitor.0)())
+    }
+
+    /// Records the monitoring surface's diagnosis of the field's
+    /// standing writer: `Some(writer)` when the endpoint the field's
+    /// own arbitration named for the standing claim
+    /// ([`claimed_monitor`](Self::claimed_monitor)) has been shown to
+    /// be unable to prove this line's pair key, `None` when that
+    /// diagnosis no longer holds or was never earned.
+    ///
+    /// The peer holds no key itself — the deployment secret lives on the
+    /// monitoring surface's invocation and never crosses to the
+    /// controller, so this is the one attestation it cannot produce for
+    /// itself; the caller earns it by pulling the named endpoint's
+    /// checkpoint under a fresh nonce and refusing the document's
+    /// `line_proof`, and re-earns it per bounded verification window
+    /// rather than latching it.
+    ///
+    /// With a diagnosis standing, the tracked line's ownerless verdict
+    /// reports [`StandbySync::Usurped`] instead of
+    /// [`StandbySync::Orphaned`] — the narrower "the field's writer is
+    /// outside this line" the orphan state alone cannot express — and
+    /// both promotion gates read it as the unconditional claim rather
+    /// than the conditional orphan grant
+    /// ([`claim_gate`](Self::claim_gate)). Without one the verdict
+    /// returns to [`StandbySync::Orphaned`]: the diagnosis is a
+    /// per-window reading, not a property of the pair, so a writer that
+    /// starts proving the key, goes silent, or stops being the field's
+    /// writer each put the run back on the conditional path.
+    ///
+    /// Ignored while the reported convergence says the tracked line
+    /// *does* own the field: there is no owner to be outside it.
+    pub fn note_foreign_writer(&mut self, writer: Option<SocketAddr>) {
+        if self.owns_field() {
+            return;
+        }
+        // The diagnosis only reframes an ownerless verdict: any other
+        // convergence has its own claim shape, and none of them is the
+        // wedge's. A verdict that has stopped being ownerless therefore
+        // drops the diagnosis outright, rather than leaving it standing
+        // for the next orphaned apply to pick up unearned.
+        let unowned = self.line_unowned();
+        self.foreign_writer = writer.filter(|_| unowned);
+        let sync = std::mem::replace(&mut self.sync, StandbySync::Unsynchronized);
+        self.sync = match (self.foreign_writer, sync) {
+            (Some(_), StandbySync::Orphaned { aligned })
+            | (Some(_), StandbySync::Usurped { aligned }) => StandbySync::Usurped { aligned },
+            (None, StandbySync::Usurped { aligned }) => StandbySync::Orphaned { aligned },
+            (_, sync) => sync,
+        };
+    }
+
+    /// The endpoint the standing foreign-writer diagnosis names — the
+    /// writer whose standing claim the promotion gates are cleared to
+    /// preempt, and the one a granted such claim journals as the
+    /// [`ForeignClaimPreempt`] record's `writer`. `None` while no
+    /// diagnosis stands.
+    pub fn foreign_writer(&self) -> Option<SocketAddr> {
+        self.foreign_writer
+    }
+
+    /// Arms the claim's fencing-loss counterpart — the *bound*
+    /// conditional re-grant a fencing-demoted ex-owner probes each
+    /// scan while its loss mark stands. `reclaim` takes the field's
+    /// write-ownership under this run's token where the field stands
+    /// unclaimed, already names the token, or stands under a different
+    /// owner's holderless claim — `Ok(true)` — and answers `Ok(false)`
+    /// only while a different owner's claim has live holders, so a
+    /// still-held preemptor's claim keeps the field until it releases
+    /// and the probe never preempts a live attachment. The holderless
+    /// shapes the grant still takes — a dead owner's standing claim
+    /// and the orphan placeholder a sibling ex-owner's unbound probe
+    /// raises — protect no one, and refusing them would wedge the pair
+    /// the claim was raised to fence. Unlike the orphan cycle's
+    /// unbound probe the grant joins the run's attachments to the
+    /// claim's holders — the gate it re-lifts must pass the
+    /// arbitration it re-took. The ask can preempt the holderless
+    /// shapes the field cannot distinguish from a dead owner's — a
+    /// merely transport-frozen incumbent's included — so the peer
+    /// issues it only where this scan's own claim probe answered
+    /// [`FieldClaim::Unclaimed`] or the standing convergence proof
+    /// `self_promote` reads still stands; an unconverged ex-owner
+    /// never preempts a standing claim, a re-attaching incumbent's
+    /// ownership epoch outliving the freeze. On `Ok(true)` the peer
+    /// clears the loss mark, lifts the field gate the demotion closed,
+    /// and reports [`FieldClaim::Held`] from the claim it just
+    /// re-took; `Ok(false)` and `Err` leave the mark standing for the
+    /// next scan. A peer built without the hook keeps the pre-reclaim
+    /// behavior — the wedge stands until an operator's promote
+    /// unwedges. See [`Reclaim`].
+    pub fn with_field_reclaim(
+        mut self,
+        reclaim: impl Fn() -> Result<bool, String> + Send + Sync + 'd,
+    ) -> Self {
+        self.reclaim = Some(Reclaim(Box::new(reclaim)));
         self
     }
 
@@ -541,7 +2043,7 @@ impl<'d> Peer<'d> {
             role: Role::Standby,
             sync: StandbySync::Unsynchronized,
             aligned: None,
-            tick_offset: 0,
+            applied_offset: None,
             pending_changes: Vec::new(),
             staged: None,
             pending_divergences: Vec::new(),
@@ -551,35 +2053,116 @@ impl<'d> Peer<'d> {
             failover: None,
             claim: None,
             release: None,
+            was_owner: false,
+            yielded: false,
+            ensure: None,
+            ensure_granted: false,
+            pending_rearms: Vec::new(),
+            startup_claim: None,
+            startup_pending: false,
+            startup_refusal: None,
+            pending_startup_refusals: Vec::new(),
+            orphan_claim: None,
+            foreign_writer: None,
+            pending_orphans: Vec::new(),
+            pending_foreign_claims: Vec::new(),
+            pending_refusals: Vec::new(),
+            open_refusal: None,
             revision: false,
             pending_reinits: Vec::new(),
+            attribution: SwitchAttribution {
+                origin: SwitchOrigin::Request,
+                actor: None,
+            },
             pending_restarts: Vec::new(),
             fencing_lost: false,
             pending_fencing: Vec::new(),
             pending_superseded: Vec::new(),
             pending_rehomed: Vec::new(),
+            pending_adoption_receipts: Vec::new(),
+            probe: None,
+            claimant: None,
+            observer: None,
+            claimed_monitor: None,
+            observed_claimants: BTreeSet::new(),
+            fencing_point: None,
+            pending_observations: Vec::new(),
+            reclaim: None,
+            field_claim: None,
+            claim_lead_base: None,
+            unclaimed_observed: false,
         }
     }
 
     /// Starts field ownership on a launched-active peer — the startup
-    /// half of the claim contract: takes the field-ownership claim
-    /// [`with_field_claim`](Self::with_field_claim) installed, then
-    /// lifts the gate, in the same order a promotion runs them. The
-    /// caller runs it once at startup, after the claim hook is
+    /// half of the claim contract: takes the field-ownership claim,
+    /// then lifts the gate, in the same order a promotion runs them.
+    /// The caller runs it once at startup, after the claim hook is
     /// installed and before the first scan; until it runs the gate
     /// stays closed — a launched active that cannot take the plant's
     /// single-writer claim does not run unfenced.
     ///
+    /// Where [`with_field_startup_claim`](Self::with_field_startup_claim)
+    /// installed the conditional startup grant, it runs in place of the
+    /// unconditional claim: the field's arbitration grants it while no
+    /// *live* incumbent holds a different owner's claim — a dead owner's
+    /// standing claim still preempts, the restart-as-active recovery
+    /// path — and refuses it while a live incumbent stands, so a
+    /// controller restarted onto a stale checkpoint cannot seize the
+    /// field and silently roll back commands the incumbent receipted
+    /// and applied.
+    ///
+    /// The born-active startup-failure contract settles every ask the
+    /// grant returns into the run's reported state before answering:
+    /// `Ok(true)` is [`Activation::Granted`] — gate lifted, `active`;
+    /// `Ok(false)` is [`Activation::Refused`], the launched run already
+    /// stood down to the pair's standby surface with the incumbent's
+    /// observed claimant journaled — the caller rejoins the declared
+    /// pair or exits, the peer never stays an unpaired active; and
+    /// `Err` is [`Activation::Pending`], the same stand-down plus the
+    /// `startup_pending` mark that re-issues the conditional ask on
+    /// each answered field contact until a verdict lands — a field
+    /// that cannot be asked is the unreachable-at-boot class the
+    /// contract keeps the process running for.
+    ///
     /// Only a launched `active` activates — any other role is refused
-    /// with [`SwitchError::NotActive`] — and a failed claim refuses the
-    /// start as [`SwitchError::FieldClaimFailed`] with the gate still
-    /// closed. On a peer carrying no claim hook — a private field — the
-    /// gate simply lifts.
-    pub fn activate(&mut self) -> Result<(), SwitchError> {
+    /// with [`SwitchError::NotActive`]. Without the conditional hook —
+    /// a private field, or a driver surface that cannot arbitrate live
+    /// holders — the unconditional claim runs and a failed one still
+    /// refuses the start as [`SwitchError::FieldClaimFailed`], the
+    /// recorded fallback.
+    pub fn activate(&mut self) -> Result<Activation, SwitchError> {
         if self.role != Role::Active {
             return Err(SwitchError::NotActive);
         }
-        self.lift_gate()
+        if let Some(startup) = &self.startup_claim {
+            match startup.0() {
+                Ok(true) => {
+                    self.open_gate();
+                    Ok(Activation::Granted)
+                }
+                Ok(false) => {
+                    let error = startup_claim_refused();
+                    // The verdict itself is the claim observation:
+                    // the incumbent's claim stands — and the refusal
+                    // is what the stand-down journals under.
+                    self.field_claim = Some(FieldClaim::Held);
+                    self.observe_claim_refusal(self.executor.tick());
+                    self.pending_startup_refusals.push(StartupRefusal {
+                        tick: self.executor.tick(),
+                        error: error.clone(),
+                    });
+                    self.stand_down(SwitchOrigin::Fenced);
+                    Ok(Activation::Refused { error })
+                }
+                Err(detail) => {
+                    self.enter_pending();
+                    Ok(Activation::Pending { detail })
+                }
+            }
+        } else {
+            self.lift_gate().map(|()| Activation::Granted)
+        }
     }
 
     /// The currently reported role.
@@ -594,9 +2177,9 @@ impl<'d> Peer<'d> {
     }
 
     /// The tick of the last applied checkpoint — how far the run is
-    /// known to be aligned with the active's. Reported in the tracked
-    /// stream's own tick domain: after a source restart the run's clock
-    /// leads it by the generation offset the resync left.
+    /// known to be aligned with the active's — reported as a source
+    /// tick in the tracked stream's own domain: after a source restart
+    /// the run tick leads it by the generation offset the resync left.
     pub fn aligned_tick(&self) -> Option<Tick> {
         self.aligned
     }
@@ -617,6 +2200,16 @@ impl<'d> Peer<'d> {
 
     /// The instance's reported role as the serde [`RoleReport`] the
     /// monitoring contract serves.
+    ///
+    /// On a peer armed by [`with_failover`](Self::with_failover) the
+    /// report also carries the failover gate's evidence: the standing
+    /// convergence proof [`self_promote`](Self::self_promote) reads —
+    /// `converged` — together with the consecutive-miss count and the
+    /// armed budget bounding it, so a `degraded` report inside a miss
+    /// window reads "proof stands, misses *k* of *N*" instead of
+    /// silently diverging from the failover path. An unarmed peer
+    /// reports `None`: the flag alone survives misses without bound,
+    /// so it is never served without the budget it is read against.
     pub fn report(&self) -> RoleReport {
         RoleReport {
             role: self.role,
@@ -625,6 +2218,12 @@ impl<'d> Peer<'d> {
                 Role::Active => None,
                 _ => Some(self.sync.clone()),
             },
+            field_claim: self.field_claim,
+            failover: self.failover.map(|budget| FailoverEvidence {
+                converged: self.converged,
+                misses: self.misses,
+                budget,
+            }),
         }
     }
 
@@ -640,27 +2239,84 @@ impl<'d> Peer<'d> {
     /// path's equivalent: the checkpoint crossed the model boundary
     /// under the documented carryover rule and the carryover report
     /// records exactly what continues — not bumpless by restored state,
-    /// but honest about what the revised run starts from. A standby
+    /// but honest about what the revised run starts from.
+    /// [`StandbySync::Orphaned`] is promotable on the same convergence
+    /// evidence `Tracking` stands on — the run is still current with
+    /// the tracked line, the stamp only names the line's missing field
+    /// owner — but its claim is the *conditional* grant
+    /// [`with_field_orphan_claim`](Self::with_field_orphan_claim)
+    /// installs: the tracking evidence cannot tell a dead owner — the
+    /// mutual-standby wedge the orphan promote exists to break — from
+    /// a live incumbent the run lost track of, whose claim a stale
+    /// island's promotion would preempt, silently rolling its applied
+    /// state and outputs back. The field's arbitration answers which:
+    /// a dead or deliberately yielded claim preempts, while a live
+    /// different-owner's refuses with
+    /// [`SwitchError::FieldClaimFailed`]. Without the hook the
+    /// unconditional claim stands — the wedge escape the verdict was
+    /// made promotable for. A standby
     /// that has not converged — or that reports
     /// [`StandbySync::Diverged`] — is refused with
     /// [`SwitchError::NotConverged`] carrying the reported state; a
     /// field-owning instance — including a still-settling promotion —
-    /// with [`SwitchError::AlreadyActive`]. A refused promotion touches
-    /// nothing: the gate stays as it was.
+    /// with [`SwitchError::AlreadyActive`].
+    ///
+    /// The unconditional claim the other two verdicts assert is itself
+    /// bounded on the basis it resolves on: a [`ClaimBasis`] past
+    /// [`MAX_CLAIM_LEAD`] refuses the promotion with
+    /// [`SwitchError::FieldClaimFailed`] naming the bound and the
+    /// stamps, so a claimant whose clock has run away from the tracked
+    /// line cannot take write-ownership from that line's live
+    /// incumbent — see [`claim_basis`](Self::claim_basis) and the module
+    /// docs for the scope that keeps every documented recovery
+    /// reachable. A refused promotion touches nothing: the gate stays as
+    /// it was, and the claim hook never ran.
+    ///
+    /// The unattributed request — [`promote_as`](Self::promote_as) with
+    /// no declared actor.
     pub fn promote(&mut self) -> Result<(), SwitchError> {
+        self.promote_as(None)
+    }
+
+    /// The attributed variant of [`promote`](Self::promote): `actor` is
+    /// the requester's *declared* identity — attestation, not
+    /// authentication, the same convention
+    /// [`submit_command_as`](Self::submit_command_as) follows — carried
+    /// onto every [`RoleChange`] the promotion queues, request and
+    /// settle alike, so the journaled `RoleChanged` entries name the
+    /// submitter. `None` submits the request unattributed; either way
+    /// the transitions journal `origin: request`.
+    pub fn promote_as(&mut self, actor: Option<String>) -> Result<(), SwitchError> {
         match self.role {
             Role::Active | Role::Promoting => return Err(SwitchError::AlreadyActive),
             Role::Standby | Role::Demoting => {}
         }
+        // The pending born-active enters field ownership only through
+        // its conditional startup grant: the claim has not settled,
+        // so no promotion lifts the gate — the unconditional claim
+        // path could preempt a live incumbent the pending run lost
+        // track of.
+        if self.startup_pending {
+            return Err(SwitchError::NotConverged {
+                sync: self.sync.clone(),
+            });
+        }
         if !matches!(
             self.sync,
-            StandbySync::Tracking { .. } | StandbySync::Reinitialized { .. }
+            StandbySync::Tracking { .. }
+                | StandbySync::Reinitialized { .. }
+                | StandbySync::Orphaned { .. }
+                | StandbySync::Usurped { .. }
         ) {
             return Err(SwitchError::NotConverged {
                 sync: self.sync.clone(),
             });
         }
-        self.lift_gate()?;
+        self.claim_gate()?;
+        self.attribution = SwitchAttribution {
+            origin: SwitchOrigin::Request,
+            actor,
+        };
         self.change(self.executor.tick(), Role::Promoting);
         Ok(())
     }
@@ -669,30 +2325,56 @@ impl<'d> Peer<'d> {
     /// the checkpoint-pull heartbeat's consecutive misses have reached
     /// the configured [`with_failover`](Self::with_failover) budget and
     /// the convergence proof still stands — the last applied verdict
-    /// was `Tracking` or `Reinitialized` and the misses have not
-    /// exceeded the budget —
+    /// was `Tracking`, `Reinitialized`, or `Orphaned` —
     /// lifts the gate at this boundary exactly as a manual promotion
     /// would, reporting `promoting`.
     ///
     /// Anything else is the named [`SwitchError::NotConverged`]
     /// carrying the reported sync state: an unconverged standby reports
     /// rather than promotes, a single transient miss has not reached
-    /// the budget, and an over-budget miss run has voided the
-    /// convergence the promotion would rely on. Callers check
+    /// the budget, and an over-budget evidence-free miss run has voided
+    /// the convergence the promotion would rely on. Callers check
     /// [`failover_due`](Self::failover_due) once per scan cycle and
-    /// invoke this only then — the boundary at which a self-promotion
-    /// lands is the budget-th miss's scan.
+    /// invoke this only then — and the boundary stays live while the
+    /// proof does: a refused attempt does not close it, because every
+    /// landed apply re-proves convergence. A correctly-refused attempt
+    /// — a live incumbent still holding the field's claim — therefore
+    /// retries on the next due cycle instead of disarming armed
+    /// failover for the rest of the episode, and promotes the cycle the
+    /// refusal cause clears. The claim-basis bound never applies here: a
+    /// self-promotion fires on a miss run, which is exactly the
+    /// "nothing stands to preempt" escape the promotion claim reads, so
+    /// the armed recovery a skewed run depends on is untouched.
+    ///
+    /// A self-promotion's queued [`RoleChange`]s carry
+    /// `origin: failover` and no actor — the journaled distinction from
+    /// a requested switch: an automatic failover never reads as an
+    /// unattributed operator request.
     pub fn self_promote(&mut self) -> Result<(), SwitchError> {
         match self.role {
             Role::Active | Role::Promoting => return Err(SwitchError::AlreadyActive),
             Role::Standby | Role::Demoting => {}
+        }
+        // The pending born-active refuses the failover gate like the
+        // requested one: while its startup claim is unsettled the run
+        // promotes only through the conditional grant, and an armed
+        // run's each due boundary journals this `not_converged`
+        // refusal.
+        if self.startup_pending {
+            return Err(SwitchError::NotConverged {
+                sync: self.sync.clone(),
+            });
         }
         if !(self.failover_due() && self.converged) {
             return Err(SwitchError::NotConverged {
                 sync: self.sync.clone(),
             });
         }
-        self.lift_gate()?;
+        self.claim_gate()?;
+        self.attribution = SwitchAttribution {
+            origin: SwitchOrigin::Failover,
+            actor: None,
+        };
         self.change(self.executor.tick(), Role::Promoting);
         Ok(())
     }
@@ -700,11 +2382,19 @@ impl<'d> Peer<'d> {
     /// Whether the heartbeat's consecutive failed pulls have reached the
     /// configured failover budget — the scan boundary at which a
     /// still-converged standby may [`self_promote`](Self::self_promote).
-    /// `false` without a configured budget; misses beyond the budget do
-    /// not re-arm — the failover window closed with the convergence
-    /// proof.
+    /// `false` without a configured budget. The boundary arrives at the
+    /// budget-th miss unconditionally — the attempt itself reports a
+    /// voided proof — and stays past it exactly while the convergence
+    /// proof stands: each landed apply re-proves it, so an armed peer
+    /// whose earlier attempt was refused keeps the gate while fresh
+    /// checkpoints keep landing, and only an evidence-free miss run
+    /// past the budget — a genuinely stopped source — lets the proof go
+    /// stale and closes the window.
     pub fn failover_due(&self) -> bool {
-        self.failover.is_some_and(|budget| self.misses == budget)
+        match self.failover {
+            Some(budget) if self.misses >= budget => self.misses == budget || self.converged,
+            _ => false,
+        }
     }
 
     /// Consecutive checkpoint pulls that produced no applied checkpoint
@@ -721,8 +2411,10 @@ impl<'d> Peer<'d> {
     /// scan completes.
     ///
     /// The same boundary reconciles the command audit the way the
-    /// fenced path's [`Executor::supersede_commands`] does, but for the
-    /// voluntary handoff: the run's queued commands are *suspended*
+    /// fenced path's [`Executor::suspend_boundary_commands`] does —
+    /// that call extends the suspension to receipts the detection
+    /// scan already settled; here only the queue is still pending:
+    /// the run's queued commands are *suspended*
     /// ([`Executor::suspend_pending_commands`]) rather than rejected —
     /// their receipts stay `Accepted` in the log so the checkpoints
     /// this peer keeps serving still carry them for the successor's
@@ -741,13 +2433,49 @@ impl<'d> Peer<'d> {
     /// unreached tail is restored suspended — still served for the
     /// successor's carry — and the receipt keeps exactly one terminal
     /// settle ahead of it rather than a provisional `superseded` the
-    /// next, fresher adoption would contradict.
+    /// next, fresher adoption would contradict. And when the demoted
+    /// run itself re-takes the field — re-promoted with no covering
+    /// adoption ever adjudicating its tail — the surviving line is
+    /// this run: its first field-owning scan re-queues the suspended
+    /// entries and settles them at that boundary.
     ///
     /// Only a field-owning instance demotes; anything else is refused
     /// with [`SwitchError::NotActive`]. The demoted peer's reported
     /// convergence resets to [`StandbySync::Unsynchronized`]: it
     /// reconverges through fresh checkpoints from the new active.
+    ///
+    /// The unattributed request — [`demote_as`](Self::demote_as) with
+    /// no declared actor.
     pub fn demote(&mut self) -> Result<(), SwitchError> {
+        self.demote_as(None)
+    }
+
+    /// The attributed variant of [`demote`](Self::demote): `actor` is
+    /// the requester's declared identity — attestation, not
+    /// authentication, as on [`promote_as`](Self::promote_as) — carried
+    /// onto every [`RoleChange`] the demotion queues. `None` submits
+    /// the request unattributed; either way the transitions journal
+    /// `origin: request`.
+    pub fn demote_as(&mut self, actor: Option<String>) -> Result<(), SwitchError> {
+        self.demote_inner(SwitchAttribution {
+            origin: SwitchOrigin::Request,
+            actor,
+        })
+    }
+
+    /// The demotion body every stand-down path shares: the monitoring
+    /// surface's requests arrive through [`demote_as`](Self::demote_as)
+    /// with `origin: request`; the fencing demotion a preempted — or
+    /// connection-dropped, claim-bound — ownership forces runs the
+    /// same survivable path under `origin: fenced`, so the journaled
+    /// transitions name what initiated them rather than reading as an
+    /// unattributed operator request. The origin also marks the release: a requested
+    /// demotion's is the deliberate hand-back the orphan cycle's
+    /// conditional re-arm must not undo — the claim this run gave up
+    /// is the successor's to take, not this standby's to re-arm under
+    /// its own token — while a fenced demotion's release ends an
+    /// ownership the field took, so its orphan coverage keeps.
+    fn demote_inner(&mut self, attribution: SwitchAttribution) -> Result<(), SwitchError> {
         match self.role {
             Role::Active | Role::Promoting => {}
             Role::Standby | Role::Demoting => return Err(SwitchError::NotActive),
@@ -758,15 +2486,68 @@ impl<'d> Peer<'d> {
         if let Some(release) = &self.release {
             release.0();
         }
+        self.yielded = attribution.origin == SwitchOrigin::Request;
         self.executor.suspend_pending_commands();
         self.sync = StandbySync::Unsynchronized;
         self.aligned = None;
-        self.tick_offset = 0;
+        self.applied_offset = None;
+        self.claim_lead_base = None;
         self.staged = None;
         self.misses = 0;
         self.converged = false;
+        self.open_refusal = None;
+        self.attribution = attribution;
         self.change(self.executor.tick(), Role::Demoting);
         Ok(())
+    }
+
+    /// The born-active startup-failure contract's settle — the
+    /// launched run's move onto the pair's standby surface when its
+    /// startup claim cannot lift the gate: the gate stays (or returns)
+    /// closed, the release hook forgets any recorded ownership token,
+    /// the queued commands suspend, the tracking state resets to
+    /// `unsynchronized`, and the reported role moves straight to
+    /// `standby`. The same terminal state a demotion settles into,
+    /// reached in one transition: no scan ever ran under this run's
+    /// field ownership, so there is no `demoting` surface to serve.
+    fn stand_down(&mut self, origin: SwitchOrigin) {
+        if let Some(gate) = self.gate {
+            gate.close();
+        }
+        if let Some(release) = &self.release {
+            release.0();
+        }
+        self.executor.suspend_pending_commands();
+        self.sync = StandbySync::Unsynchronized;
+        self.aligned = None;
+        self.applied_offset = None;
+        self.claim_lead_base = None;
+        self.staged = None;
+        self.misses = 0;
+        self.converged = false;
+        self.open_refusal = None;
+        // This run never held the field — the startup stand-down
+        // clears the born-active's construction-time mark, so the
+        // orphan cycle never re-arms a claim that never stood and a
+        // pulled checkpoint's commanded state audits against the
+        // tracked line, not this run's pre-ownership image.
+        self.was_owner = false;
+        self.attribution = SwitchAttribution {
+            origin,
+            actor: None,
+        };
+        self.change(self.executor.tick(), Role::Standby);
+    }
+
+    /// The pending half of the born-active contract: the launched run
+    /// stands down behind the pending-claim surface — reported
+    /// `standby`, gate closed, promotable by nobody — while
+    /// `startup_pending` keeps the conditional grant retrying on each
+    /// answered field contact (see
+    /// [`retry_startup_claim`](Self::retry_startup_claim)).
+    fn enter_pending(&mut self) {
+        self.stand_down(SwitchOrigin::Fenced);
+        self.startup_pending = true;
     }
 
     /// One best-effort synchronization at the promotion boundary — a
@@ -780,14 +2561,14 @@ impl<'d> Peer<'d> {
     /// The pull is opportunistic, not a heartbeat cycle: it never counts
     /// a miss and never decides the transition by itself. A field-owning
     /// peer has no source to sync from; a produced-nothing pull changes
-    /// nothing; and a checkpoint older than the run's tick is stale —
-    /// applying it would rewind scans the peer already ran, re-applying
-    /// their commands and re-emitting their events — so its state does
-    /// not land. Stale is not empty, though: the receipt log inside the
-    /// stale checkpoint may still carry admissions the run lacks — the
-    /// driven cadence rests at `aligned + 1`, so the freshest checkpoint
-    /// carrying a just-admitted command is exactly this one — and the
-    /// boundary adopts that log's new tail instead
+    /// nothing; and a checkpoint whose source tick predates the run tick
+    /// is stale — applying it would rewind scans the peer already ran,
+    /// re-applying their commands and re-emitting their events — so its
+    /// state does not land. Stale is not empty, though: the receipt log
+    /// inside the stale checkpoint may still carry admissions the run
+    /// lacks — the driven cadence rests at `aligned + 1`, so the freshest
+    /// checkpoint carrying a just-admitted command is exactly this one —
+    /// and the boundary adopts that log's new tail instead
     /// ([`Executor::carry_pending_commands`]), the still-`Accepted`
     /// entries queueing on the standing state to settle at the promoted
     /// run's first scan. A checkpoint this build cannot read — an
@@ -802,18 +2583,18 @@ impl<'d> Peer<'d> {
     /// carried into its divergence comparison: the staged evidence
     /// describes the tracking line the applied checkpoint abandons —
     /// what the quiesced scan *would* have written — and at the
-    /// promotion boundary a same-tick comparison would flag the
+    /// promotion boundary a same-position comparison would flag the
     /// one-tick lag a field-carried command write inherently leaves on
     /// a peer that cannot issue it: the standby's own scan ran on the
     /// field's pre-command value, the checkpoint carries the post-write
     /// state, and the promoted run continues from the checkpoint, not
     /// from the staged what-if. Set aside, though — not discarded: a
     /// boundary that ends in refusal leaves the peer tracking, and the
-    /// staged image stays the cadence's evidence for the next same-tick
-    /// apply — on a diverged peer, the only comparison that can return
-    /// it to `Tracking`. Only a transfer that itself crossed a
-    /// boundary — a stream regression's new generation, a rolling
-    /// revision's new model — retires the image outright.
+    /// staged image stays the cadence's evidence for the next
+    /// same-position apply — on a diverged peer, the only comparison
+    /// that can return it to `Tracking`. Only a transfer that itself
+    /// crossed a boundary — a stream regression's new generation, a
+    /// rolling revision's new model — retires the image outright.
     ///
     /// The reported standing is the cadence's, whatever the pull does:
     /// the executor side of a landed transfer — state, receipt log,
@@ -832,12 +2613,13 @@ impl<'d> Peer<'d> {
             return;
         };
         if checkpoint.tick < self.executor.tick() {
-            // Stale by the run's clock: the state cannot land without
-            // rewinding scans this peer already ran, but the receipt
-            // log's newer tail still carries — a command the active
-            // admitted since this run's last alignment queues here and
-            // settles at the promoted run's first scan rather than
-            // being lost to the gap the skip used to leave.
+            // Stale by the run's clock — a source tick below the run
+            // tick: the state cannot land without rewinding scans this
+            // peer already ran, but the receipt log's newer tail still
+            // carries — a command the active admitted since this run's
+            // last alignment queues here and settles at the promoted
+            // run's first scan rather than being lost to the gap the
+            // skip used to leave.
             if SUPPORTED_FORMAT_VERSIONS.contains(&checkpoint.format_version) {
                 self.executor.carry_pending_commands(&checkpoint);
             }
@@ -847,7 +2629,7 @@ impl<'d> Peer<'d> {
         // consumed: the apply must not compare against it (the one-tick
         // lag a field-carried command leaves would flag spuriously),
         // but a boundary that ends in refusal hands it back — it is the
-        // cadence's own evidence, still owed to the next same-tick
+        // cadence's own evidence, still owed to the next same-position
         // apply, and on a diverged peer it is the only path back to
         // `Tracking`. Only the transfer's own crossings retire it: a
         // regressed stream's staged evidence belongs to the old
@@ -866,41 +2648,47 @@ impl<'d> Peer<'d> {
             // image stays the cadence's evidence: the boundary apply
             // ran no comparison against it — it cannot have queued a
             // resolution — and a refused promotion leaves it owed to
-            // the next same-tick apply.
+            // the next same-position apply.
             self.staged = staged;
         }
     }
 
     /// Applies a checkpoint received from the active, aligning the run
-    /// at the checkpointed tick — the tracking half of the redundancy
-    /// contract, in place on the running executor.
+    /// at the checkpoint's source tick translated into the run-tick
+    /// domain — the tracking half of the redundancy contract, in place
+    /// on the running executor.
     ///
     /// The run's tick is its journal and history attribution domain and
-    /// never rewinds across a source-generation boundary: a checkpoint
-    /// whose tick fell below the run's last alignment — or below the
-    /// run's own tick before any alignment stood — while naming a
-    /// generation the run's own stream does not carry is not a
-    /// continuation of the tracked line but the signature of a
-    /// cold-restarted or replaced source beginning a new tick
-    /// generation. Its state still applies — the tracked source is the
-    /// live one — but the run resumes it at the run's current tick, the
-    /// `tick + tick_offset` landing every later checkpoint on the new
-    /// stream takes, and one [`SourceRestart`] queues for the journal:
-    /// a restart that rewound nothing still changes what the stream
-    /// means. A checkpoint on the tracked line itself — a repeat or a
-    /// post-miss catch-up, which may still lag the run's tick — keeps
-    /// the standing offset: that realignment is the line's own, not a
-    /// new generation. And a regression that names the run's own
+    /// never rewinds: a checkpoint whose tick still lags the run's own
+    /// clock — whether it fell below the run's last alignment, below
+    /// the run's own tick before any alignment stood, or simply
+    /// continued the tracked line while a degraded window let the run
+    /// out-scan it — lands at the run's current tick under the offset
+    /// the live gap names ([`stream_offset`](Self::stream_offset)),
+    /// not at the stream's own: rewinding would re-issue ticks the
+    /// run already journaled and recorded into the history rings, and
+    /// a stale alignment can leave a resumed source's stream inside
+    /// the window where the regression comparison alone would still
+    /// realign the run backward onto it.
+    ///
+    /// A regressed stream that also names a generation the run's own
+    /// stream does not carry is not a continuation of the tracked line
+    /// but the signature of a cold-restarted or replaced source
+    /// beginning a new tick generation. Its state still applies — the
+    /// tracked source is the live one — under the same hold-the-clock
+    /// landing, and one [`SourceRestart`] queues for the journal: a
+    /// restart that rewound nothing still changes what the stream
+    /// means. A regression that names the run's own
     /// generation — a demoted peer's first pull on its uninterrupted
     /// successor, the demotion having cleared the alignment the tick
     /// comparison stood on — is the peer's tracking reset rather than
     /// the source's restart: the state adopts under the same
     /// monotone-clock rule, but no boundary crossed, so nothing
-    /// journals. Kept, but re-evaluated — the offset covers at
-    /// most the run's live lead over the stream
-    /// ([`stream_offset`](Self::stream_offset)), so an apply can hold
-    /// the run's tick or realign it backward but never land it ahead
-    /// of both clocks.
+    /// journals. And a same-line catch-up — a repeat or a lagging
+    /// pull still naming the line's generation — holds the clock the
+    /// same way and journals nothing: no boundary crossed there
+    /// either, and the live-lead offset lands every later checkpoint
+    /// at the run's tick until the stream recovers to it.
     ///
     /// A field-owning instance refuses with [`ApplyError::OwnsField`]: a
     /// checkpoint landing on the active would clobber the run it is
@@ -911,12 +2699,15 @@ impl<'d> Peer<'d> {
     /// transfer.
     ///
     /// A successful apply also runs the standby-divergence check when
-    /// the tick the checkpoint landed at equals the stashed staged
-    /// image's tick —
+    /// the checkpoint's tick is the stream position the stashed staged
+    /// image predicts —
     /// under the documented pull-per-scan cadence that pairing lands one
     /// transfer after the staged scan, the stated detection bound: the
-    /// field then holds the active's write for the tick the staged image
-    /// describes. Mismatches move the peer to
+    /// field then holds the active's write for the position the staged
+    /// image describes. A held run clock does not move the pairing —
+    /// the tag is the stream position, so a lagging or repeated
+    /// checkpoint whose tick the prediction passed still performs zero
+    /// field reads. Mismatches move the peer to
     /// [`StandbySync::Diverged`] and queue a
     /// [`DivergenceReport`] for the journal — one per transition, not
     /// per transfer — while a comparison on a diverged peer that read
@@ -930,20 +2721,59 @@ impl<'d> Peer<'d> {
     /// overtaken — and a comparison whose field reads failed both
     /// observe nothing, and the verdict stands. A staged image the
     /// checkpoint stream has not caught up to — or has overtaken — is
-    /// discarded: only a same-tick comparison is honest evidence.
+    /// discarded: only a same-position comparison is honest evidence.
     pub fn apply(&mut self, checkpoint: &Checkpoint) -> Result<(), ApplyError> {
         if self.owns_field() {
             return Err(ApplyError::OwnsField);
         }
         // The pull produced a checkpoint — the active served, so it is
         // alive: the heartbeat miss count resets whether the apply
-        // lands or is rejected.
-        self.misses = 0;
+        // lands or is rejected. Unless the checkpoint itself reports
+        // its serving run owns no field writes: that service proves a
+        // peer lives but no field owner does — precisely the dead-owner
+        // condition the heartbeat counts — so the cycle counts as the
+        // miss it is rather than resetting.
+        //
+        // Whether this transfer ends a miss run is read before the
+        // count moves: the claim bound re-bases the declared lead on a
+        // resume, because a lead that accrued while the line could not
+        // be reached is not the pace asymmetry the bound refuses.
+        let line_resumed = self.misses != 0;
+        if checkpoint.source_owns_field == Some(false) {
+            self.misses += 1;
+        } else {
+            self.misses = 0;
+        }
+        // Commanded-state provenance before any adoption accounting:
+        // an ex-owner's image and receipt log are the line's audit, so
+        // a document whose receipt window forks it or whose internal
+        // `In` image plants a value no settled verdict produced is
+        // forged, not a continuation — refused like any rejected
+        // checkpoint: nothing applies, the peer reports degraded, and
+        // the heartbeat already counted the serve above.
+        if let Some(detail) = self.unaccounted(checkpoint) {
+            let error = ApplyError::Unaccounted(Box::new(detail));
+            self.sync = StandbySync::Degraded {
+                detail: error.to_string(),
+            };
+            self.converged = false;
+            return Err(error);
+        }
         // The still-`Accepted` receipts this log holds — the demoted
         // run's suspended commands and any adopted pending entries —
         // are what the adoption below either covers, passes by, or
         // leaves unrestored behind its high-water.
         let pending = self.pending_accepted();
+        // The standing force set and the held internal values are the
+        // adoption audit's baselines: a force change or a held-value
+        // revert the merged receipt log cannot account for is the
+        // adoption's own doing and journals naming the source. The
+        // prior receipt log rides along — a staler window's high-water
+        // gap can drop this run's settled verdicts from the merged
+        // log without erasing the durable truth they record.
+        let prior_forces = self.executor.forces().clone();
+        let prior_internals = self.executor.held_internals();
+        let prior_receipts = self.executor.receipts().to_vec();
         let (offset, regressed) = self.stream_offset(checkpoint);
         // A regression is a source restart only when the stream's
         // generation provably differs from the run's own: a demoted
@@ -962,6 +2792,12 @@ impl<'d> Peer<'d> {
         } else {
             adopted = Checkpoint {
                 tick: landed,
+                // The landed document keeps the pull's stream
+                // position — resolved rather than inherited, so a
+                // lead-free source's document mints the landing
+                // offset as this run's lead instead of reading the
+                // absent stamp as a lead of zero.
+                stream_tick: Some(checkpoint.stream_tick.unwrap_or(checkpoint.tick)),
                 ..checkpoint.clone()
             };
             self.executor.apply(&adopted)
@@ -969,12 +2805,13 @@ impl<'d> Peer<'d> {
         match applied {
             Ok(()) => {
                 self.note_abandoned_commands(pending);
-                self.tick_offset = offset;
+                self.note_adopted_forces(&prior_forces, checkpoint, landed);
+                self.note_adopted_writes(&prior_internals, &prior_receipts, checkpoint, landed);
                 if regressed {
-                    // The staged image pairs its run tick against the
-                    // stream position it was staged on — a regressed
-                    // apply moved that pairing, so the evidence cannot
-                    // compare and is discarded whether or not the
+                    // The staged image's tag is a stream position under
+                    // the alignment it was staged on — a regressed
+                    // apply re-bases the stream, so the evidence cannot
+                    // pair and is discarded whether or not the
                     // generation changed. Only the generation boundary
                     // journals: a same-generation regression is the
                     // peer's own tracking reset, not the source's
@@ -989,19 +2826,84 @@ impl<'d> Peer<'d> {
                     }
                 }
                 self.aligned = Some(checkpoint.tick);
+                self.applied_offset = Some(offset);
+                self.note_alignment_lead(line_resumed);
                 let was_diverged = matches!(self.sync, StandbySync::Diverged { .. });
+                // The checkpoint's `source_owns_field` stamp is the
+                // tracked line's verdict on field ownership:
+                // `Some(false)` — a serving run that writes nothing —
+                // means the line has no field owner at all, the
+                // mutual-standby wedge where every peer's apply looks
+                // healthy while the field stands unwritten. The
+                // staged-output comparison cannot pair honestly then —
+                // nothing wrote the field — so the staged evidence is
+                // discarded rather than consumed; the heartbeat counts
+                // the cycle as the miss it is (the tracked owner did
+                // not serve); and the peer reports `Orphaned`:
+                // surfaced, and still promotable — the run it would
+                // resume is the same proven-converged one `Tracking`
+                // would have stood on. A standing `Diverged` verdict
+                // the stamp supersedes outright: the mismatch it
+                // stands on is the ownerless condition itself — the
+                // field carries whatever the lost owner last wrote,
+                // no staged-vs-field comparison can ever clear it on
+                // an ownerless stream, and the promotion the verdict
+                // blocked is exactly the write that converges the
+                // field — so the orphan adjudication replaces it
+                // rather than wedging the pair on evidence the line
+                // can never resolve.
+                if checkpoint.source_owns_field == Some(false) {
+                    self.staged = None;
+                    if !self.line_unowned() {
+                        self.pending_orphans.push(OrphanReport {
+                            tick: landed,
+                            aligned: checkpoint.tick,
+                        });
+                    }
+                    // The narrower verdict while a diagnosis stands:
+                    // the field's own arbitration named a writer that
+                    // could not prove this line's key, so the tracked
+                    // line's ownerlessness is a *foreign* claim on the
+                    // field rather than an ownerless one — and the two
+                    // read differently to every promotion gate, the
+                    // conditional orphan grant and the unconditional
+                    // claim being two different answers to it.
+                    self.sync = match self.foreign_writer {
+                        Some(_) => StandbySync::Usurped {
+                            aligned: checkpoint.tick,
+                        },
+                        None => StandbySync::Orphaned {
+                            aligned: checkpoint.tick,
+                        },
+                    };
+                    // `Orphaned` is the promotable verdict — the run it
+                    // would resume is the same proven-converged one —
+                    // so the landed apply is fresh convergence evidence
+                    // and the proof re-stands: the line's ownerless
+                    // state is not staleness, and while ownerless
+                    // checkpoints keep arriving the armed failover
+                    // window stays open for the retry a refused
+                    // attempt needs. Only an evidence-free miss run
+                    // past the budget — a genuinely stopped source —
+                    // voids it (see `note_transfer_failed`).
+                    self.converged = true;
+                    return Ok(());
+                }
                 // The field evidence this apply carries: a comparison
-                // runs only when the checkpoint landed at the stashed
-                // staged image's tick — any other apply performs zero
-                // reads — and `compared` answers only the reads that
-                // succeeded, so `compared.len() != staged.len()` marks
-                // the field partially observed. Neither is the
-                // field-matching evidence a standing `Diverged` verdict
-                // clears on: only a fully-read same-tick match returns
-                // a diverged peer to `Tracking`.
+                // runs only when the applied checkpoint's tick is the
+                // stream position the stashed staged image predicts —
+                // any other apply performs zero reads — and `compared`
+                // answers only the reads that succeeded, so
+                // `compared.len() != staged.len()` marks the field
+                // partially observed. Neither is the field-matching
+                // evidence a standing `Diverged` verdict clears on:
+                // only a fully-read same-position match returns a
+                // diverged peer to `Tracking`. Reports journal at the
+                // apply's run tick — `landed`, equal to the staged
+                // scan's own run tick whenever the pairing holds.
                 let comparison = match self.staged.take() {
-                    Some((tick, staged)) if tick == landed => Some((
-                        tick,
+                    Some((position, staged)) if position == checkpoint.tick => Some((
+                        landed,
                         staged.len(),
                         compare_staged_points(self.executor.driver(), &staged),
                     )),
@@ -1048,10 +2950,10 @@ impl<'d> Peer<'d> {
                         }
                     }
                     None => {
-                        // No same-tick comparison ran: the apply carries
-                        // no field-matching evidence, so a standing
-                        // `Diverged` verdict stands while any other
-                        // state reconverges to `Tracking`.
+                        // No same-position comparison ran: the apply
+                        // carries no field-matching evidence, so a
+                        // standing `Diverged` verdict stands while any
+                        // other state reconverges to `Tracking`.
                         if !was_diverged {
                             self.sync = StandbySync::Tracking {
                                 aligned: checkpoint.tick,
@@ -1072,51 +2974,247 @@ impl<'d> Peer<'d> {
         }
     }
 
+    /// The commanded-state provenance check an ex-owner runs on a
+    /// pulled checkpoint: a run that once owned the field holds the
+    /// line's audit itself — its image carries every value its
+    /// commands produced and its receipt log is the submission
+    /// sequence — so a document whose commanded state disagrees with
+    /// them is forged rather than the tracked line's continuation.
+    /// Returns the first [`UnaccountedDetail`] the audit convicts, or
+    /// `None` when every commanded-state claim the document makes
+    /// traces to it. A peer that never owned proves nothing — a fresh
+    /// standby must accept the tracked line's foreign values
+    /// wholesale — so the check is the ex-owner's alone.
+    ///
+    /// The audit's jurisdiction is this run's own line: a checkpoint
+    /// naming a generation the run's stream does not carry is a
+    /// restarted or replaced source — a different history this run's
+    /// log proves nothing about, whose crossing the adoption audits
+    /// answer for — and a checkpoint claiming strictly less history
+    /// than this run knows is a stale view of the line, whose held
+    /// values legitimately predate this run's newest receipts; the
+    /// adoption audits journal their receiptless reverts rather than
+    /// the audit refusing the adoption.
+    ///
+    /// Two claims are checked. The receipt window must not fork the
+    /// submission sequence at an index this run's own log already
+    /// settled — a still-`Accepted` own entry is the demotion's
+    /// un-adjudicated submission, which the line may legitimately
+    /// have passed by; the orphan-supersession machinery settles
+    /// those. The one exception is the promote/fence window's split
+    /// mint (#775): where both entries carry distinct mint identities
+    /// ([`SubmissionId`](dcs_core::SubmissionId)) and the serving
+    /// document is the field-owning line, the disagreement names what
+    /// it is — two peers each admitted their own command at one
+    /// absolute index inside the window — so the adoption adjudicates
+    /// it by re-minting this run's displaced receipt past the adopted
+    /// window rather than refusing the document. Everything else
+    /// convicts. And each checkpointed internal `In`
+    /// sample must be a value the audit produces: this run's own held
+    /// value, the document's own pinned force, or the pulled window's
+    /// newest settled write or force verdict — a link's carrier is
+    /// derived state, not commanded, and skips. Claims outside this
+    /// surface — the `outputs` image and component state, which scan
+    /// state legitimately rewrites every cycle with no receipt — are
+    /// not auditable this way; `internal` is exactly the held
+    /// operator state a forged document can plant and keep planted.
+    pub fn unaccounted(&self, checkpoint: &Checkpoint) -> Option<UnaccountedDetail> {
+        // A document naming a generation positively different from
+        // the run's own is a restarted or replaced source — a
+        // different history this run's audit proves nothing about,
+        // whose crossing the adoption audits answer for. An
+        // unidentified generation on either side cannot differ
+        // positively, so unminted streams still audit — the forged
+        // document replays the run's own.
+        if !self.was_owner
+            || matches!(
+                (self.executor.generation(), checkpoint.generation),
+                (Some(own), Some(claimed)) if own != claimed
+            )
+        {
+            return None;
+        }
+        let own_base = self.executor.receipt_base();
+        let own_receipts = self.executor.receipts();
+        for (offset, receipt) in checkpoint.receipts.iter().enumerate() {
+            let index = checkpoint.receipt_base() + offset as u64;
+            if let Some(own) = index
+                .checked_sub(own_base)
+                .and_then(|position| own_receipts.get(position as usize))
+                && own.command != receipt.command
+                // Only a settled verdict convicts: a still-`Accepted`
+                // own entry is this run's un-adjudicated submission —
+                // the tracked line may legitimately hold a different
+                // admission at the index, and the adoption's
+                // orphan-supersession machinery settles which.
+                && !matches!(own.outcome, CommandOutcome::Accepted { .. })
+                // The promote/fence window's split mint (#775): two
+                // *identified* submissions at one index, served by the
+                // field-owning line, are the window's own race — both
+                // peers admitted their command before the fence
+                // demoted the first, and the admission index is a
+                // claim on a sequence position rather than a minted
+                // fact until the claim settles. Rule (c) of decision
+                // 95 makes such a mint provisional and adjudicates it
+                // through the merge, which re-mints this run's
+                // displaced receipt past the adopted window; it is not
+                // the forged fork the check convicts. Anything else —
+                // an unidentified pair, equal identities, or a
+                // document no field owner stands behind — convicts.
+                && !(matches!(
+                    (own.submission, receipt.submission),
+                    (Some(this), Some(other)) if this != other
+                ) && checkpoint.source_owns_field == Some(true))
+            {
+                return Some(UnaccountedDetail::Receipt {
+                    index,
+                    expected: own.command.clone(),
+                    found: receipt.command.clone(),
+                });
+            }
+        }
+        // A document claiming strictly less history than this run
+        // knows is a stale view of the line — its held values
+        // legitimately predate this run's newest receipts, so a
+        // revert they carry is the adoption audit's to journal, not
+        // this audit's to refuse. A document claiming at least this
+        // much of the line answers for every internal value it
+        // serves.
+        let claimed_high_water = checkpoint.receipt_base() + checkpoint.receipts.len() as u64;
+        if claimed_high_water < own_base + own_receipts.len() as u64 {
+            return None;
+        }
+        for (&point, sample) in &checkpoint.internal {
+            // Only a point this run serves as internal `In` can plant
+            // here: a foreign-model crossing drops what it does not
+            // carry, and a same-model apply's own checks name any
+            // unserved point precisely — provenance has no verdict on
+            // either.
+            match self.executor.point_map().get(point) {
+                Some(spec) if spec.direction == Direction::In && spec.internal.is_some() => {}
+                _ => continue,
+            }
+            if self
+                .executor
+                .sample(point)
+                .is_some_and(|own| own.value == sample.value)
+            {
+                continue;
+            }
+            match checkpoint.forces.get(&point) {
+                // A standing force substitutes the image sample
+                // outright — the document's own force set must produce
+                // exactly this value.
+                Some(&forced) if forced == sample.value => continue,
+                Some(_) => {
+                    return Some(UnaccountedDetail::Internal {
+                        point,
+                        found: sample.value,
+                    });
+                }
+                None => {}
+            }
+            if self
+                .executor
+                .point_map()
+                .links()
+                .any(|(_, input)| input == point)
+            {
+                continue;
+            }
+            if receipted_internal_value(checkpoint, own_base, point) == Some(sample.value) {
+                continue;
+            }
+            return Some(UnaccountedDetail::Internal {
+                point,
+                found: sample.value,
+            });
+        }
+        None
+    }
+
     /// The generation offset `checkpoint` applies under — the run
-    /// tick's lead over the tracked stream's own tick — and whether
-    /// the stream regressed: a checkpoint whose tick fell below the
-    /// run's last alignment, or below the run's own tick before any
+    /// tick's lead over the checkpoint's source tick — and whether
+    /// the stream regressed: a checkpoint whose source tick fell below
+    /// the run's last alignment, or below the run's own tick before any
     /// alignment stood, is the signature of a source-side reset — a
     /// cold-restarted or replaced source, or the peer's own demotion
     /// clearing the alignment the comparison stood on. The generation
-    /// check in [`apply`](Self::apply) separates the two; the offset
-    /// mechanics are the same either way. The
-    /// offset a regression resets to — `run - checkpoint.tick` —
-    /// lands the apply at the run's current tick, so the run's clock
-    /// never rewinds scans it already ran and journaled; a
-    /// same-generation pull keeps the standing offset, and a first
-    /// alignment at or above the run's tick lands at the checkpoint's
-    /// own.
+    /// check in [`apply`](Self::apply) separates which regressions
+    /// journal; the offset mechanics are the same either way.
     ///
-    /// The standing offset is re-evaluated against the run's live lead
-    /// on every same-generation apply rather than carried verbatim: it
-    /// exists to keep the run's clock monotone across the restart that
-    /// seeded it, so it may cover at most the gap that remains. A
-    /// tracked stream still below the run's tick lands the apply at
-    /// the run's tick — never ahead of it — and one that has recovered
-    /// to or past the run's tick clears the offset entirely, so the
-    /// run's clock rejoins the stream's domain. A stale offset can
-    /// therefore realign the run backward onto the line or hold it in
-    /// place, but it can never land the apply ahead of both clocks —
-    /// the bound that keeps two mutually tracking peers' seeded
-    /// offsets from feeding back into each other's served ticks.
+    /// The offset is the run's live lead over the stream —
+    /// `run - checkpoint.tick` — recomputed on every apply rather
+    /// than carried, so a tracked stream still below the run's tick
+    /// lands the apply at the run's own tick and one that has reached
+    /// or passed it lands at the stream's own — the run's clock
+    /// rejoining the stream's domain as it recovers. The run's tick is
+    /// the journal and history attribution domain and never rewinds:
+    /// the hold applies whether the lagging stream regressed across a
+    /// source restart or merely kept its own line while the run
+    /// out-scanned it through a degraded window — a warm-resumed
+    /// source resumes mid-range, still above the stale alignment but
+    /// below the run's clock, and realigning the run backward onto it
+    /// would re-issue ticks the run already journaled and recorded.
+    /// Landing at the run's own tick also never lands the apply ahead
+    /// of both clocks — the bound that keeps two mutually tracking
+    /// peers' run ticks from feeding back into each other's served
+    /// ticks.
     fn stream_offset(&self, checkpoint: &Checkpoint) -> (u64, bool) {
         let run = self.executor.tick();
         let regressed = match self.aligned {
             Some(aligned) => checkpoint.tick < aligned,
             None => checkpoint.tick < run,
         };
-        if regressed {
-            (run.0 - checkpoint.tick.0, true)
-        } else if self.aligned.is_none() {
-            (0, false)
-        } else {
-            (
-                self.tick_offset
-                    .min(run.0.saturating_sub(checkpoint.tick.0)),
-                false,
-            )
+        (run.0.saturating_sub(checkpoint.tick.0), regressed)
+    }
+
+    /// Records the declared lead the bound's growth reads against: the
+    /// first transfer that lands under an alignment fixes the baseline,
+    /// and so does the first transfer after a miss run. The bound then
+    /// measures how far this run's clock has outpaced the line *while
+    /// the line has been serving it* — never how far the two clocks sit
+    /// apart in absolute terms, and never across a window where the
+    /// line could not be reached. Both are the honest shape: a bound on
+    /// the absolute gap would refuse every young tracker against a
+    /// long-running incumbent, pace aside, and a lead that grew while
+    /// no transfer landed grew for reasons the claim cannot attribute
+    /// to cadence, so the first transfer out of that window re-bases it
+    /// rather than counting it against the claimant.
+    fn note_alignment_lead(&mut self, line_resumed: bool) {
+        if line_resumed || self.claim_lead_base.is_none() {
+            self.claim_lead_base = self.declared_lead();
         }
+    }
+
+    /// This run's own tick measured from the tracked line's last served
+    /// stamp — the declared lead, signed: negative while the run trails
+    /// the line it tracks, which is the resting shape of a young
+    /// tracker. `None` before any transfer aligned this run, where there
+    /// is no line to measure against.
+    fn declared_lead(&self) -> Option<i64> {
+        let aligned = self.aligned?;
+        Some(
+            i64::try_from(self.executor.tick().0).unwrap_or(i64::MAX)
+                - i64::try_from(aligned.0).unwrap_or(i64::MAX),
+        )
+    }
+
+    /// The claim basis a promotion of this run declares: this run's own
+    /// run tick, the tracked line's last served stamp, and the lead
+    /// between them beside the growth the recorded bound reads.
+    /// `None` while no transfer has aligned this run — nothing to
+    /// declare, and a promotion is refused `not_converged` anyway.
+    pub fn claim_basis(&self) -> Option<ClaimBasis> {
+        let lead = self.declared_lead()?;
+        let baseline = self.claim_lead_base.unwrap_or(lead);
+        Some(ClaimBasis {
+            run: self.executor.tick(),
+            source: self.aligned?,
+            lead,
+            baseline,
+            growth: lead - baseline,
+        })
     }
 
     /// Whether a regressed checkpoint stream crossed a source
@@ -1125,13 +3223,13 @@ impl<'d> Peer<'d> {
     /// [`SourceRestart`] on. `own` is the generation this run's
     /// executor currently stamps, `checkpoint`'s the pulled stream's:
     /// only a checkpoint whose generation positively differs proves
-    /// the source began a new tick domain. A demoted peer's first pull
-    /// on its uninterrupted successor regresses on the generation its
-    /// own captures stamped — the tracking reset was the peer's, so
-    /// nothing journals. Either side unidentified — a checkpoint a
-    /// pre-generation build wrote, or a run never given a generation —
-    /// can prove no continuation, so the regression journals as a
-    /// restart exactly as it always did.
+    /// the source began a new source-tick domain. A demoted peer's
+    /// first pull on its uninterrupted successor regresses on the
+    /// generation its own captures stamped — the tracking reset was the
+    /// peer's, so nothing journals. Either side unidentified — a
+    /// checkpoint a pre-generation build wrote, or a run never given a
+    /// generation — can prove no continuation, so the regression journals
+    /// as a restart exactly as it always did.
     fn generation_boundary(own: Option<u64>, checkpoint: Option<u64>) -> bool {
         own.is_none_or(|own| Some(own) != checkpoint)
     }
@@ -1158,14 +3256,29 @@ impl<'d> Peer<'d> {
     /// An absolute index is not an identity: inside the promote/fence
     /// window the demoting peer and its successor can each mint a
     /// receipt at one index for different submissions, so the
-    /// reconciliation compares
-    /// [`CommandReceipt::same_submission`] — the mint identity where
-    /// one exists, the index plus command where neither does. It
+    /// reconciliation compares [`CommandReceipt::same_submission`] —
+    /// the mint identity where one exists, the whole submission record
+    /// — command, actor, and the declared `reason` — where neither
+    /// does. It
     /// settles `Rejected` carrying [`CommandError::Superseded`] and
     /// queues for the journal rather than vanishing unaudited. A
     /// covered entry's outcome is the line's own — re-queued still
     /// `Accepted`, or already settled on the tracked run — and needs
     /// nothing.
+    ///
+    /// The index alone does not make the adopted entry this
+    /// submission's carry: two different admissions can claim the same
+    /// absolute index — the receipt this run minted and one the
+    /// successor admitted to the same slot once it owned the sequence
+    /// — and an identical command there means nothing on its own: an
+    /// operator's repeat write to the same point collides exactly. The
+    /// adopted entry *is* this submission when it is this receipt — the
+    /// verbatim copy the line adopted, still `Accepted` on the
+    /// submission's own apply boundary — or the line's settlement of
+    /// it: a settled adopted entry counts as carried only when the
+    /// whole submission record matches, so a difference convicts a
+    /// different admission and the suspended entry resolves
+    /// `superseded`, never absorbed as the line's carry.
     ///
     /// An already-settled entry the collision displaced takes the other
     /// route: its verdict is already journaled, so only the index the
@@ -1243,9 +3356,148 @@ impl<'d> Peer<'d> {
                         },
                     },
                     actor: receipt.actor.clone(),
+                    reason: receipt.reason.clone(),
                     submission: receipt.submission,
                 },
             ));
+        }
+    }
+
+    /// Audits the force-set changes a successful adoption made: every
+    /// point whose standing force the adoption changed — stood up,
+    /// re-valued, or dropped — must trace to the merged receipt log,
+    /// the pair's one command audit. `Executor::adopt_receipts`
+    /// already re-asserts this run's unreached settled verdicts over
+    /// the adopted image, so what remains here is the residual the
+    /// receipted-command contract names: a change whose newest settled
+    /// verdict for the point does not produce the adopted state has
+    /// the adoption itself as its only cause, and it must not stand
+    /// silently — the QA finding's quality-only resurrection. Each
+    /// such change queues a [`CommandReceipt`] carrying the equivalent
+    /// force or release `Applied` at the landing tick, its `actor`
+    /// naming the adopting source, so the durable journal always
+    /// answers "who re-stood this force". Receipted changes journal
+    /// through the ordinary settle-diff path and queue nothing here.
+    fn note_adopted_forces(
+        &mut self,
+        prior: &BTreeMap<PointId, Value>,
+        checkpoint: &Checkpoint,
+        landed: Tick,
+    ) {
+        let post = self.executor.forces();
+        let changed: BTreeSet<PointId> = prior.keys().chain(post.keys()).copied().collect();
+        for point in changed {
+            let adopted = post.get(&point).copied();
+            if prior.get(&point).copied() == adopted {
+                continue;
+            }
+            if receipted_force_state(self.executor.receipts(), point) == Some(adopted) {
+                continue;
+            }
+            let command = match adopted {
+                Some(value) => Command::ForcePoint {
+                    point,
+                    kind: value.kind(),
+                    value,
+                },
+                None => Command::UnforcePoint { point },
+            };
+            self.pending_adoption_receipts.push(CommandReceipt {
+                command,
+                outcome: CommandOutcome::Applied { tick: landed },
+                actor: Some(adoption_actor(checkpoint)),
+                reason: None,
+                // The adoption authored this record, not an admission:
+                // no minting run admitted the change, so it carries no
+                // submission identity (#775).
+                submission: None,
+            });
+        }
+    }
+
+    /// Audits the held-value changes a successful adoption made: a
+    /// writable internal `In` point's held sample legitimately moves
+    /// only through a receipted `WriteValue` — or under a force pair,
+    /// whose audit [`note_adopted_forces`](Self::note_adopted_forces)
+    /// owns — so a change whose newest settled write verdict does not
+    /// produce the adopted value has the adoption itself as its only
+    /// cause, and it must not stand silently. The QA finding's
+    /// dead-incumbent revert is exactly this shape: the restarted
+    /// source's legitimately staler line wins the field, the
+    /// rejoining peer adopts it, and its receipted-and-applied writes
+    /// roll back to the adopted image — formerly leaving a bare
+    /// `point_changed` while the served receipt log rewrote itself to
+    /// the adopted line.
+    ///
+    /// The verdict lookup reads the merged log first — this run's
+    /// unreached tail restored into it included — and falls back to
+    /// this run's own prior log: a staler window's high-water gap can
+    /// drop the run's settled verdicts from the merged log without
+    /// erasing the durable truth they record, while a newer verdict
+    /// the merged log carries that already produces the adopted value
+    /// explains the change by the pair's own audit. Each revert then
+    /// queues a [`CommandReceipt`] carrying the equivalent
+    /// `WriteValue` `Applied` at the landing tick, its `actor` naming
+    /// the adopting source — never a new entry in the served receipt
+    /// log, which stays the adopted line's own.
+    fn note_adopted_writes(
+        &mut self,
+        prior: &BTreeMap<PointId, Sample>,
+        prior_receipts: &[CommandReceipt],
+        checkpoint: &Checkpoint,
+        landed: Tick,
+    ) {
+        let post = self.executor.held_internals();
+        let changed: BTreeSet<PointId> = prior.keys().chain(post.keys()).copied().collect();
+        for point in changed {
+            let adopted = post.get(&point).map(|sample| sample.value);
+            if prior.get(&point).map(|sample| sample.value) == adopted {
+                continue;
+            }
+            // The command audit covers only the command surface: a
+            // point the model never declared writable has no
+            // `WriteValue` to claim or contradict — a link-carried
+            // internal's value moves with the adopted image by
+            // design, and a revision-dropped point has no write to
+            // revert.
+            if !self
+                .executor
+                .point_map()
+                .get(point)
+                .is_some_and(|spec| spec.writable)
+            {
+                continue;
+            }
+            let verdict = receipted_point_verdict(self.executor.receipts(), point)
+                .or_else(|| receipted_point_verdict(prior_receipts, point));
+            match verdict {
+                // The merged log's own newest settled write already
+                // produces the adopted value — the change is the
+                // line's audit, not the adoption's.
+                Some(PointVerdict::Write(settled)) if Some(settled) == adopted => continue,
+                // A force pair holds the point's newest verdict — the
+                // force audit owns its image change.
+                Some(PointVerdict::Force) => continue,
+                _ => {}
+            }
+            // No `WriteValue` can name a removal — a point the
+            // adoption dropped from the held map entirely is a
+            // revision or model fact, not a reverted command.
+            let Some(value) = adopted else { continue };
+            self.pending_adoption_receipts.push(CommandReceipt {
+                command: Command::WriteValue {
+                    point,
+                    kind: value.kind(),
+                    value,
+                },
+                outcome: CommandOutcome::Applied { tick: landed },
+                actor: Some(adoption_actor(checkpoint)),
+                reason: None,
+                // The adoption authored this record, not an admission:
+                // no minting run admitted the change, so it carries no
+                // submission identity (#775).
+                submission: None,
+            });
         }
     }
 
@@ -1305,8 +3557,28 @@ impl<'d> Peer<'d> {
             return Err(ApplyError::OwnsField);
         }
         // A produced checkpoint means the active served — the heartbeat
-        // miss count resets as in `apply`, whether the crossing lands.
-        self.misses = 0;
+        // miss count resets as in `apply`, whether the crossing lands —
+        // and a checkpoint whose serving run owns no field writes counts
+        // the same miss `apply` counts: the tracked owner did not serve.
+        // The claim bound's re-base reads the same resume `apply` reads.
+        let line_resumed = self.misses != 0;
+        if checkpoint.source_owns_field == Some(false) {
+            self.misses += 1;
+        } else {
+            self.misses = 0;
+        }
+        // The same commanded-state provenance `apply` demands — a
+        // model-boundary crossing is still an adoption of the pulled
+        // document's claimed line, so a forged document refuses here
+        // exactly as it does on the same-model path.
+        if let Some(detail) = self.unaccounted(checkpoint) {
+            let error = ApplyError::Unaccounted(Box::new(detail));
+            self.sync = StandbySync::Degraded {
+                detail: error.to_string(),
+            };
+            self.converged = false;
+            return Err(error);
+        }
         // The same monotone-clock rule as `apply`: a regressed stream's
         // crossing lands at the run's current tick, not the
         // checkpoint's own — and the resync queues for the journal
@@ -1314,6 +3586,13 @@ impl<'d> Peer<'d> {
         // The still-`Accepted` receipts this log holds are what the
         // crossing either carries or abandons, exactly as in `apply`.
         let pending = self.pending_accepted();
+        // The force-set and held-value adoption audits run the same
+        // diffs `apply` does — a carried force set or held value
+        // answers to the merged receipt log, and an unbacked change
+        // journals naming the source.
+        let prior_forces = self.executor.forces().clone();
+        let prior_internals = self.executor.held_internals();
+        let prior_receipts = self.executor.receipts().to_vec();
         let (offset, regressed) = self.stream_offset(checkpoint);
         // As in `apply`: the regression journals a `SourceRestart` only
         // when the stream's generation differs from the run's own — a
@@ -1328,6 +3607,9 @@ impl<'d> Peer<'d> {
         } else {
             adopted = Checkpoint {
                 tick: landed,
+                // As in `apply`: the landing offset is this run's
+                // lead over the pull's resolved stream position.
+                stream_tick: Some(checkpoint.stream_tick.unwrap_or(checkpoint.tick)),
                 ..checkpoint.clone()
             };
             self.executor.reinitialize(&adopted)
@@ -1335,7 +3617,8 @@ impl<'d> Peer<'d> {
         match applied {
             Ok(report) => {
                 self.note_abandoned_commands(pending);
-                self.tick_offset = offset;
+                self.note_adopted_forces(&prior_forces, checkpoint, landed);
+                self.note_adopted_writes(&prior_internals, &prior_receipts, checkpoint, landed);
                 if boundary {
                     self.pending_restarts.push(SourceRestart {
                         tick: landed,
@@ -1350,9 +3633,18 @@ impl<'d> Peer<'d> {
                     report: Box::new(report.clone()),
                 };
                 self.aligned = Some(checkpoint.tick);
+                self.applied_offset = Some(offset);
+                self.note_alignment_lead(line_resumed);
                 // Staged evidence belongs to the old alignment — the
                 // divergence check does not pair against a crossing.
                 self.staged = None;
+                // `Reinitialized` is the promotable verdict the crossing
+                // earns — the landed apply is fresh convergence
+                // evidence, so the proof re-stands exactly as the
+                // `Orphaned` apply's does in `apply`: an ownerless
+                // line's carries are not staleness, and only an
+                // evidence-free miss run past the budget voids it (see
+                // `note_transfer_failed`).
                 self.converged = true;
                 Ok(report)
             }
@@ -1369,23 +3661,37 @@ impl<'d> Peer<'d> {
     /// Marks the tracking peer [`Degraded`](StandbySync::Degraded)
     /// after a transfer failure that produced no checkpoint at all — an
     /// unreachable active or a refused request — and counts the
-    /// heartbeat miss toward the failover budget. Misses beyond the
-    /// budget void the convergence proof a self-promotion would rely
-    /// on: the failover window closes with it.
+    /// heartbeat miss toward the failover budget. A run of these
+    /// evidence-free misses past the budget is the staleness bound —
+    /// the convergence proof a self-promotion would rely on voids and
+    /// the failover window closes with it. The void is only as
+    /// permanent as the silence producing it: the next landed apply
+    /// re-proves the run — an `Orphaned` apply on an ownerless line
+    /// included — and the proof stands again.
     ///
     /// A produced-nothing pull carries no field evidence, so a standing
     /// [`Diverged`](StandbySync::Diverged) verdict stands through the
     /// miss: the peer's promotability-blocking truth — its staged
-    /// outputs differ from the field — is unresolved until a same-tick
-    /// comparison reads the field and matches, while the miss still
-    /// counts toward the failover budget and reports in
-    /// [`TrackReport::Missed`].
+    /// outputs differ from the field — is unresolved until a same-position
+    /// comparison reads the field and matches. A standing
+    /// [`Orphaned`](StandbySync::Orphaned) verdict stands the same way:
+    /// the miss proves this cycle produced no checkpoint, not that the
+    /// tracked line gained a field owner — letting it flicker the
+    /// verdict to `Degraded` would re-transition `Orphaned` on every
+    /// later apply and re-journal the one episode's
+    /// [`OrphanReport`] per pull. The miss still counts toward the
+    /// failover budget and reports in [`TrackReport::Missed`].
     pub fn note_transfer_failed(&mut self, detail: impl fmt::Display) {
         self.misses += 1;
         if self.failover.is_some_and(|budget| self.misses > budget) {
             self.converged = false;
         }
-        if !matches!(self.sync, StandbySync::Diverged { .. }) {
+        if !matches!(
+            self.sync,
+            StandbySync::Diverged { .. }
+                | StandbySync::Orphaned { .. }
+                | StandbySync::Usurped { .. }
+        ) {
             self.sync = StandbySync::Degraded {
                 detail: detail.to_string(),
             };
@@ -1411,7 +3717,8 @@ impl<'d> Peer<'d> {
     /// self-promotion check at this boundary. The [`TrackReport`]
     /// describes what the cycle did, for the caller's logs; transitions
     /// the cycle queued — divergences, reinitializations, role changes —
-    /// still drain through the `take_*` queues for the journal.
+    /// still drain through [`drain_pending`](Peer::drain_pending) for
+    /// the journal.
     ///
     /// The caller's scan cycle waits on `pull`, so a pull that can
     /// block on the network must be bounded or run on a fetch worker —
@@ -1424,30 +3731,387 @@ impl<'d> Peer<'d> {
     /// A field-owning peer performs no pull and no failover check:
     /// [`TrackReport::OwnsField`], and `pull` is never invoked. The scan
     /// itself stays caller-owned — this is the pre-scan tracking half.
+    /// A pull that produced a checkpoint does not prove the tracked
+    /// line has a field owner: when the applied checkpoint's
+    /// `source_owns_field` stamp reports its serving run writes
+    /// nothing, [`apply`](Self::apply) names the wedge
+    /// [`StandbySync::Orphaned`], and this cycle then runs the orphan
+    /// response — a peer that once owned the field probes its claim
+    /// through the [`with_field_ensure`](Self::with_field_ensure) hook,
+    /// re-arming the released claim while the field stays unclaimed so
+    /// it is not left open to a foreign grab, and a failover-armed peer
+    /// runs the same budget check a produced-nothing pull would: the
+    /// orphan apply already counted the cycle's miss, so the budget-th
+    /// orphan self-promotes at this boundary — the tracked line's
+    /// serving run owns nothing, which is precisely the dead-owner
+    /// condition failover exists for.
+    ///
+    /// A self-promotion the field's arbitration refuses — a live
+    /// incumbent still holding the claim, or a transient ask — does not
+    /// close the gate it fired at: the boundary stays live while the
+    /// convergence proof stands, each later due cycle retries the
+    /// claim, and the peer promotes the cycle the refusal cause clears.
+    /// The episode still journals — one [`PromotionRefusal`] queues per
+    /// distinct refusal cause a continuous refused streak produces (see
+    /// [`PeerEvent::PromotionRefusal`]) — so
+    /// the durable record names the attempt a retrying gate makes
+    /// without journaling it once per scan.
     pub fn track_once(&mut self, pull: impl FnOnce() -> Result<Checkpoint, String>) -> TrackReport {
         if self.owns_field() {
+            self.open_refusal = None;
             return TrackReport::OwnsField;
         }
         let detail = match pull() {
             Ok(checkpoint) => {
+                // A tracked line reporting a field owner means the
+                // preemption the fencing-loss mark covers already
+                // resolved through succession: the mark's reclaim must
+                // not linger to preempt that incumbent's later yield —
+                // takeovers from here are the ordinary promote and
+                // failover paths' to arbitrate.
+                if checkpoint.source_owns_field == Some(true) {
+                    self.fencing_lost = false;
+                    self.fencing_point = None;
+                }
+                let orphaned = checkpoint.source_owns_field == Some(false);
                 return match self.transfer(&checkpoint) {
-                    Ok(transfer) => TrackReport::Applied(transfer),
-                    Err(error) => TrackReport::Refused(error),
+                    Ok(transfer) => {
+                        if orphaned {
+                            self.ensure_field_claim();
+                            if self.failover_due() {
+                                let detail = "the tracked line's serving run owns no field writes"
+                                    .to_string();
+                                return match self.self_promote() {
+                                    Ok(()) => {
+                                        self.open_refusal = None;
+                                        TrackReport::Promoted {
+                                            detail,
+                                            report: self.report(),
+                                        }
+                                    }
+                                    Err(error) => {
+                                        self.note_promotion_refused(&error);
+                                        TrackReport::PromotionRefused { detail, error }
+                                    }
+                                };
+                            }
+                        }
+                        self.open_refusal = None;
+                        TrackReport::Applied(transfer)
+                    }
+                    Err(error) => {
+                        self.open_refusal = None;
+                        TrackReport::Refused(error)
+                    }
                 };
             }
             Err(detail) => detail,
         };
         self.note_transfer_failed(&detail);
         if !self.failover_due() {
+            self.open_refusal = None;
             return TrackReport::Missed { detail };
         }
         match self.self_promote() {
-            Ok(()) => TrackReport::Promoted {
-                detail,
-                report: self.report(),
-            },
-            Err(error) => TrackReport::PromotionRefused { detail, error },
+            Ok(()) => {
+                self.open_refusal = None;
+                TrackReport::Promoted {
+                    detail,
+                    report: self.report(),
+                }
+            }
+            Err(error) => {
+                self.note_promotion_refused(&error);
+                TrackReport::PromotionRefused { detail, error }
+            }
         }
+    }
+
+    /// Queues one [`PromotionRefusal`] for the journal per distinct
+    /// refusal cause the standing refused streak has produced — a retry
+    /// naming the same error as the last journaled attempt queues
+    /// nothing, so an armed gate retrying a standing refusal does not
+    /// journal the attempt once per scan. The streak's `open_refusal`
+    /// record is what the dedup reads; `track_once` clears it on any
+    /// outcome that is not a refused self-promotion, so a refusal after
+    /// the gate's proof lapsed and re-stood journals as its own
+    /// episode.
+    fn note_promotion_refused(&mut self, error: &SwitchError) {
+        if self.open_refusal.as_ref() == Some(error) {
+            return;
+        }
+        self.pending_refusals.push(PromotionRefusal {
+            tick: self.tick(),
+            misses: self.misses,
+            error: error.clone(),
+        });
+        self.open_refusal = Some(error.clone());
+    }
+
+    /// The orphan cycle's conditional re-arm — run while the tracked
+    /// line reports no field owner: a peer that once owned the field
+    /// probes the claim it gave up through
+    /// [`with_field_ensure`](Self::with_field_ensure), granted only
+    /// while the field is unclaimed or already names this run's token
+    /// and refused while a different owner stands — so a released
+    /// claim re-arms instead of leaving the field open to a foreign
+    /// grab, and no probe ever preempts. A peer that never owned has
+    /// no claim to re-arm; a peer built without the hook probes
+    /// nothing; a probe's refusal or failure leaves the wedge
+    /// surfaced, not silently worsened.
+    ///
+    /// The probe stays off for a peer whose ownership ended in its own
+    /// voluntary demotion — the `yielded` mark the `origin: request`
+    /// release sets: that release was this run's deliberate hand-back,
+    /// so re-arming the claim under this run's token would stand a
+    /// member reporting `standby` on the field's arbitration and fence
+    /// every conditional path the demotion handed the field to. A
+    /// fencing-loss demotion's orphan coverage keeps: the field took
+    /// that ownership, so its released claim is exactly the wedge the
+    /// re-arm exists to cover.
+    ///
+    /// A granted probe is durable: one [`ClaimRearm`] queues per
+    /// landing — the record naming who re-took the claim the orphan
+    /// transition alone cannot attribute — deduplicated across the
+    /// contiguous granted streak so repeat probes confirming the same
+    /// re-arm journal once. A refusal the field's arbitration
+    /// attributes to a standing foreign owner journals one
+    /// observed-claimant record per distinct token — see
+    /// [`observe_claim_refusal`](Self::observe_claim_refusal).
+    fn ensure_field_claim(&mut self) {
+        if !self.was_owner || self.yielded {
+            return;
+        }
+        let Some(ensure) = &self.ensure else {
+            return;
+        };
+        match ensure.0() {
+            Ok(true) => {
+                // The probe granted rather than observed — report the
+                // held claim the grant confirmed without waiting on
+                // next scan's probe, and journal the landing once per
+                // granted streak.
+                self.field_claim = Some(FieldClaim::Held);
+                if !self.ensure_granted {
+                    self.ensure_granted = true;
+                    if let Some(point) = self.observation_point() {
+                        self.pending_rearms.push(ClaimRearm {
+                            tick: self.tick(),
+                            point,
+                        });
+                    }
+                }
+            }
+            Ok(false) => {
+                // A different owner stood between landings — the next
+                // grant is a new landing, and the refusal's claimant
+                // journals through the observation path.
+                self.ensure_granted = false;
+                self.observe_claim_refusal(self.tick());
+            }
+            Err(_) => {}
+        }
+    }
+
+    /// The fencing-loss reclaim — the released-preemption wedge escape
+    /// [`with_field_reclaim`](Self::with_field_reclaim) arms. Only a
+    /// `standby` ex-owner whose ownership ended in the field's fencing
+    /// probes — the loss mark standing, or the orphaned pull reporting
+    /// the ownerless line after it stood down — while a voluntarily
+    /// demoted peer's `yielded` mark stays its probe: the arm means
+    /// "this run owned the field, the claim was preempted under it, and
+    /// no owner stands now" — the ex-owner the reclaim exists for. The
+    /// probe is the *bound* conditional
+    /// grant: `Ok(true)` takes the field's write-ownership back under
+    /// this run's token — the field stood unclaimed, already named the
+    /// token, or stood under a different owner's holderless claim, the
+    /// dead-owner or orphan-placeholder shape the re-grant preempts
+    /// without abandoning a live attachment — joining the run's
+    /// attachments to the claim's holders so the re-lifted gate's
+    /// writes pass the arbitration it re-took, then reports
+    /// `promoting` exactly as a promotion's granted claim does, the
+    /// next field-owning scan settling `active`. `Ok(false)` — a
+    /// different owner's claim still has live holders — and `Err`
+    /// leave mark and gate untouched for the next scan: the reclaim
+    /// never preempts a live attachment, so a still-held rogue claim
+    /// keeps the field until it releases and a concurrent reclaimer's
+    /// grant refuses the loser. A peer built without the hook probes
+    /// nothing — the wedge stands until an operator's promote
+    /// unwedges, the pre-hook behavior. A refused probe the field's
+    /// arbitration attributes to a standing foreign owner journals one
+    /// observed-claimant record per distinct token — the audit trail
+    /// the preempt-and-release episode between this run's writes would
+    /// otherwise leave empty.
+    ///
+    /// The ask the arm issues may *preempt*: a claim standing on the
+    /// field is someone's ownership epoch, and a different owner's
+    /// holderless claim reads identical to a dead owner's at the
+    /// arbitration — a merely transport-frozen incumbent's included —
+    /// so an ex-owner whose image is not current with the field's line
+    /// could seize it and silently roll the incumbent's applied state
+    /// back. The preempting ask therefore runs only on the standing
+    /// convergence proof `self_promote` reads — the last applied
+    /// verdict was promotable — while an `unclaimed` observation this
+    /// scan's own probe just answered needs no proof: nothing stands
+    /// to preempt there, the released-preemption wedge being exactly
+    /// what the reclaim exists to close. An unconverged ex-owner's
+    /// probe never issues against a standing claim — a re-attaching
+    /// incumbent's epoch outlives the freeze — and an unanswered probe
+    /// is no observation: the cautious read is that a claim may stand.
+    fn reclaim_field_claim(&mut self, tick: Tick, field_answered: bool) {
+        // The arm is the ex-owner's live evidence that no owner stands:
+        // the loss mark itself — standing since the fenced-write
+        // demotion while no tracked owner resolved the succession — or
+        // an orphaned pull, the tracked line itself reporting the field
+        // ownerless, which re-arms the reclaim where the mark stood
+        // down for the successor that has since left. A voluntary
+        // demotion's `yielded` mark keeps the probe off: the claim this
+        // run handed back belongs to the successors' conditional paths,
+        // not to this standby's re-take under its own token.
+        let armed = self.was_owner && !self.yielded && (self.fencing_lost || self.line_unowned());
+        if self.role != Role::Standby || !armed {
+            return;
+        }
+        // The convergence gate: the probe's grant preempts the
+        // holderless shapes the field cannot tell from a dead owner's —
+        // including a live incumbent whose transport froze — so the
+        // ask issues only where the field just answered `unclaimed` or
+        // the run's convergence proof still stands.
+        let free_field = field_answered && self.field_claim == Some(FieldClaim::Unclaimed);
+        if !(free_field || self.converged) {
+            return;
+        }
+        let Some(outcome) = self.reclaim.as_ref().map(|reclaim| reclaim.0()) else {
+            return;
+        };
+        match outcome {
+            Ok(true) => {
+                self.open_gate();
+                self.attribution = SwitchAttribution {
+                    origin: SwitchOrigin::Reclaim,
+                    actor: None,
+                };
+                self.change(tick, Role::Promoting);
+                // The probe granted the claim rather than observing it —
+                // report the held claim the grant just took without
+                // waiting on next scan's observation.
+                self.field_claim = Some(FieldClaim::Held);
+            }
+            // A refusal names the standing owner the verdict carried —
+            // journal it once per claimant, deduplicated on the token.
+            Ok(false) => self.observe_claim_refusal(tick),
+            Err(_) => {}
+        }
+    }
+
+    /// The deferred startup grant's retry — the born-active pending
+    /// state's per-scan claim ask. While `startup_pending` stands the
+    /// launched run has already stood down behind the pending-claim
+    /// surface; each scan whose claim probe answered the field re-issues
+    /// the conditional `startup_claim` ask: a grant lifts the gate and
+    /// reports `promoting`, settling `active` on the next scan under the
+    /// lifted gate — completing what the boot could not — while a
+    /// refusal ends the pending state and settles the deferred
+    /// [`Activation::Refused`]: the verdict no activation result could
+    /// deliver latches into `startup_refusal` for the run's shell to
+    /// dispose of under the same contract the activation-time answer
+    /// takes — rejoin the declared pair, exit where none was declared —
+    /// and journals once beside the observed-claimant record
+    /// attributing it. An `Err` leaves the run waiting for the next
+    /// answered contact — no verdict answered. An unanswered contact
+    /// issues no ask: the field cannot be asked.
+    fn retry_startup_claim(&mut self, tick: Tick, field_answered: bool) {
+        if !self.startup_pending || !field_answered {
+            return;
+        }
+        let Some(outcome) = self.startup_claim.as_ref().map(|startup| startup.0()) else {
+            self.startup_pending = false;
+            return;
+        };
+        match outcome {
+            Ok(true) => {
+                self.startup_pending = false;
+                self.open_gate();
+                self.attribution = SwitchAttribution {
+                    origin: SwitchOrigin::Reclaim,
+                    actor: None,
+                };
+                self.change(tick, Role::Promoting);
+                // The grant just took the claim — report the held
+                // arbitration without waiting on the next probe.
+                self.field_claim = Some(FieldClaim::Held);
+            }
+            Ok(false) => {
+                self.startup_pending = false;
+                // The incumbent's refusal settled the startup — the
+                // deferred half of the born-active contract's refused
+                // verdict, arriving at the first answered contact
+                // rather than at activation. The run already stands on
+                // the standby surface the pending stand-down reported;
+                // the verdict itself latches for the shell — a run
+                // whose pair was declared keeps standing, one launched
+                // without a pair has nothing to rejoin and its shell
+                // ends it exactly as the activation-time answer does —
+                // while the journal record makes the settle durable on
+                // run shapes the shell's exit message cannot reach.
+                self.field_claim = Some(FieldClaim::Held);
+                self.observe_claim_refusal(tick);
+                let error = startup_claim_refused();
+                self.startup_refusal = Some(error.clone());
+                self.pending_startup_refusals
+                    .push(StartupRefusal { tick, error });
+            }
+            Err(_) => {}
+        }
+    }
+
+    /// A conditional grant probe was refused — the field's arbitration
+    /// found a different owner's claim standing. Queue one
+    /// [`ClaimObservation`] per claimant token the run has not already
+    /// journaled this ownership epoch: deduplicated so a standing
+    /// foreign claim journals once rather than once per refused probe,
+    /// and the claimant the fencing-loss verdict already attributed —
+    /// seeded into `observed_claimants` when the loss was marked —
+    /// repeats nothing.
+    fn observe_claim_refusal(&mut self, tick: Tick) {
+        let Some(observer) = &self.observer else {
+            return;
+        };
+        let claimants = observer.0();
+        let Some(point) = self.observation_point() else {
+            return;
+        };
+        for claimant in claimants {
+            if self.observed_claimants.insert(claimant) {
+                self.pending_observations.push(ClaimObservation {
+                    tick,
+                    point,
+                    claimant,
+                });
+            }
+        }
+    }
+
+    /// The field point a claim observation attributes through — the
+    /// point the standing fencing-loss mark was recorded on where one
+    /// stands (the reclaim probes the claim domain that point's write
+    /// was fenced from), else a field-served `Out` point: the claim
+    /// arbitrates writes, so a writable point anchors the record, any
+    /// field point serving where the map declares none.
+    fn observation_point(&self) -> Option<PointId> {
+        self.fencing_point.or_else(|| {
+            self.executor
+                .point_map()
+                .iter()
+                .find(|(_, spec)| spec.internal.is_none() && spec.direction == Direction::Out)
+                .or_else(|| {
+                    self.executor
+                        .point_map()
+                        .iter()
+                        .find(|(_, spec)| spec.internal.is_none())
+                })
+                .map(|(point, _)| point)
+        })
     }
 
     /// Runs one scan and settles a pending role transition: the first
@@ -1461,9 +4125,15 @@ impl<'d> Peer<'d> {
     /// [`apply`](Self::apply) runs; a field-owning peer stages nothing —
     /// its writes are the field's truth.
     ///
-    /// A field-owning scan whose write the shared field fenced —
-    /// [`IoError::Fenced`](dcs_core::IoError::Fenced), meaning the claim
-    /// this peer held was preempted by another attachment — completes
+    /// A field-owning scan whose field-mutating boundary the shared
+    /// field fenced — a `write` answering
+    /// [`IoError::Fenced`](dcs_core::IoError::Fenced), or a cyclic
+    /// `exchange` refused the same way: under the process-image
+    /// contract per-point writes only stage, so the verdict arrives at
+    /// the exchange and the executor marks it identically — meaning
+    /// the claim this peer held was preempted by another attachment,
+    /// or died with the claim-bound connection a link flap dropped —
+    /// completes
     /// degraded like any field fault: the refusal counts in `io_health`
     /// and one [`FencingLoss`] queues for the journal. But the peer is
     /// superseded, and a degraded report alone would leave it still
@@ -1478,12 +4148,26 @@ impl<'d> Peer<'d> {
     /// The same demotion reconciles the command audit: commands the
     /// still-reporting-`active` peer accepted between the preemption
     /// and this detection scan applied at its head onto an image the
-    /// field never saw — the superseding owner does not carry them —
-    /// so [`Executor::supersede_commands`] rewrites the boundary's
-    /// `Applied` settlements `Rejected` with
-    /// [`CommandError::Superseded`](dcs_core::CommandError::Superseded)
-    /// before the journaled `CommandSettled` would echo a phantom
-    /// application.
+    /// field never saw — but whether the superseding owner carries
+    /// the admissions is not this run's to decide, since the promoted
+    /// peer's boundary pull may already hold the still-`Accepted`
+    /// receipts. [`Executor::suspend_boundary_commands`] therefore
+    /// replays the boundary's settlements back to `Accepted` — the
+    /// suspended shape a voluntary demotion's queue keeps — rather
+    /// than minting a terminal `Rejected`/
+    /// [`Superseded`](dcs_core::CommandError::Superseded) the line's
+    /// own later `applied` would contradict in the same journal. The
+    /// receipt replay alone is not the whole reconciliation: the
+    /// effects those commands staged — internal `In` image samples,
+    /// the force set, component state — are run state this demoted
+    /// peer keeps serving in quiesced checkpoints a tracking
+    /// successor adopts, so the suspended boundary also rolls the
+    /// mutations back to the pre-boundary state. Each re-suspended
+    /// admission then settles exactly once on the tracked line's
+    /// applies: carried, with the line's own verdict — the
+    /// `Applied` the surviving run genuinely made — or passed by the
+    /// adopted window's submission high-water into the one
+    /// `Rejected`/`Superseded` the journal emits.
     ///
     /// A scan that does not own the field runs quiesced
     /// ([`Executor::scan_quiesced`]): it still reads, steps, writes
@@ -1493,8 +4177,26 @@ impl<'d> Peer<'d> {
     /// promotion, not settled here: a quiesced scan must not mint an
     /// `Applied` the line never ordered, on an image the field never
     /// sees. The carried entries settle once at the promoted run's
-    /// first field-owning scan.
+    /// first field-owning scan — which also re-queues this run's own
+    /// suspended tail ([`Executor::scan`]): a demoted peer re-promoted
+    /// is the surviving line its suspended admissions were made on, so
+    /// they settle at that boundary rather than parking `Accepted`
+    /// against an empty queue.
     pub fn scan(&mut self) -> Tick {
+        // The per-scan claim observation: ask the field's arbitration
+        // what a mutation from this run's attachments would meet —
+        // read-only, so reporting an unclaimed field cannot seize it,
+        // and a failed probe is no observation: the last answer stands.
+        // The answered contact also gates the deferred startup grant's
+        // retry — a pending born-active re-issues its claim ask only
+        // on contacts the field answered.
+        let mut field_answered = false;
+        if let Some(probe) = &self.probe
+            && let Ok(observed) = probe.0()
+        {
+            self.field_claim = Some(observed);
+            field_answered = true;
+        }
         let quiesced = !self.owns_field();
         let tick = if quiesced {
             self.executor.scan_quiesced()
@@ -1506,7 +4208,28 @@ impl<'d> Peer<'d> {
         {
             if !self.fencing_lost {
                 self.fencing_lost = true;
-                self.pending_fencing.push(FencingLoss { tick, point });
+                self.fencing_point = Some(point);
+                // The field's own arbitration names the preempting
+                // claim's owner — the claimant the journaled
+                // `field_claim_lost` attributes the takeover to.
+                // `None` where no hook is installed or the verdict
+                // carried no owner identity.
+                let claimant = self
+                    .claimant
+                    .as_ref()
+                    .and_then(|claimant| claimant.0(point));
+                // The loss entry already attributes this claimant's
+                // episode — seed the observation dedup with it, so
+                // reclaim probes the same standing claim refuses
+                // queue no second record.
+                if let Some(claimant) = claimant {
+                    self.observed_claimants.insert(claimant);
+                }
+                self.pending_fencing.push(FencingLoss {
+                    tick,
+                    point,
+                    claimant,
+                });
             }
             // Superseded: the field's single-writer claim belongs to
             // another attachment now. The scan completed degraded; the
@@ -1515,11 +4238,20 @@ impl<'d> Peer<'d> {
             // ownership token, and the reported role walks `demoting`
             // to `standby`. The fenced scan ran under the lifted gate,
             // so it does not settle the transition — the first
-            // quiesced scan does. Commands the fenced boundary applied
-            // reconcile first: the image they changed is the abandoned
-            // run's, so they settle superseded rather than applied.
-            self.executor.supersede_commands(tick);
-            self.demote().expect("a field-owning peer demotes");
+            // quiesced scan does. Commands the fenced boundary settled
+            // reconcile first: their provisional outcomes re-suspend —
+            // the surviving line's adoption adjudicates each once,
+            // never a `Superseded` the carried copy's later `Applied`
+            // would contradict — and their staged mutations roll back
+            // out, so the checkpoints this demoted run keeps serving
+            // carry the pre-boundary state the still-pending receipts
+            // claim.
+            self.executor.suspend_boundary_commands();
+            self.demote_inner(SwitchAttribution {
+                origin: SwitchOrigin::Fenced,
+                actor: None,
+            })
+            .expect("a field-owning peer demotes");
             return tick;
         }
         match self.role {
@@ -1527,82 +4259,116 @@ impl<'d> Peer<'d> {
             Role::Demoting => self.change(tick, Role::Standby),
             _ => {}
         }
+        self.reclaim_field_claim(tick, field_answered);
+        self.retry_startup_claim(tick, field_answered);
+        // The claim-bound's escape, read the same way the reclaim's
+        // gate reads it: this scan's own probe answered, and no grant
+        // the scan landed flipped the posture it observed. An absent
+        // hook, an unanswered probe, or a posture a grant changed all
+        // read "a claim may stand" — fail-closed, so a promotion
+        // arriving between scans never rides an observation older than
+        // the scan it was taken in.
+        self.unclaimed_observed = field_answered && self.field_claim == Some(FieldClaim::Unclaimed);
         if self.owns_field() {
             self.staged = None;
         } else {
-            self.staged = Some((tick, self.executor.staged_field_outputs()));
+            // The staged image's tag is the stream position it
+            // predicts — the next checkpoint tick whose field write
+            // this scan's output describes. The run's own clock may
+            // hold above a lagging stream, so the tag is the scan tick
+            // minus the apply's recorded lead, never the run tick
+            // itself.
+            self.staged = self.applied_offset.map(|offset| {
+                (
+                    Tick(tick.0.saturating_sub(offset)),
+                    self.executor.staged_field_outputs(),
+                )
+            });
         }
         tick
     }
 
-    /// Drains reported-role transitions queued since the last call — for
-    /// the transition journal the monitoring layer records them into.
-    pub fn take_role_changes(&mut self) -> Vec<RoleChange> {
-        std::mem::take(&mut self.pending_changes)
+    /// Drains every transition record queued since the last call — the
+    /// producer-owned drain surface the monitoring layer records into
+    /// and a recorderless shell logs.
+    ///
+    /// One call takes all of them: the queued [`RoleChange`]s,
+    /// [`DivergenceReport`]s and [`ResolutionReport`]s,
+    /// [`CarryoverReport`] reinitializations, [`OrphanReport`]s,
+    /// [`FencingLoss`]es, [`ClaimObservation`]s, [`ClaimRearm`]s,
+    /// [`PromotionRefusal`]s, [`StartupRefusal`]s, [`SourceRestart`]s,
+    /// superseded settlements, and adoption receipts alike. A consumer
+    /// iterates the drained [`PeerEvents`] and matches every
+    /// [`PeerEvent`] variant, so a kind queued here and unhandled by a
+    /// consumer is a compile error at that consumer — where the
+    /// per-kind drains this replaces let a newly queued kind land
+    /// silently undrained at every call site, which is the
+    /// missed-drain class the named-evidence journal guarantee exists
+    /// to close.
+    ///
+    /// A drained record is queued evidence, not authoritative state:
+    /// taking it moves no role, gate, or report, so a consumer that
+    /// drops one loses a journal record and nothing else.
+    ///
+    /// One kind is deliberately not here: the deferred startup grant's
+    /// latched refusal verdict is a run-disposition latch rather than
+    /// a queued record — the shell settles the run from it at the
+    /// boundary the verdict answers — so it keeps its own
+    /// [`drain_startup_refusal`](Self::drain_startup_refusal) accessor
+    /// beside the peek. The durable journal entry for the same verdict
+    /// *is* queued and does drain here, as
+    /// [`PeerEvent::StartupRefusal`].
+    pub fn drain_pending(&mut self) -> PeerEvents {
+        PeerEvents {
+            divergences: std::mem::take(&mut self.pending_divergences),
+            resolutions: std::mem::take(&mut self.pending_resolutions),
+            reinits: std::mem::take(&mut self.pending_reinits),
+            orphans: std::mem::take(&mut self.pending_orphans),
+            fencing: std::mem::take(&mut self.pending_fencing),
+            rearms: std::mem::take(&mut self.pending_rearms),
+            observations: std::mem::take(&mut self.pending_observations),
+            foreign_claims: std::mem::take(&mut self.pending_foreign_claims),
+            startup_refusals: std::mem::take(&mut self.pending_startup_refusals),
+            restarts: std::mem::take(&mut self.pending_restarts),
+            promotion_refusals: std::mem::take(&mut self.pending_refusals),
+            changes: std::mem::take(&mut self.pending_changes),
+            superseded: std::mem::take(&mut self.pending_superseded),
+            rehomed: std::mem::take(&mut self.pending_rehomed),
+            adoption_receipts: std::mem::take(&mut self.pending_adoption_receipts),
+        }
     }
 
-    /// Drains divergence detections queued since the last call — one
-    /// [`DivergenceReport`] per transition into
-    /// [`StandbySync::Diverged`], each carrying the tick the staged
-    /// image belonged to — for the transition journal the monitoring
-    /// layer records them into.
-    pub fn take_divergences(&mut self) -> Vec<DivergenceReport> {
-        std::mem::take(&mut self.pending_divergences)
+    /// The deferred startup grant's latched refusal verdict — the
+    /// born-active contract's [`Activation::Refused`] produced inside
+    /// a scan rather than answered from [`activate`](Self::activate):
+    /// `Some` after the pending run's re-issued conditional ask met a
+    /// live incumbent's `Ok(false)`, until
+    /// [`drain_startup_refusal`](Self::drain_startup_refusal) takes it
+    /// for the shell's disposition. `None` on every other run — the
+    /// activation-time refusal returns through the `Activation`
+    /// result, so the latch only ever carries the verdict no caller
+    /// could have received.
+    ///
+    /// Not part of [`drain_pending`](Self::drain_pending): the latch
+    /// answers how this run *ends*, which the run's shell decides at
+    /// the boundary the verdict landed, while the drained events answer
+    /// what this run *observed* — the journal's account. The verdict's
+    /// journal entry, [`PeerEvent::StartupRefusal`], drains with the
+    /// rest.
+    pub fn startup_refusal(&self) -> Option<&SwitchError> {
+        self.startup_refusal.as_ref()
     }
 
-    /// Drains divergence resolutions queued since the last call — one
-    /// [`ResolutionReport`] per `Diverged` → [`StandbySync::Tracking`]
-    /// transition, each carrying the applied tick and the same-tick
-    /// field comparison the clear stands on — for the transition
-    /// journal the monitoring layer records them into.
-    pub fn take_resolutions(&mut self) -> Vec<ResolutionReport> {
-        std::mem::take(&mut self.pending_resolutions)
-    }
-
-    /// Drains reinitializations queued since the last call — one
-    /// [`CarryoverReport`] per transition into
-    /// [`StandbySync::Reinitialized`] — for the transition journal the
-    /// monitoring layer records them into.
-    pub fn take_reinitializations(&mut self) -> Vec<CarryoverReport> {
-        std::mem::take(&mut self.pending_reinits)
-    }
-
-    /// Drains field-claim losses queued since the last call — one
-    /// [`FencingLoss`] per observed preemption of the claim this peer
-    /// held — for the transition journal the monitoring layer records
-    /// them into.
-    pub fn take_fencing_losses(&mut self) -> Vec<FencingLoss> {
-        std::mem::take(&mut self.pending_fencing)
-    }
-
-    /// Drains tracked-source restarts queued since the last call — one
-    /// [`SourceRestart`] per regressed-stream adoption that crossed a
-    /// generation boundary — for the transition journal the monitoring
-    /// layer records them into.
-    pub fn take_source_restarts(&mut self) -> Vec<SourceRestart> {
-        std::mem::take(&mut self.pending_restarts)
-    }
-
-    /// Drains pending-command settlements queued since the last call —
-    /// one [`CommandReceipt`] rewritten to `Rejected` carrying
-    /// [`CommandError::Superseded`] per still-`Accepted` entry a
-    /// checkpoint adoption abandoned, each paired with its absolute
-    /// submission index — for the settle journal the monitoring layer
-    /// records them into through `Recorder::note_settled`, the index
-    /// being what its dedup keys on.
-    pub fn take_superseded_commands(&mut self) -> Vec<(u64, CommandReceipt)> {
-        std::mem::take(&mut self.pending_superseded)
-    }
-
-    /// Drains the receipts the last checkpoint adoption displaced by
-    /// submission-index collision and re-minted past the adopted
-    /// window's high-water while already settled — `(prior index, new
-    /// index, receipt)`. Their verdicts journaled under the prior
-    /// index already, so nothing re-emits: the monitoring layer feeds
-    /// them to `Recorder::note_rehomed`, which re-keys the recorded
-    /// settle onto the index the served window now carries it at.
-    pub fn take_rehomed_receipts(&mut self) -> Vec<(u64, u64, CommandReceipt)> {
-        std::mem::take(&mut self.pending_rehomed)
+    /// Drains [`startup_refusal`](Self::startup_refusal): `Some` once
+    /// per run — the deferred ask never re-issues after a verdict —
+    /// for the run's shell to settle under the identical disposition
+    /// the activation-time answer takes: keep the run where the pair
+    /// was declared (the standby surface already stands), or end it
+    /// where none was. The peer's reported state needs no settle
+    /// here — it already reports the standby the pending stand-down
+    /// produced.
+    pub fn drain_startup_refusal(&mut self) -> Option<SwitchError> {
+        self.startup_refusal.take()
     }
 
     /// Queues `command` for application at the next scan boundary —
@@ -1619,13 +4385,27 @@ impl<'d> Peer<'d> {
         self.executor.submit_command_as(command, actor)
     }
 
+    /// The fully attributed variant of
+    /// [`submit_command`](Self::submit_command): the receipt — and the
+    /// journaled `CommandSettled` echoing it — carries the submitter's
+    /// declared actor identity and declared `reason` alike.
+    pub fn submit_command_attributed(
+        &mut self,
+        command: Command,
+        actor: Option<String>,
+        reason: Option<String>,
+    ) -> CommandReceipt {
+        self.executor
+            .submit_command_attributed(command, actor, reason)
+    }
+
     /// The wrapped executor, e.g. for snapshots, receipts, and
     /// checkpoints.
     pub fn executor(&self) -> &Executor<'d> {
         &self.executor
     }
 
-    /// The executor's current tick.
+    /// The executor's current run tick.
     pub fn tick(&self) -> Tick {
         self.executor.tick()
     }
@@ -1654,14 +4434,166 @@ impl<'d> Peer<'d> {
         self.executor.record_scan_overrun();
     }
 
-    /// The executor's current transferable state.
+    /// The executor's current transferable state, stamped with this
+    /// peer's field-ownership — `source_owns_field` is the mark a
+    /// tracking puller reads to name the mutual-standby wedge: a peer
+    /// always stamps its own `owns_field`, so a checkpoint served by a
+    /// run writing nothing tells the puller the tracked line has no
+    /// field owner. A bare [`Executor::checkpoint`] leaves the stamp
+    /// absent, carrying no ownership claim.
     pub fn checkpoint(&self) -> Checkpoint {
-        self.executor.checkpoint()
+        let mut checkpoint = self.executor.checkpoint();
+        checkpoint.source_owns_field = Some(self.owns_field());
+        checkpoint
     }
 
     /// Consumes the peer and returns the executor.
     pub fn into_executor(self) -> Executor<'d> {
         self.executor
+    }
+
+    /// Whether the reported convergence says the tracked line has no
+    /// field owner of its own — the wedge's two verdicts,
+    /// [`StandbySync::Orphaned`] and the narrower
+    /// [`StandbySync::Usurped`] alike. Every path that treats "the line
+    /// has no owner" as evidence reads this rather than naming one
+    /// variant, so the two cannot drift apart.
+    fn line_unowned(&self) -> bool {
+        matches!(
+            self.sync,
+            StandbySync::Orphaned { .. } | StandbySync::Usurped { .. }
+        )
+    }
+
+    /// The claim a promotion runs before the gate lifts: the
+    /// unconditional [`Claim`] for a proven `Tracking`/`Reinitialized`
+    /// convergence — the deliberate takeover — but the conditional
+    /// [`OrphanClaim`] while `Orphaned` and the hook is armed. The
+    /// orphaned run's tracking evidence cannot tell the tracked line's
+    /// missing owner — dead, the wedge the orphan promote exists to
+    /// break — from a live incumbent the run lost track of: the field's
+    /// own arbitration answers it, granting while no live
+    /// different-owner's unyielded claim stands and refusing
+    /// [`SwitchError::FieldClaimFailed`] while one does — an islanded
+    /// run whose stale image would otherwise preempt the real owner
+    /// and silently roll its applied state and outputs back.
+    ///
+    /// `Usurped` is the one convergence the conditional grant does not
+    /// cover, and deliberately so. The refusal above protects a live
+    /// incumbent's applied state; a diagnosis has already established
+    /// that the standing writer cannot prove this line's key, so it is
+    /// no incumbent of this line whose state a takeover could roll back
+    /// — it is the foreign claim the unconditional claim was always the
+    /// answer to, and routing this verdict through the conditional
+    /// shape would leave the pair with no self-service path back to the
+    /// field while the process that preempted it lives: both the
+    /// requested `promote` and the armed `self_promote` read this gate,
+    /// so both recover. A granted claim taken this way queues the
+    /// [`ForeignClaimPreempt`] naming the endpoint it took the field
+    /// from — the journal counterpart of the [`FencingLoss`] that
+    /// started the episode.
+    fn claim_gate(&mut self) -> Result<(), SwitchError> {
+        if matches!(self.sync, StandbySync::Orphaned { .. })
+            && let Some(claim) = &self.orphan_claim
+        {
+            return match claim.0() {
+                Ok(true) => {
+                    self.open_gate();
+                    Ok(())
+                }
+                Ok(false) => Err(SwitchError::FieldClaimFailed {
+                    detail: "a live controller holds the field's write-ownership claim — \
+                             the orphaned tracked line is an island, not ownerless: \
+                             preempting the incumbent would silently roll back its \
+                             applied state; reconverge on the owner first"
+                        .to_string(),
+                }),
+                Err(detail) => Err(SwitchError::FieldClaimFailed { detail }),
+            };
+        }
+        // Read before the lift: the granted claim spends the diagnosis,
+        // and the queued record names the writer it took the field from.
+        let usurped = self
+            .foreign_writer
+            .filter(|_| matches!(self.sync, StandbySync::Usurped { .. }));
+        // The skew bound runs ahead of the lift, so a claim whose basis
+        // has outgrown the recorded window is refused with the gate
+        // still closed, the claim hook never run, and the diagnosis
+        // left standing for a later attempt. A `Usurped` run reaches
+        // here with a non-zero miss run — the ownerless line it tracks
+        // is exactly the case `check_claim_basis` declines to bound,
+        // the field arbitrating on liveness this run cannot see — so
+        // the pair's reclaim path is untouched by it.
+        self.check_claim_basis()?;
+        self.lift_gate()?;
+        if let Some(writer) = usurped
+            && self.claim.is_some()
+        {
+            self.pending_foreign_claims.push(ForeignClaimPreempt {
+                tick: self.executor.tick(),
+                writer,
+            });
+        }
+        Ok(())
+    }
+
+    /// The bound over the *basis* the unconditional claim is asserted
+    /// on: a claim whose declared basis has outgrown the recorded
+    /// [`MAX_CLAIM_LEAD`] window since the current alignment was
+    /// established is refused as [`SwitchError::FieldClaimFailed`], so
+    /// the live incumbent keeps write-ownership instead of being fenced
+    /// by a run whose clock has run away from the line whose field it
+    /// would take. The field's own arbitration cannot translate one
+    /// run's stamp into another's — it sees an owner token and a
+    /// monitor — so the bound has to be read here, where the run's own
+    /// accounting against the tracked line exists, in the same
+    /// peer-side-gate shape the fencing-loss reclaim's convergence gate
+    /// takes: the ask is what is gated, not the field's grant.
+    ///
+    /// Two escapes keep every documented recovery reachable, and both
+    /// are "nothing stands to preempt" readings rather than exemptions:
+    ///
+    /// - this scan's own probe answered `unclaimed` — the field is free,
+    ///   so the claim takes it from nobody and the documented
+    ///   unclaimed-field remedy is untouched;
+    /// - the tracked line is not serving this run — the heartbeat's
+    ///   miss run stands, so this run cannot reach the line whose field
+    ///   its claim would take, and a bound that refused there would
+    ///   strand the documented failover recovery on exactly the peers
+    ///   whose lead is largest. (The bound therefore rides the
+    ///   `Tracking`/`Reinitialized` line the arm above already
+    ///   distinguishes: an `Orphaned` run takes the conditional
+    ///   grant, which the field arbitrates on liveness the run cannot
+    ///   see, and the narrower `Usurped` sibling rides the same
+    ///   miss-run escape — a line reporting no owner of its own has
+    ///   missed every pull it did not serve.)
+    ///
+    /// A refused attempt touches nothing: the gate stays as it was, the
+    /// claim hook never runs, and every later attempt is re-judged on
+    /// the basis standing then.
+    fn check_claim_basis(&self) -> Result<(), SwitchError> {
+        if self.unclaimed_observed || self.misses != 0 {
+            return Ok(());
+        }
+        let Some(basis) = self.claim_basis() else {
+            return Ok(());
+        };
+        if basis.within_bound() {
+            return Ok(());
+        }
+        Err(SwitchError::FieldClaimFailed {
+            detail: format!(
+                "the claim's basis is past the recorded skew bound ({basis}) — this run's \
+                 clock has outpaced the tracked line it tracks, and the field's \
+                 arbitration cannot translate one run's stamp into another's, so the \
+                 claim would resolve on a pair the same-domain comparability rule \
+                 forbids ordering: a live incumbent keeps write-ownership. A redundant \
+                 pair runs one cadence: bring the claimant to the field owner's --scan-ms \
+                 and its claim lands as it always did, or release the standing claim \
+                 (the field's own `release_writer` hand-back) and promote onto the free \
+                 field."
+            ),
+        })
     }
 
     /// Takes the field's write-ownership claim when one is installed —
@@ -1674,20 +4606,162 @@ impl<'d> Peer<'d> {
         if let Some(claim) = &self.claim {
             claim.0().map_err(|detail| SwitchError::FieldClaimFailed { detail })?;
         }
+        self.open_gate();
+        Ok(())
+    }
+
+    /// The gate-lift every granted claim ends in — the startup grant's
+    /// and the promotion claim's shared tail.
+    fn open_gate(&mut self) {
         if let Some(gate) = self.gate {
             gate.open();
         }
+        // This run holds the field now, so nothing stands to have
+        // preempted it: the diagnosis is spent, and the next orphaned
+        // apply reports the plain ownerless verdict again until a fresh
+        // one is earned.
+        self.foreign_writer = None;
         // A fresh claim re-arms the loss report — a fenced write under
         // this ownership is a new event, not a repeat of a prior one.
         self.fencing_lost = false;
-        Ok(())
+        self.fencing_point = None;
+        // The new ownership opens a new observation epoch too: a
+        // claimant a later refused probe names is a new episode the
+        // journal has not seen.
+        self.observed_claimants.clear();
+        // The ownership this lift opens is no hand-back: a later
+        // demotion decides its own origin, and a prior episode's
+        // landed re-arm must not dedup this epoch's first landing.
+        self.yielded = false;
+        self.ensure_granted = false;
+        // This run held the field — the mark the orphan cycle's
+        // conditional re-arm probes on: only a peer that owned the
+        // claim re-arms it once released.
+        self.was_owner = true;
     }
 
     /// The reported-role change bookkeeping: `from` is the previously
     /// reported role, recorded at `tick`, and the journal entry follows.
+    /// The queued transition carries the stored [`SwitchAttribution`] —
+    /// set by the switch's initiating request — so the request and the
+    /// settle journal the same origin and actor.
     fn change(&mut self, tick: Tick, to: Role) {
         let from = std::mem::replace(&mut self.role, to);
-        self.pending_changes.push(RoleChange { tick, from, to });
+        self.pending_changes.push(RoleChange {
+            tick,
+            from,
+            to,
+            origin: self.attribution.origin,
+            actor: self.attribution.actor.clone(),
+        });
+    }
+}
+
+/// The force state `receipts`' newest *settled* verdict for `point`
+/// accounts for: `Some(Some(value))` an applied force standing,
+/// `Some(None)` an applied release, `None` no settled verdict at all.
+/// `Accepted` and `Rejected` entries move no force set and back
+/// nothing — the newest `Applied` verdict is the receipted truth a
+/// post-adoption force set must match to be considered commanded
+/// rather than resurrected.
+fn receipted_force_state(receipts: &[CommandReceipt], point: PointId) -> Option<Option<Value>> {
+    receipts.iter().rev().find_map(|receipt| {
+        if !matches!(receipt.outcome, CommandOutcome::Applied { .. }) {
+            return None;
+        }
+        match &receipt.command {
+            Command::ForcePoint {
+                point: p, value, ..
+            } if *p == point => Some(Some(*value)),
+            Command::UnforcePoint { point: p } if *p == point => Some(None),
+            _ => None,
+        }
+    })
+}
+
+/// The value `point`'s held internal image sample would carry under
+/// `checkpoint`'s claimed command history — the newest settled
+/// `WriteValue` verdict in the pulled window, or else the newest
+/// standing `ForcePoint` verdict a dropped force would re-expose. The
+/// newest verdict wins, and only verdicts the checkpoint claims the
+/// peer itself never saw — absolute submissions at or above the
+/// peer's own log base, entries this run has no settled word on —
+/// count as causes: a verdict already in the run's own window is
+/// itself unaccounted when the document's claim differs, and the
+/// fork check answers that one first. `Accepted`/`Rejected` entries
+/// move no held value and `UnforcePoint` produces none — an internal
+/// sample keeps its last stamp once the substitute reads stop — so
+/// only the two value-carrying commands appear.
+fn receipted_internal_value(
+    checkpoint: &Checkpoint,
+    own_base: u64,
+    point: PointId,
+) -> Option<Value> {
+    let base = checkpoint.receipt_base();
+    checkpoint
+        .receipts
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(offset, _)| base + *offset as u64 >= own_base)
+        .filter(|(_, receipt)| matches!(receipt.outcome, CommandOutcome::Applied { .. }))
+        .find_map(|(_, receipt)| match &receipt.command {
+            Command::WriteValue {
+                point: p, value, ..
+            } if *p == point => Some(*value),
+            Command::ForcePoint {
+                point: p, value, ..
+            } if *p == point => Some(*value),
+            _ => None,
+        })
+}
+
+/// The point-command claim a settled verdict makes — the durable
+/// truth an adopted image must not contradict unaudited.
+enum PointVerdict {
+    /// An applied `WriteValue`: the held value the verdict produced.
+    Write(Value),
+    /// An applied force pair entry: the force audit's surface —
+    /// [`Peer::note_adopted_forces`] already answers for its changes,
+    /// so the write audit defers to it.
+    Force,
+}
+
+/// `receipts`' newest *settled* point verdict for `point`: an applied
+/// `WriteValue`'s claimed held value, or [`PointVerdict::Force`] when
+/// the newest applied point command is a force pair entry — the
+/// verdict [`Peer::note_adopted_writes`] holds the adopted held value
+/// against. `Accepted` and `Rejected` entries move no state and back
+/// nothing; a log carrying no settled verdict for the point answers
+/// `None`, leaving the caller to consult the run's own prior log.
+fn receipted_point_verdict(receipts: &[CommandReceipt], point: PointId) -> Option<PointVerdict> {
+    receipts.iter().rev().find_map(|receipt| {
+        if !matches!(receipt.outcome, CommandOutcome::Applied { .. }) {
+            return None;
+        }
+        match &receipt.command {
+            Command::WriteValue {
+                point: p, value, ..
+            } if *p == point => Some(PointVerdict::Write(*value)),
+            Command::ForcePoint { point: p, .. } | Command::UnforcePoint { point: p }
+                if *p == point =>
+            {
+                Some(PointVerdict::Force)
+            }
+            _ => None,
+        }
+    })
+}
+
+/// The actor identity an adoption-audit receipt declares — the
+/// adopting source the receipted-command contract names: the pulled
+/// checkpoint's stream generation and capture tick, so the journal
+/// attributes a receiptless force change to the image it came from
+/// rather than to a command nobody issued.
+fn adoption_actor(checkpoint: &Checkpoint) -> String {
+    match checkpoint.generation {
+        Some(generation) => format!("checkpoint:{generation:x}@{}", checkpoint.tick.0),
+        None => format!("checkpoint@{}", checkpoint.tick.0),
     }
 }
 
@@ -1757,6 +4831,164 @@ mod tests {
         Executor::new(driver, crate::PointMap::new(), Vec::new()).unwrap()
     }
 
+    /// Every pending queue the producer owns, filled with one record
+    /// each and drained through the single surface: the coverage
+    /// contract the closed vocabulary buys. A queue this test does not
+    /// know about is a queue no consumer's exhaustive match names, so
+    /// adding a variant without draining it fails here and adding a
+    /// queue without a variant fails the consumers' builds.
+    #[test]
+    fn the_ordered_drain_covers_every_pending_queue() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::active(executor(&gate), Some(&gate));
+        let divergence = DivergenceReport {
+            tick: Tick(1),
+            mismatches: Vec::new(),
+        };
+        let resolution = ResolutionReport {
+            tick: Tick(2),
+            compared: Vec::new(),
+        };
+        let reinit = CarryoverReport {
+            from: None,
+            to: None,
+            resumed_at: Tick(3),
+            carried: Vec::new(),
+            carried_outputs: Vec::new(),
+            carried_forces: Vec::new(),
+            dropped: Vec::new(),
+            reinitialized: Vec::new(),
+            reverted_tuning: Vec::new(),
+            initialized: Vec::new(),
+        };
+        let orphan = OrphanReport {
+            tick: Tick(4),
+            aligned: Tick(4),
+        };
+        let loss = FencingLoss {
+            tick: Tick(5),
+            point: PointId(1),
+            claimant: Some(6),
+        };
+        let rearm = ClaimRearm {
+            tick: Tick(7),
+            point: PointId(1),
+        };
+        let observation = ClaimObservation {
+            tick: Tick(8),
+            point: PointId(1),
+            claimant: 9,
+        };
+        let foreign = ForeignClaimPreempt {
+            tick: Tick(9),
+            writer: "127.0.0.1:8080".parse().unwrap(),
+        };
+        let startup = StartupRefusal {
+            tick: Tick(10),
+            error: SwitchError::FieldClaimFailed {
+                detail: "a live peer holds the field".to_string(),
+            },
+        };
+        let restart = SourceRestart {
+            tick: Tick(11),
+            was_aligned: Some(Tick(12)),
+            resumed_at: Tick(13),
+        };
+        let refusal = PromotionRefusal {
+            tick: Tick(14),
+            misses: 3,
+            error: SwitchError::AlreadyActive,
+        };
+        let change = RoleChange {
+            tick: Tick(15),
+            from: Role::Standby,
+            to: Role::Promoting,
+            origin: SwitchOrigin::Failover,
+            actor: None,
+        };
+        let superseded = CommandReceipt {
+            command: Command::WriteValue {
+                point: PointId(1),
+                kind: ValueKind::Float,
+                value: Value::Float(1.0),
+            },
+            outcome: CommandOutcome::Rejected {
+                reason: CommandError::Superseded { point: None },
+            },
+            actor: None,
+            reason: None,
+            submission: None,
+        };
+        let adopted = CommandReceipt {
+            command: Command::ForcePoint {
+                point: PointId(1),
+                kind: ValueKind::Float,
+                value: Value::Float(2.0),
+            },
+            outcome: CommandOutcome::Applied { tick: Tick(19) },
+            actor: Some("checkpoint:1@19".to_string()),
+            reason: None,
+            submission: None,
+        };
+        peer.pending_divergences.push(divergence.clone());
+        peer.pending_resolutions.push(resolution.clone());
+        peer.pending_reinits.push(reinit.clone());
+        peer.pending_orphans.push(orphan);
+        peer.pending_fencing.push(loss);
+        peer.pending_rearms.push(rearm);
+        peer.pending_observations.push(observation);
+        peer.pending_foreign_claims.push(foreign);
+        peer.pending_startup_refusals.push(startup.clone());
+        peer.pending_restarts.push(restart);
+        peer.pending_refusals.push(refusal.clone());
+        peer.pending_changes.push(change.clone());
+        peer.pending_superseded.push((20, superseded.clone()));
+        peer.pending_adoption_receipts.push(adopted.clone());
+
+        // The whole set, one drain, in the drain's category order: the
+        // applied-checkpoint evidence, then the claim-domain evidence,
+        // then the stream and switch evidence, then the reported
+        // transition, then the settlements it carried.
+        let events = peer.drain_pending().into_events();
+        assert_eq!(
+            events,
+            vec![
+                PeerEvent::Divergence(divergence),
+                PeerEvent::Resolution(resolution),
+                PeerEvent::Reinitialization(reinit),
+                PeerEvent::Orphan(orphan),
+                PeerEvent::FencingLoss(loss),
+                PeerEvent::ClaimRearm(rearm),
+                PeerEvent::ClaimObservation(observation),
+                PeerEvent::ForeignClaimPreempt(foreign),
+                PeerEvent::StartupRefusal(startup),
+                PeerEvent::SourceRestart(restart),
+                PeerEvent::PromotionRefusal(refusal.clone()),
+                PeerEvent::RoleChange(change.clone()),
+                PeerEvent::SupersededCommand {
+                    index: 20,
+                    receipt: superseded,
+                },
+                PeerEvent::AdoptionReceipt(adopted),
+            ],
+            "every pending queue must drain as one of its kind's events"
+        );
+        // The drain emptied all of them: a second drain carries
+        // nothing, so no record is journaled twice and none is stranded.
+        assert!(peer.drain_pending().is_empty());
+        // The per-kind accessors read the same drained set, one kind
+        // each — the readers that want a single category out of it.
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::active(executor(&gate), Some(&gate));
+        peer.pending_changes.push(change.clone());
+        peer.pending_fencing.push(loss);
+        let events = peer.drain_pending();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events.role_changes(), vec![change]);
+    }
+
     #[test]
     fn promotion_requires_a_converged_standby() {
         let driver = StubDriver::new(PointId(1), Value::Float(0.0));
@@ -1802,6 +5034,8 @@ mod tests {
                 role: Role::Promoting,
                 tick: Tick(7),
                 sync: Some(StandbySync::Tracking { aligned: Tick(7) }),
+                field_claim: None,
+                failover: None,
             }
         );
 
@@ -1811,19 +5045,95 @@ mod tests {
         assert_eq!(peer.report().sync, None);
         assert!(peer.accepts_commands());
 
-        // The queued transitions journal both halves of the switch.
+        // The queued transitions journal both halves of the switch —
+        // an unattributed request here.
         assert_eq!(
-            peer.take_role_changes(),
+            peer.drain_pending().role_changes(),
             vec![
                 RoleChange {
                     tick: Tick(7),
                     from: Role::Standby,
                     to: Role::Promoting,
+                    origin: SwitchOrigin::Request,
+                    actor: None,
                 },
                 RoleChange {
                     tick: Tick(8),
                     from: Role::Promoting,
                     to: Role::Active,
+                    origin: SwitchOrigin::Request,
+                    actor: None,
+                },
+            ]
+        );
+    }
+
+    /// Converges a fresh standby against an equivalent source run, the
+    /// prerequisite the attributed-switch tests below share.
+    fn converged_standby<'d>(gate: &'d WriteGate<'d>) -> Peer<'d> {
+        let mut peer = Peer::standby(executor(gate), Some(gate));
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(7);
+        peer.apply(&source.checkpoint()).unwrap();
+        peer
+    }
+
+    #[test]
+    fn an_attributed_promotion_carries_the_declared_actor_through_both_transitions() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = converged_standby(&gate);
+
+        peer.promote_as(Some("operator-7".to_string())).unwrap();
+        peer.scan();
+
+        assert_eq!(
+            peer.drain_pending().role_changes(),
+            vec![
+                RoleChange {
+                    tick: Tick(7),
+                    from: Role::Standby,
+                    to: Role::Promoting,
+                    origin: SwitchOrigin::Request,
+                    actor: Some("operator-7".to_string()),
+                },
+                RoleChange {
+                    tick: Tick(8),
+                    from: Role::Promoting,
+                    to: Role::Active,
+                    origin: SwitchOrigin::Request,
+                    actor: Some("operator-7".to_string()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_attributed_demotion_carries_the_declared_actor_through_both_transitions() {
+        let driver = StubDriver::new(PointId(1), Value::Float(10.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::active(executor(&gate), Some(&gate));
+
+        peer.demote_as(Some("supervisor-2".to_string())).unwrap();
+        peer.scan();
+
+        assert_eq!(
+            peer.drain_pending().role_changes(),
+            vec![
+                RoleChange {
+                    tick: Tick(0),
+                    from: Role::Active,
+                    to: Role::Demoting,
+                    origin: SwitchOrigin::Request,
+                    actor: Some("supervisor-2".to_string()),
+                },
+                RoleChange {
+                    tick: Tick(1),
+                    from: Role::Demoting,
+                    to: Role::Standby,
+                    origin: SwitchOrigin::Request,
+                    actor: Some("supervisor-2".to_string()),
                 },
             ]
         );
@@ -1934,7 +5244,7 @@ mod tests {
                 report: Box::new(report.clone())
             }
         );
-        assert_eq!(peer.take_reinitializations(), vec![report]);
+        assert_eq!(peer.drain_pending().reinits(), vec![report]);
 
         // Refresh pulls keep the crossing current without re-journaling
         // the transition.
@@ -1943,7 +5253,7 @@ mod tests {
             peer.sync_state(),
             StandbySync::Reinitialized { .. }
         ));
-        assert!(peer.take_reinitializations().is_empty());
+        assert!(peer.drain_pending().reinits().is_empty());
     }
 
     #[test]
@@ -2086,6 +5396,253 @@ mod tests {
         assert_eq!(standby.activate(), Err(SwitchError::NotActive));
     }
 
+    /// Where the conditional startup grant is installed it runs in
+    /// place of the unconditional claim at activation — a grant takes
+    /// the field and lifts the gate exactly as the claim does, while
+    /// the unconditional hook stays promotion's alone.
+    #[test]
+    fn the_startup_grant_replaces_the_unconditional_claim_at_activation() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let claimed = AtomicBool::new(false);
+        let granted = AtomicBool::new(false);
+        let mut peer = Peer::active(executor(&gate), Some(&gate))
+            .with_field_claim(|| {
+                claimed.store(true, Ordering::Relaxed);
+                Ok(())
+            })
+            .with_field_startup_claim(|| {
+                granted.store(true, Ordering::Relaxed);
+                Ok(true)
+            });
+
+        peer.activate().unwrap();
+        assert!(granted.load(Ordering::Relaxed));
+        assert!(
+            !claimed.load(Ordering::Relaxed),
+            "the unconditional claim must not run at startup"
+        );
+        assert!(gate.is_open());
+        assert!(peer.owns_field());
+    }
+
+    /// A live incumbent's standing claim refuses the startup grant —
+    /// the stale-checkpoint takeover the grant exists to prevent. The
+    /// born-active contract answers [`Activation::Refused`] carrying
+    /// `FieldClaimFailed` naming the live holder and the standby-rejoin
+    /// remedy, the launched run already stood down to the standby
+    /// surface — the gate stays closed and the unconditional preempt
+    /// hook never ran.
+    #[test]
+    fn a_live_incumbent_refuses_the_startup_grant() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let claimed = AtomicBool::new(false);
+        let mut peer = Peer::active(executor(&gate), Some(&gate))
+            .with_field_claim(|| {
+                claimed.store(true, Ordering::Relaxed);
+                Ok(())
+            })
+            .with_field_startup_claim(|| Ok(false));
+
+        let activation = peer.activate().unwrap();
+        let Activation::Refused {
+            error: SwitchError::FieldClaimFailed { detail },
+        } = activation
+        else {
+            panic!("the refused grant must answer Refused: {activation:?}");
+        };
+        assert!(
+            detail.contains("live peer") && detail.contains("standby"),
+            "the refusal must name the live incumbent and the remedy: {detail}"
+        );
+        assert!(!gate.is_open());
+        assert_eq!(peer.role(), Role::Standby);
+        assert_eq!(peer.sync_state(), &StandbySync::Unsynchronized);
+        assert_eq!(peer.report().field_claim, Some(FieldClaim::Held));
+        assert!(
+            !claimed.load(Ordering::Relaxed),
+            "a refused startup grant must not fall back to preempting"
+        );
+    }
+
+    /// A startup grant the field could not answer leaves the launched
+    /// run pending — [`Activation::Pending`] carrying the backend's own
+    /// detail — behind the same standby surface a demotion settles
+    /// into: gate closed, `unsynchronized`, non-promotable, the
+    /// conditional ask retrying on each answered field contact until a
+    /// verdict lands.
+    #[test]
+    fn an_unanswered_startup_grant_stands_the_launch_pending() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::active(executor(&gate), Some(&gate))
+            .with_field_startup_claim(|| Err("field unreachable".to_string()));
+
+        assert_eq!(
+            peer.activate(),
+            Ok(Activation::Pending {
+                detail: "field unreachable".to_string()
+            })
+        );
+        assert!(!gate.is_open());
+        assert_eq!(peer.role(), Role::Standby);
+        assert_eq!(peer.sync_state(), &StandbySync::Unsynchronized);
+        assert!(!peer.accepts_commands());
+        assert_eq!(
+            peer.promote(),
+            Err(SwitchError::NotConverged {
+                sync: StandbySync::Unsynchronized
+            })
+        );
+    }
+
+    /// The pending launch's deferred grant lands on the first contact
+    /// the field answers: the per-scan claim probe's `Ok` arms one
+    /// retry — a grant lifts the gate and reports `promoting`,
+    /// settling `active` on the next scan — while a silent field
+    /// issues no ask at all.
+    #[test]
+    fn the_pending_launch_retries_the_grant_on_each_answered_contact() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let field_up = AtomicBool::new(false);
+        let asks = std::sync::atomic::AtomicUsize::new(0);
+        let mut peer = Peer::active(executor(&gate), Some(&gate))
+            .with_field_probe(|| {
+                if field_up.load(Ordering::Relaxed) {
+                    Ok(FieldClaim::Unclaimed)
+                } else {
+                    Err("no contact".to_string())
+                }
+            })
+            .with_field_startup_claim(|| {
+                asks.fetch_add(1, Ordering::Relaxed);
+                if field_up.load(Ordering::Relaxed) {
+                    Ok(true)
+                } else {
+                    Err("field unreachable".to_string())
+                }
+            });
+
+        assert_eq!(
+            peer.activate(),
+            Ok(Activation::Pending {
+                detail: "field unreachable".to_string()
+            })
+        );
+
+        // A silent field issues no further ask: the run scans quiesced
+        // and the unanswered probe keeps `field_claim` unobserved.
+        peer.scan();
+        peer.scan();
+        assert_eq!(
+            asks.load(Ordering::Relaxed),
+            1,
+            "no answered contact must issue no retry"
+        );
+        assert_eq!(peer.role(), Role::Standby);
+        assert_eq!(peer.report().field_claim, None);
+
+        // The field answers: the same scan re-issues the ask, the
+        // grant lifts the gate, and the role walks `promoting` to
+        // `active` across the next boundary — the deferred startup
+        // completing what the boot could not.
+        field_up.store(true, Ordering::Relaxed);
+        peer.scan();
+        assert_eq!(peer.role(), Role::Promoting);
+        assert!(gate.is_open());
+        assert_eq!(peer.report().field_claim, Some(FieldClaim::Held));
+        peer.scan();
+        assert_eq!(peer.role(), Role::Active);
+        assert!(peer.owns_field());
+        assert!(peer.accepts_commands());
+        assert_eq!(asks.load(Ordering::Relaxed), 2);
+    }
+
+    /// A deferred ask the incumbent refuses ends the pending state
+    /// where it stands: the run stays the tracking standby it already
+    /// reported, the observed-claimant record attributes the verdict,
+    /// and the gate never lifted. The verdict itself — the deferred
+    /// half of [`Activation::Refused`] no activation result could
+    /// deliver — latches once for the run's shell to settle and queues
+    /// once for the journal, the ask never re-issuing after it.
+    #[test]
+    fn a_pending_asks_refusal_settles_the_startup_standby() {
+        const OUTPUT: PointId = PointId(2);
+        let driver = StubDriver::field(&[(OUTPUT, Value::Float(0.0))]);
+        let gate = WriteGate::closed(&driver);
+        let field_up = AtomicBool::new(false);
+        let asks = std::sync::atomic::AtomicUsize::new(0);
+        let map = PointMap::new().with_point(OUTPUT, Direction::Out, ValueKind::Float);
+        let mut peer = Peer::active(Executor::new(&gate, map, Vec::new()).unwrap(), Some(&gate))
+            .with_field_probe(|| {
+                if field_up.load(Ordering::Relaxed) {
+                    Ok(FieldClaim::Held)
+                } else {
+                    Err("no contact".to_string())
+                }
+            })
+            .with_field_startup_claim(|| {
+                asks.fetch_add(1, Ordering::Relaxed);
+                if field_up.load(Ordering::Relaxed) {
+                    Ok(false)
+                } else {
+                    Err("field unreachable".to_string())
+                }
+            })
+            .with_claim_observer(|| vec![77]);
+
+        assert!(matches!(peer.activate(), Ok(Activation::Pending { .. })));
+        field_up.store(true, Ordering::Relaxed);
+        peer.scan();
+        assert_eq!(peer.role(), Role::Standby);
+        assert!(!gate.is_open());
+        // The pending state resolved — the ordinary convergence gate
+        // now decides promotions.
+        assert_eq!(
+            peer.promote(),
+            Err(SwitchError::NotConverged {
+                sync: StandbySync::Unsynchronized
+            })
+        );
+        let drained = peer.drain_pending();
+        let observations = drained.claim_observations();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].claimant, 77);
+        assert_eq!(observations[0].point, OUTPUT);
+
+        // The refused verdict latched for the shell — the same
+        // `FieldClaimFailed` the activation-time answer carries — and
+        // queued once for the journal at the scan's tick, in the same
+        // drained set as the observed claimant that attributes it.
+        let refusals = drained.startup_refusals();
+        assert_eq!(refusals.len(), 1);
+        assert_eq!(refusals[0].tick, peer.tick());
+        let Some(SwitchError::FieldClaimFailed { detail }) = peer.startup_refusal() else {
+            panic!(
+                "the deferred refusal must latch: {:?}",
+                peer.startup_refusal()
+            );
+        };
+        assert_eq!(&refusals[0].error, peer.startup_refusal().unwrap());
+        assert!(detail.contains("live peer") && detail.contains("standby"));
+        assert_eq!(
+            peer.drain_startup_refusal(),
+            Some(refusals[0].error.clone())
+        );
+        assert_eq!(peer.drain_startup_refusal(), None);
+        assert!(peer.drain_pending().startup_refusals().is_empty());
+
+        // The verdict ended the ask: later scans answer the field but
+        // never re-issue the conditional grant.
+        let asked = asks.load(Ordering::Relaxed);
+        peer.scan();
+        assert_eq!(asks.load(Ordering::Relaxed), asked);
+        assert_eq!(peer.role(), Role::Standby);
+        assert!(!gate.is_open());
+    }
+
     /// A write the shared field fenced — its answer to a preempted
     /// claim — demotes the owning peer in place rather than failing its
     /// scan: the gate re-closes, the reported role walks `demoting` to
@@ -2120,10 +5677,16 @@ mod tests {
             Executor::new(&gate, loop_map(), vec![Box::new(PassThrough)]).unwrap(),
             Some(&gate),
         );
+        // The walked role transitions, accumulated across every drain so
+        // each assertion reads the whole walk while each drain still
+        // takes the whole set — the one drain, one kind-read shape.
+        let mut walked: Vec<RoleChange> = Vec::new();
         peer.activate().unwrap();
         peer.scan();
         assert_eq!(field.value(OUTPUT), Value::Float(1.0));
-        assert!(peer.take_fencing_losses().is_empty());
+        let drained = peer.drain_pending();
+        assert!(drained.fencing_losses().is_empty());
+        walked.extend(drained.role_changes().iter().cloned());
 
         // Another attachment took the claim: the next write is fenced.
         // The scan completes degraded — the boundary counted the fenced
@@ -2141,11 +5704,15 @@ mod tests {
                 error: IoError::Fenced(OUTPUT),
             })
         );
+        // One drained set carries the fenced scan's whole account: the
+        // claim loss and the demotion it drove, cause before effect.
+        let drained = peer.drain_pending();
         assert_eq!(
-            peer.take_fencing_losses(),
+            drained.fencing_losses(),
             vec![FencingLoss {
                 tick: Tick(2),
-                point: OUTPUT
+                point: OUTPUT,
+                claimant: None,
             }]
         );
         assert_eq!(peer.role(), Role::Demoting);
@@ -2153,13 +5720,16 @@ mod tests {
         assert!(!gate.is_open());
         assert!(!peer.owns_field());
         assert_eq!(
-            peer.take_role_changes(),
+            drained.role_changes(),
             vec![RoleChange {
                 tick: Tick(2),
                 from: Role::Active,
-                to: Role::Demoting
+                to: Role::Demoting,
+                origin: SwitchOrigin::Fenced,
+                actor: None,
             }]
         );
+        walked.extend(drained.role_changes().iter().cloned());
 
         // The next scan's write is quiesced at the closed gate — it
         // never reaches the field — and the completed scan settles the
@@ -2172,15 +5742,19 @@ mod tests {
             Value::Float(1.0),
             "a demoted peer's writes must not reach the field"
         );
-        assert!(peer.take_fencing_losses().is_empty());
+        let drained = peer.drain_pending();
+        assert!(drained.fencing_losses().is_empty());
         assert_eq!(
-            peer.take_role_changes(),
+            drained.role_changes(),
             vec![RoleChange {
                 tick: Tick(3),
                 from: Role::Demoting,
-                to: Role::Standby
+                to: Role::Standby,
+                origin: SwitchOrigin::Fenced,
+                actor: None,
             }]
         );
+        walked.extend(drained.role_changes().iter().cloned());
 
         // The loss reports once per held claim: re-converged and
         // re-promoted, a second preemption queues a second loss and
@@ -2190,44 +5764,741 @@ mod tests {
         peer.promote().unwrap();
         assert!(gate.is_open());
         assert_eq!(peer.scan(), Tick(4));
+        let drained = peer.drain_pending();
         assert_eq!(
-            peer.take_fencing_losses(),
+            drained.fencing_losses(),
             vec![FencingLoss {
                 tick: Tick(4),
-                point: OUTPUT
+                point: OUTPUT,
+                claimant: None,
             }]
         );
+        walked.extend(drained.role_changes().iter().cloned());
         assert_eq!(peer.scan(), Tick(5));
         assert_eq!(peer.role(), Role::Standby);
+        let drained = peer.drain_pending();
+        assert!(drained.fencing_losses().is_empty());
+        walked.extend(drained.role_changes().iter().cloned());
         assert_eq!(
-            peer.take_role_changes(),
+            walked,
             vec![
+                RoleChange {
+                    tick: Tick(2),
+                    from: Role::Active,
+                    to: Role::Demoting,
+                    origin: SwitchOrigin::Fenced,
+                    actor: None,
+                },
+                RoleChange {
+                    tick: Tick(3),
+                    from: Role::Demoting,
+                    to: Role::Standby,
+                    origin: SwitchOrigin::Fenced,
+                    actor: None,
+                },
                 RoleChange {
                     tick: Tick(3),
                     from: Role::Standby,
-                    to: Role::Promoting
+                    to: Role::Promoting,
+                    origin: SwitchOrigin::Request,
+                    actor: None,
                 },
                 RoleChange {
                     tick: Tick(4),
                     from: Role::Promoting,
-                    to: Role::Demoting
+                    to: Role::Demoting,
+                    origin: SwitchOrigin::Fenced,
+                    actor: None,
                 },
                 RoleChange {
                     tick: Tick(5),
                     from: Role::Demoting,
-                    to: Role::Standby
+                    to: Role::Standby,
+                    origin: SwitchOrigin::Fenced,
+                    actor: None,
                 },
             ]
         );
     }
 
+    /// The released-preemption recovery the demotion wedge needs: a
+    /// fencing-demoted ex-owner probes the bound conditional re-grant
+    /// each standby scan — refused while the preemptor's claim still
+    /// stands, so the probe never preempts — and once the field stands
+    /// unclaimed again the grant takes the claim back under the run's
+    /// own token, re-lifts the gate the demotion closed, and walks the
+    /// peer back `promoting` → `active` so its writes and steps resume.
+    /// The loss record carries the claimant the field's fencing
+    /// verdict named.
+    #[test]
+    fn a_fencing_demoted_owner_reclaims_the_field_once_the_preemptor_releases() {
+        const OWNER: u64 = 7;
+        const FOREIGN: u64 = 999;
+        let field = StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let fenced = FencingDriver {
+            inner: &field,
+            armed: AtomicBool::new(false),
+        };
+        let gate = WriteGate::closed(&fenced);
+        let claim = ScriptedClaim::unclaimed();
+        let mut peer = Peer::active(
+            Executor::new(&gate, loop_map(), vec![Box::new(PassThrough)]).unwrap(),
+            Some(&gate),
+        )
+        .with_field_claim(|| {
+            claim.claim(OWNER);
+            Ok(())
+        })
+        .with_field_probe(|| Ok(claim.probe()))
+        .with_field_claimant(|_| claim.holder())
+        .with_field_reclaim(|| Ok(claim.ensure(OWNER)));
+        // The walked role transitions, accumulated across every drain so
+        // the final assertion reads the whole walk while each drain
+        // still takes the whole set.
+        let mut walked: Vec<RoleChange> = Vec::new();
+        peer.activate().unwrap();
+        assert_eq!(peer.scan(), Tick(1));
+        assert_eq!(claim.holder(), Some(OWNER));
+
+        // The preemption: the foreign attachment takes the claim, the
+        // owner's next write fences, and the demote path runs — the
+        // loss record attributing the takeover to the claimant the
+        // field's verdict named.
+        claim.claim(FOREIGN);
+        fenced.armed.store(true, Ordering::Relaxed);
+        assert_eq!(peer.scan(), Tick(2));
+        let drained = peer.drain_pending();
+        assert_eq!(
+            drained.fencing_losses(),
+            vec![FencingLoss {
+                tick: Tick(2),
+                point: OUTPUT,
+                claimant: Some(FOREIGN),
+            }]
+        );
+        walked.extend(drained.role_changes().iter().cloned());
+        assert_eq!(peer.role(), Role::Demoting);
+
+        // While the preemptor's claim still stands the reclaim probe
+        // refuses every scan — the demotion settles standby and the
+        // field stays the foreign owner's: the probe never preempts.
+        assert_eq!(peer.scan(), Tick(3));
+        assert_eq!(peer.role(), Role::Standby);
+        for tick in 4..=6 {
+            assert_eq!(peer.scan(), Tick(tick));
+        }
+        assert_eq!(
+            peer.role(),
+            Role::Standby,
+            "a standing foreign owner must refuse the reclaim"
+        );
+        assert_eq!(claim.holder(), Some(FOREIGN));
+        assert!(!gate.is_open());
+
+        // The release: the next standby scan's bound grant takes the
+        // unclaimed field back under the run's own token — gate
+        // re-lifted, `promoting` reported — and the following
+        // field-owning scan settles `active`, its writes passing the
+        // claim it just re-took.
+        claim.release();
+        fenced.armed.store(false, Ordering::Relaxed);
+        assert_eq!(peer.scan(), Tick(7));
+        assert_eq!(peer.role(), Role::Promoting);
+        assert_eq!(claim.holder(), Some(OWNER));
+        assert!(gate.is_open());
+        assert_eq!(peer.report().field_claim, Some(FieldClaim::Held));
+        assert_eq!(peer.scan(), Tick(8));
+        assert_eq!(peer.role(), Role::Active);
+        assert_eq!(
+            field.value(OUTPUT),
+            Value::Float(1.0),
+            "the reclaimed owner's writes must pass the claim it re-took"
+        );
+        let drained = peer.drain_pending();
+        assert!(drained.fencing_losses().is_empty());
+        walked.extend(drained.role_changes().iter().cloned());
+        assert_eq!(
+            walked,
+            vec![
+                RoleChange {
+                    tick: Tick(2),
+                    from: Role::Active,
+                    to: Role::Demoting,
+                    origin: SwitchOrigin::Fenced,
+                    actor: None,
+                },
+                RoleChange {
+                    tick: Tick(3),
+                    from: Role::Demoting,
+                    to: Role::Standby,
+                    origin: SwitchOrigin::Fenced,
+                    actor: None,
+                },
+                RoleChange {
+                    tick: Tick(7),
+                    from: Role::Standby,
+                    to: Role::Promoting,
+                    origin: SwitchOrigin::Reclaim,
+                    actor: None,
+                },
+                RoleChange {
+                    tick: Tick(8),
+                    from: Role::Promoting,
+                    to: Role::Active,
+                    origin: SwitchOrigin::Reclaim,
+                    actor: None,
+                },
+            ]
+        );
+    }
+
+    /// The observed-claimant record the reclaim probe's refusals leave:
+    /// a preemptor the fenced-write demotion already attributed seeds
+    /// the dedup — its standing claim's refusals journal nothing the
+    /// `field_claim_lost` entry did not already say — while a *second*
+    /// foreign claimant the probes then meet is an episode no fenced
+    /// write ever recorded: one `ClaimObservation` queues naming the
+    /// token the field's arbitration answered with, once however many
+    /// scans its claim stands, and the peer's reclaim after it releases
+    /// still walks the role changes beside it in order.
+    #[test]
+    fn a_reclaim_probe_refusal_journals_the_second_foreign_claimant_once() {
+        const OWNER: u64 = 7;
+        const FOREIGN: u64 = 999;
+        const SECOND: u64 = 555;
+        let field = StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let fenced = FencingDriver {
+            inner: &field,
+            armed: AtomicBool::new(false),
+        };
+        let gate = WriteGate::closed(&fenced);
+        let claim = ScriptedClaim::unclaimed();
+        let mut peer = Peer::active(
+            Executor::new(&gate, loop_map(), vec![Box::new(PassThrough)]).unwrap(),
+            Some(&gate),
+        )
+        .with_field_claim(|| {
+            claim.claim(OWNER);
+            Ok(())
+        })
+        .with_field_probe(|| Ok(claim.probe()))
+        .with_field_claimant(|_| claim.holder())
+        .with_field_reclaim(|| Ok(claim.ensure(OWNER)))
+        .with_claim_observer(|| claim.holder().into_iter().collect());
+        // The walked role transitions, accumulated across every drain so
+        // the final assertion reads the whole walk while each drain
+        // still takes the whole set.
+        let mut walked: Vec<RoleChange> = Vec::new();
+        peer.activate().unwrap();
+        assert_eq!(peer.scan(), Tick(1));
+        assert_eq!(claim.holder(), Some(OWNER));
+
+        // The first preemption: the fenced write's demotion journals
+        // `field_claim_lost` attributed to the claimant the verdict
+        // named — seeding the dedup, so this standing claim's refused
+        // reclaim probes queue no second record for it.
+        claim.claim(FOREIGN);
+        fenced.armed.store(true, Ordering::Relaxed);
+        assert_eq!(peer.scan(), Tick(2));
+        let drained = peer.drain_pending();
+        assert_eq!(
+            drained.fencing_losses(),
+            vec![FencingLoss {
+                tick: Tick(2),
+                point: OUTPUT,
+                claimant: Some(FOREIGN),
+            }]
+        );
+        walked.extend(drained.role_changes().iter().cloned());
+        assert_eq!(peer.scan(), Tick(3));
+        assert_eq!(peer.role(), Role::Standby);
+        assert_eq!(peer.scan(), Tick(4));
+        assert_eq!(claim.holder(), Some(FOREIGN));
+        let drained = peer.drain_pending();
+        assert!(
+            drained.claim_observations().is_empty(),
+            "the claimant the loss entry attributed is not re-journaled"
+        );
+        walked.extend(drained.role_changes().iter().cloned());
+
+        // The ex-owner reconverges on the tracked line's ownerless
+        // verdict — the orphaned pull leaves the loss mark armed and
+        // re-stands the convergence proof the preempting ask needs, so
+        // its refused probes journal again from here.
+        let source_driver =
+            StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let mut source =
+            Executor::new(&source_driver, loop_map(), vec![Box::new(PassThrough)]).unwrap();
+        source.run(4);
+        let mut orphaned = source.checkpoint();
+        orphaned.source_owns_field = Some(false);
+        assert_eq!(
+            peer.track_once(|| Ok(orphaned)),
+            TrackReport::Applied(Transfer::Applied)
+        );
+        assert!(matches!(peer.sync_state(), StandbySync::Orphaned { .. }));
+        let drained = peer.drain_pending();
+        assert!(drained.claim_observations().is_empty());
+        walked.extend(drained.role_changes().iter().cloned());
+
+        // The preemptor released and a *different* foreign attachment
+        // took the claim before the probe ran again: this refusal names
+        // a claimant no journal record of this run carries — the
+        // episode that would otherwise pass silently.
+        claim.release();
+        claim.claim(SECOND);
+        assert_eq!(peer.scan(), Tick(5));
+        let drained = peer.drain_pending();
+        assert_eq!(
+            drained.claim_observations(),
+            vec![ClaimObservation {
+                tick: Tick(5),
+                point: OUTPUT,
+                claimant: SECOND,
+            }]
+        );
+        walked.extend(drained.role_changes().iter().cloned());
+
+        // The standing second claim journals once: repeat refusals
+        // queue nothing further while its token stands.
+        assert_eq!(peer.scan(), Tick(6));
+        let drained = peer.drain_pending();
+        assert!(drained.claim_observations().is_empty());
+        walked.extend(drained.role_changes().iter().cloned());
+
+        // The second claimant's release lets the next reclaim grant:
+        // the role changes walk the peer back `promoting` → `active`,
+        // and the observation's tick orders the episode between the
+        // demotion the first preemption drove and the reclaim the
+        // release allowed — the audit order the journaled records keep.
+        claim.release();
+        fenced.armed.store(false, Ordering::Relaxed);
+        assert_eq!(peer.scan(), Tick(7));
+        assert_eq!(peer.role(), Role::Promoting);
+        assert_eq!(claim.holder(), Some(OWNER));
+        assert_eq!(peer.scan(), Tick(8));
+        assert_eq!(peer.role(), Role::Active);
+        walked.extend(peer.drain_pending().role_changes().iter().cloned());
+        assert_eq!(
+            walked,
+            vec![
+                RoleChange {
+                    tick: Tick(2),
+                    from: Role::Active,
+                    to: Role::Demoting,
+                    origin: SwitchOrigin::Fenced,
+                    actor: None,
+                },
+                RoleChange {
+                    tick: Tick(3),
+                    from: Role::Demoting,
+                    to: Role::Standby,
+                    origin: SwitchOrigin::Fenced,
+                    actor: None,
+                },
+                RoleChange {
+                    tick: Tick(7),
+                    from: Role::Standby,
+                    to: Role::Promoting,
+                    origin: SwitchOrigin::Reclaim,
+                    actor: None,
+                },
+                RoleChange {
+                    tick: Tick(8),
+                    from: Role::Promoting,
+                    to: Role::Active,
+                    origin: SwitchOrigin::Reclaim,
+                    actor: None,
+                },
+            ]
+        );
+    }
+
+    /// The QA finding `reclaim-grants-ownership-without-convergence`:
+    /// an ex-owner whose image is not current with the field's line
+    /// must never preempt a standing claim on stale state. A merely
+    /// transport-frozen incumbent's claim reads identical to a dead
+    /// owner's at the field's arbitration — both stand holderless —
+    /// so the peer-side guard is the convergence proof the promotion
+    /// paths already require: while the run's own claim probe keeps
+    /// answering `held`, an unconverged ex-owner's bound ask never
+    /// issues and the frozen incumbent's ownership epoch survives to
+    /// its re-attach — no `reclaim` walk, no rollback of the
+    /// incumbent's applied state. Convergence evidence re-arms the
+    /// same probe: the bound grant then preempts the still-holderless
+    /// shape by design.
+    #[test]
+    fn an_unconverged_ex_owner_never_preempts_a_standing_claim() {
+        const OWNER: u64 = 7;
+        const FOREIGN: u64 = 999;
+        let field = StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let fenced = FencingDriver {
+            inner: &field,
+            armed: AtomicBool::new(false),
+        };
+        let gate = WriteGate::closed(&fenced);
+        let claim = ScriptedClaim::unclaimed();
+        let asks = std::sync::atomic::AtomicUsize::new(0);
+        let mut peer = Peer::active(
+            Executor::new(&gate, loop_map(), vec![Box::new(PassThrough)]).unwrap(),
+            Some(&gate),
+        )
+        .with_field_claim(|| {
+            claim.claim(OWNER);
+            Ok(())
+        })
+        .with_field_probe(|| Ok(claim.probe()))
+        .with_field_claimant(|_| claim.holder())
+        .with_field_reclaim(|| {
+            asks.fetch_add(1, Ordering::Relaxed);
+            Ok(claim.reclaim(OWNER))
+        });
+        peer.activate().unwrap();
+        assert_eq!(peer.scan(), Tick(1));
+        assert_eq!(claim.holder(), Some(OWNER));
+
+        // The preemption: the foreign incumbent takes the claim live,
+        // the owner's next write fences, and the demote path leaves
+        // the ex-owner `standby`/`unsynchronized` — the loss mark
+        // armed with no tracking source to converge on.
+        claim.claim(FOREIGN);
+        fenced.armed.store(true, Ordering::Relaxed);
+        assert_eq!(peer.scan(), Tick(2));
+        assert_eq!(peer.scan(), Tick(3));
+        assert_eq!(peer.role(), Role::Standby);
+        assert_eq!(peer.sync_state(), &StandbySync::Unsynchronized);
+        assert_eq!(claim.holder(), Some(FOREIGN));
+
+        // The incumbent's transport freezes: its claim keeps standing
+        // holderless — indistinguishable from a dead owner's at the
+        // arbitration — while this run's own probe keeps answering
+        // `held`. Zero convergence evidence: the bound ask never
+        // issues, the incumbent's epoch survives to its re-attach,
+        // and the stale ex-owner stays surfaced `standby`.
+        claim.freeze();
+        for tick in 4..=6 {
+            assert_eq!(peer.scan(), Tick(tick));
+            assert_eq!(peer.role(), Role::Standby);
+            assert_eq!(claim.holder(), Some(FOREIGN));
+        }
+        assert!(!gate.is_open());
+        assert_eq!(
+            asks.load(Ordering::Relaxed),
+            0,
+            "an unsynchronized ex-owner's reclaim ask must never \
+             preempt a standing claim — the frozen incumbent's epoch"
+        );
+
+        // Convergence evidence re-arms the same probe: the applied
+        // checkpoint lands `tracking`, the standing promotable verdict
+        // `self_promote` reads, and the next scan's bound grant
+        // preempts the still-holderless claim — the reclaim's designed
+        // coverage, the ex-owner now current with the field's line.
+        let source_driver =
+            StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let mut source =
+            Executor::new(&source_driver, loop_map(), vec![Box::new(PassThrough)]).unwrap();
+        source.run(6);
+        peer.apply(&source.checkpoint()).unwrap();
+        assert!(matches!(peer.sync_state(), StandbySync::Tracking { .. }));
+        fenced.armed.store(false, Ordering::Relaxed);
+        assert_eq!(peer.scan(), Tick(7));
+        assert_eq!(peer.role(), Role::Promoting);
+        assert_eq!(claim.holder(), Some(OWNER));
+        assert!(gate.is_open());
+        assert_eq!(peer.scan(), Tick(8));
+        assert_eq!(peer.role(), Role::Active);
+        assert_eq!(
+            field.value(OUTPUT),
+            Value::Float(1.0),
+            "the converged reclaimant's writes must pass the claim it re-took"
+        );
+    }
+
+    /// The claim-basis bound's own subject: a claimant whose clock runs
+    /// ahead of the tracked line it tracks — the QA lane's
+    /// `2490_claim_skew_bound` arm, where the source's stamp stands
+    /// while the claimant's run keeps counting at several times the
+    /// source's cadence — is refused the field by name, the claim hook
+    /// never runs, and the live incumbent keeps write-ownership.
+    #[test]
+    fn a_promotion_past_the_claim_lead_bound_refuses_the_live_incumbent() {
+        const INCUMBENT: u64 = 1001;
+        const CLAIMANT: u64 = 2002;
+        let field = StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let gate = WriteGate::closed(&field);
+        let claim = ScriptedClaim::unclaimed();
+        let asks = std::sync::atomic::AtomicUsize::new(0);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_field_claim(|| {
+                asks.fetch_add(1, Ordering::Relaxed);
+                claim.claim(CLAIMANT);
+                Ok(())
+            })
+            .with_field_probe(|| Ok(claim.probe()));
+        // The live incumbent the claim would preempt: a different
+        // owner's standing claim, which the probe reads as `held`.
+        claim.claim(INCUMBENT);
+
+        // A source whose stamp stands still while this run keeps
+        // scanning — the four-times-paced claimant's own tick outrunning
+        // the line it tracks, transfer after transfer.
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(4);
+        let checkpoint = source.checkpoint();
+        peer.apply(&checkpoint).unwrap();
+        assert_eq!(
+            peer.claim_basis().map(|basis| basis.growth),
+            Some(0),
+            "the alignment's first transfer establishes the baseline"
+        );
+        for _ in 0..=MAX_CLAIM_LEAD {
+            peer.scan();
+            peer.apply(&checkpoint).unwrap();
+        }
+        let basis = peer.claim_basis().unwrap();
+        assert_eq!(basis.source, Tick(4));
+        assert!(
+            basis.growth > MAX_CLAIM_LEAD,
+            "the staged skew must sit past the bound, got {basis}"
+        );
+
+        let error = peer.promote().unwrap_err();
+        assert!(
+            matches!(&error, SwitchError::FieldClaimFailed { detail }
+                if detail.contains("recorded skew bound")
+                    && detail.contains("--scan-ms")),
+            "{error:?}"
+        );
+        assert!(
+            !gate.is_open(),
+            "a refused claim lifts nothing: the gate stays closed"
+        );
+        assert_eq!(
+            asks.load(Ordering::Relaxed),
+            0,
+            "a refused basis must never reach the field's arbitration"
+        );
+        assert_eq!(claim.holder(), Some(INCUMBENT));
+        assert_eq!(peer.role(), Role::Standby);
+        assert!(
+            peer.drain_pending().role_changes().is_empty(),
+            "a refused promotion transitions nothing"
+        );
+
+        // The same claim once the field stands unclaimed: nothing is
+        // left to preempt, so the documented unclaimed-field remedy
+        // lands regardless of the basis.
+        claim.release();
+        assert_eq!(peer.scan().0, basis.run.0 + 1);
+        peer.promote().unwrap();
+        assert_eq!(peer.role(), Role::Promoting);
+        assert!(gate.is_open());
+        assert_eq!(claim.holder(), Some(CLAIMANT));
+    }
+
+    /// The bound's other half: a claimant at the line's own cadence
+    /// declares a basis inside the window however long the alignment
+    /// runs, so the documented switchover is untouched.
+    #[test]
+    fn an_inside_bound_promotion_still_takes_the_field() {
+        let field = StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let gate = WriteGate::closed(&field);
+        let claim = ScriptedClaim::unclaimed();
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_field_claim(|| {
+                claim.claim(2);
+                Ok(())
+            })
+            .with_field_probe(|| Ok(claim.probe()));
+        claim.claim(1);
+
+        // One aligned transfer per scan: the source keeps pace with
+        // this run, so the lead neither grows nor shrinks for many more
+        // scans than the bound's window.
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        for _ in 0..4 * MAX_CLAIM_LEAD {
+            source.scan();
+            peer.scan();
+            peer.apply(&source.checkpoint()).unwrap();
+        }
+        let basis = peer.claim_basis().unwrap();
+        assert!(basis.within_bound(), "{basis}");
+        peer.promote().unwrap();
+        assert_eq!(peer.role(), Role::Promoting);
+        assert!(gate.is_open());
+        assert_eq!(claim.holder(), Some(2));
+    }
+
+    /// The scope that keeps the bound from stranding a recovery, in both
+    /// of its halves: a lead that accrued while the line could not be
+    /// reached re-bases when the line serves again — the accrued lead
+    /// #1269's strand is about is not the bound's subject — and a claim
+    /// over a line this run cannot reach is granted whatever its basis,
+    /// because nothing demonstrably stands to preempt.
+    #[test]
+    fn the_claim_bound_leaves_the_outage_lead_and_the_failover_recovery_free() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let claim = ScriptedClaim::unclaimed();
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_field_claim(|| {
+                claim.claim(2);
+                Ok(())
+            })
+            .with_field_probe(|| Ok(claim.probe()));
+        claim.claim(1);
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(4);
+        let checkpoint = source.checkpoint();
+        assert_eq!(
+            peer.track_once(|| Ok(checkpoint)),
+            TrackReport::Applied(Transfer::Applied)
+        );
+        // The source outage this run survives: no transfer lands, so
+        // its own clock accrues the honest accrued lead while the
+        // line's stamps stand still.
+        for _ in 0..4 * MAX_CLAIM_LEAD {
+            peer.scan();
+            assert!(matches!(
+                peer.track_once(|| Err("the source is gone".to_string())),
+                TrackReport::Missed { .. }
+            ));
+        }
+        assert!(
+            peer.claim_basis()
+                .is_some_and(|basis| !basis.within_bound()),
+            "the outage alone leaves this run's clock far ahead of the \
+             line's stamps — the declared lead, not the growth"
+        );
+
+        // The line serves again: the first transfer out of the window
+        // re-bases the declared lead, so the switchover the operator
+        // asks for lands exactly as it does on a pair that never
+        // lost its source.
+        source.scan();
+        let served = source.checkpoint();
+        assert_eq!(
+            peer.track_once(|| Ok(served)),
+            TrackReport::Applied(Transfer::Applied)
+        );
+        let rebased = peer.claim_basis().unwrap();
+        assert!(rebased.within_bound(), "{rebased}");
+        peer.promote().unwrap();
+        assert_eq!(peer.role(), Role::Promoting);
+        assert!(gate.is_open());
+        assert_eq!(claim.holder(), Some(2));
+
+        // The armed-failover half: a skew past the bound never strands
+        // the documented takeover over a line this run cannot reach —
+        // the budget-th miss fires on the miss run, which is exactly
+        // the escape the requested promotion's claim-bound reads.
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let claim = ScriptedClaim::unclaimed();
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_failover(2)
+            .with_field_claim(|| {
+                claim.claim(3);
+                Ok(())
+            })
+            .with_field_probe(|| Ok(claim.probe()));
+        claim.claim(1);
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(4);
+        let standing = source.checkpoint();
+        assert_eq!(
+            peer.track_once(|| Ok(standing.clone())),
+            TrackReport::Applied(Transfer::Applied)
+        );
+        for _ in 0..=MAX_CLAIM_LEAD {
+            peer.scan();
+            peer.apply(&standing).unwrap();
+        }
+        assert!(
+            !peer
+                .claim_basis()
+                .expect("an aligned run declares a basis")
+                .within_bound(),
+            "the staged skew must sit past the bound"
+        );
+        assert!(matches!(
+            peer.track_once(|| Err("the line went away".to_string())),
+            TrackReport::Missed { .. }
+        ));
+        assert!(matches!(
+            peer.track_once(|| Err("and stayed away".to_string())),
+            TrackReport::Promoted { .. }
+        ));
+        assert_eq!(peer.role(), Role::Promoting);
+        assert!(gate.is_open());
+        assert_eq!(claim.holder(), Some(3));
+    }
+
+    /// The pre-hook behavior a driver surface without the reclaim
+    /// grant keeps: a fencing-demoted ex-owner stays `standby` across
+    /// the preemptor's release — the wedge an operator's promote
+    /// unwedges.
+    #[test]
+    fn a_fencing_demoted_owner_without_the_reclaim_hook_stays_wedged() {
+        let field = StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let fenced = FencingDriver {
+            inner: &field,
+            armed: AtomicBool::new(false),
+        };
+        let gate = WriteGate::closed(&fenced);
+        let claim = ScriptedClaim::unclaimed();
+        let mut peer = Peer::active(
+            Executor::new(&gate, loop_map(), vec![Box::new(PassThrough)]).unwrap(),
+            Some(&gate),
+        )
+        .with_field_claim(|| {
+            claim.claim(7);
+            Ok(())
+        })
+        .with_field_probe(|| Ok(claim.probe()))
+        .with_field_claimant(|_| claim.holder());
+        peer.activate().unwrap();
+        peer.scan();
+
+        claim.claim(9);
+        fenced.armed.store(true, Ordering::Relaxed);
+        peer.scan();
+        assert_eq!(peer.role(), Role::Demoting);
+        peer.scan();
+        assert_eq!(peer.role(), Role::Standby);
+
+        // The preemptor releases and the field stands unclaimed — but
+        // with no reclaim hook nothing takes it back: the peer keeps
+        // reporting the wedge until an operator promotes.
+        claim.release();
+        for _ in 0..3 {
+            peer.scan();
+        }
+        assert_eq!(peer.role(), Role::Standby);
+        assert_eq!(peer.report().field_claim, Some(FieldClaim::Unclaimed));
+        assert!(!gate.is_open());
+    }
+
     /// A peer whose claim was preempted between scans still reports
     /// `active` and accepts commands until the detection scan — the
     /// fencing demotion must reconcile what that boundary settled onto
-    /// the abandoned image: `Rejected`/`Superseded`, never `Applied`
-    /// for an effect the field never saw.
+    /// the abandoned image. Whether the surviving line carried the
+    /// admissions is not the demoted run's to decide, so the boundary
+    /// replays its provisional settlements back to `Accepted` — never
+    /// a terminal `Superseded` a carried copy's later `Applied` would
+    /// contradict (the `demote-boundary-superseded-mint-then-carried-
+    /// applied` finding) — and rolls the staged mutations out, so the
+    /// quiesced checkpoints carry the pre-boundary state beside the
+    /// still-live receipts. The tracked line then adjudicates each
+    /// once: carried, settling `applied` with the line's own verdict.
     #[test]
-    fn a_fenced_owner_supersedes_the_commands_its_detection_scan_applied() {
+    fn a_fenced_owner_suspends_the_commands_its_detection_scan_settled() {
         const HELD: PointId = PointId(30);
         let field = StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
         let fenced = FencingDriver {
@@ -2283,31 +6554,34 @@ mod tests {
             field_write.outcome,
             CommandOutcome::Accepted { .. }
         ));
+        let force = peer.submit_command(Command::ForcePoint {
+            point: HELD,
+            kind: ValueKind::Float,
+            value: Value::Float(5.0),
+        });
+        assert!(matches!(force.outcome, CommandOutcome::Accepted { .. }));
 
-        // The detection scan: the boundary applies the queued commands
-        // onto the image, then the field write meets the fence and the
-        // demotion runs. The reconciled settlements name the
-        // supersession; the field write's own fenced refusal stands as
-        // the named driver rejection; nothing reached the field.
+        // The detection scan: the boundary settles the queued commands
+        // onto the image — `Applied`, `DriverRejected`, all provisional
+        // — then the field write meets the fence and the demotion
+        // replays every settlement back to the `Accepted` the receipt
+        // held. Nothing reached the field, and nothing terminally
+        // settled: the surviving line has not adjudicated the
+        // admissions yet, so no `Superseded` mints here to be
+        // contradicted by a carried copy's `Applied` later.
         assert_eq!(peer.scan(), Tick(2));
         assert_eq!(peer.role(), Role::Demoting);
         assert!(!gate.is_open());
         assert_eq!(field.value(INPUT), Value::Float(1.0));
-        assert_eq!(
-            peer.receipts()[1].outcome,
-            CommandOutcome::Rejected {
-                reason: CommandError::Superseded { point: Some(HELD) }
-            }
-        );
-        assert_eq!(
-            peer.receipts()[2].outcome,
-            CommandOutcome::Rejected {
-                reason: CommandError::DriverRejected {
-                    point: INPUT,
-                    error: IoError::Fenced(INPUT),
-                }
-            }
-        );
+        for index in 1..=3 {
+            assert_eq!(
+                peer.receipts()[index].outcome,
+                CommandOutcome::Accepted {
+                    apply_tick: Tick(2)
+                },
+                "receipt {index} must re-suspend for the line's adjudication"
+            );
+        }
         // The earlier boundary's settlement stands: it applied while
         // the peer owned the field.
         assert_eq!(
@@ -2315,11 +6589,78 @@ mod tests {
             CommandOutcome::Applied { tick: Tick(1) }
         );
 
+        // The boundary's staged mutations rolled back with the
+        // settlement replay — the QA finding
+        // `superseded-receipt-internal-write-persists`: the held point
+        // shows the last *owned* boundary's value and the force set is
+        // empty, so the quiesced checkpoints never carry a mutation
+        // the still-pending receipts have not made.
+        assert_eq!(
+            peer.executor().sample(HELD),
+            Some(Sample::good(Value::Float(2.0), Tick(1))),
+            "the suspended write must not persist on the demoted image"
+        );
+        assert!(
+            peer.snapshot().forces.is_empty(),
+            "the suspended force must not persist on the demoted run"
+        );
+
+        // The carry leg the finding's pair produced: a tracking peer
+        // adopting the demoted run's checkpoints picks the suspended
+        // admissions up live — the adopted window re-queues them — and
+        // promotes, settling each `Applied` on the line that owns the
+        // field. The demoted peer's adoption then converges the log to
+        // the line's verdict: one settle, `applied`, and no
+        // `Superseded` queued beside it.
+        let tracking_field =
+            StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let tracking_gate = WriteGate::closed(&tracking_field);
+        let mut successor = Peer::standby(
+            Executor::new(
+                &tracking_gate,
+                loop_map()
+                    .with_writable_point(INPUT, Direction::In, ValueKind::Float)
+                    .with_writable_internal(
+                        HELD,
+                        Direction::In,
+                        ValueKind::Float,
+                        Value::Float(0.0),
+                    ),
+                vec![Box::new(PassThrough)],
+            )
+            .unwrap(),
+            Some(&tracking_gate),
+        );
+        successor.apply(&peer.checkpoint()).unwrap();
+        assert_eq!(
+            successor.executor().sample(HELD),
+            Some(Sample::good(Value::Float(2.0), Tick(1))),
+            "the adopted line must not carry the suspended mutation"
+        );
+        assert!(successor.snapshot().forces.is_empty());
+        successor.promote().unwrap();
+        assert_eq!(successor.scan(), Tick(3));
+        assert!(
+            successor.receipts()[1..]
+                .iter()
+                .all(|receipt| matches!(receipt.outcome, CommandOutcome::Applied { .. })),
+            "the carried admissions settle applied on the live line: {:?}",
+            successor.receipts()
+        );
+        assert_eq!(tracking_field.value(INPUT), Value::Float(5.0));
+
+        peer.apply(&successor.checkpoint()).unwrap();
+        assert!(
+            peer.drain_pending().superseded_commands().is_empty(),
+            "a carried admission never settles superseded beside the line's applied"
+        );
+        assert_eq!(peer.receipts(), successor.receipts());
+
         // The demoted peer's next quiesced boundary settles no strays —
-        // the pending queue was drained by the reconciliation.
-        assert_eq!(peer.scan(), Tick(3));
+        // the suspended receipts resolved with the line.
+        assert_eq!(peer.scan(), Tick(4));
         assert_eq!(peer.role(), Role::Standby);
-        assert_eq!(peer.receipts().len(), 3);
+        assert_eq!(peer.receipts().len(), 4);
     }
 
     /// A read-biasing driver wrapper: adds `offset` to `Float` reads of
@@ -2447,7 +6788,7 @@ mod tests {
             standby.sync_state(),
             &StandbySync::Tracking { aligned: Tick(4) }
         );
-        assert_eq!(standby.take_divergences(), vec![]);
+        assert_eq!(standby.drain_pending().divergences(), vec![]);
         assert!(matches!(
             standby.report().sync,
             Some(StandbySync::Tracking { .. })
@@ -2474,7 +6815,7 @@ mod tests {
         };
         assert_eq!(standby.report().sync, Some(diverged.clone()));
         assert_eq!(
-            standby.take_divergences(),
+            standby.drain_pending().divergences(),
             vec![DivergenceReport {
                 tick: Tick(6),
                 mismatches: vec![Divergence {
@@ -2503,7 +6844,7 @@ mod tests {
         cycle(&mut active, &mut standby);
         assert!(matches!(standby.sync_state(), StandbySync::Diverged { .. }));
         assert_eq!(
-            standby.take_resolutions(),
+            standby.drain_pending().resolutions(),
             vec![],
             "still diverged — nothing resolved yet"
         );
@@ -2516,7 +6857,7 @@ mod tests {
         // to the compared tick and carrying the compared-point evidence
         // — both sides' values now agreeing.
         assert_eq!(
-            standby.take_resolutions(),
+            standby.drain_pending().resolutions(),
             vec![ResolutionReport {
                 tick: Tick(8),
                 compared: vec![Divergence {
@@ -2532,11 +6873,11 @@ mod tests {
 
     /// The QA finding `diverged-clears-without-valid-field-comparison`:
     /// `Diverged` is the promotion-blocking "staged outputs differ from
-    /// the field" verdict and clears only on a same-tick comparison
+    /// the field" verdict and clears only on a same-position comparison
     /// that actually read the field and matched. A stale checkpoint
-    /// apply runs zero reads, and a same-tick compare whose field reads
-    /// fail observes nothing — neither reopens the promote gate while
-    /// the divergence evidence stands unresolved.
+    /// apply runs zero reads, and a same-position compare whose field
+    /// reads fail observes nothing — neither reopens the promote gate
+    /// while the divergence evidence stands unresolved.
     #[test]
     fn diverged_standby_clears_only_on_a_fully_read_same_tick_compare() {
         // The shared field; the standby observes it through a
@@ -2585,7 +6926,7 @@ mod tests {
         };
         assert_eq!(standby.sync_state(), &diverged);
         assert_eq!(
-            standby.take_divergences(),
+            standby.drain_pending().divergences(),
             vec![DivergenceReport {
                 tick: Tick(5),
                 mismatches: vec![Divergence {
@@ -2595,7 +6936,7 @@ mod tests {
                 }],
             }]
         );
-        assert!(standby.take_resolutions().is_empty());
+        assert!(standby.drain_pending().resolutions().is_empty());
         assert_eq!(
             standby.promote(),
             Err(SwitchError::NotConverged {
@@ -2621,7 +6962,7 @@ mod tests {
         // the miss counts toward failover, the verdict still stands.
         standby.note_transfer_failed("fetch from active: refused");
         assert_eq!(standby.sync_state(), &diverged);
-        assert!(standby.take_resolutions().is_empty());
+        assert!(standby.drain_pending().resolutions().is_empty());
 
         // (2) The faulted-reads repro: a fresh same-tick checkpoint
         // lands, so the comparison runs — but the field read of the
@@ -2639,7 +6980,7 @@ mod tests {
             })
         );
         assert!(!gate.is_open());
-        assert!(standby.take_resolutions().is_empty());
+        assert!(standby.drain_pending().resolutions().is_empty());
 
         // (3) Only a fresh same-tick comparison whose field reads all
         // succeeded and matched clears the verdict — (4) journaled as
@@ -2654,9 +6995,14 @@ mod tests {
             &StandbySync::Tracking { aligned: Tick(7) }
         );
         assert_eq!(
-            standby.take_resolutions(),
+            standby.drain_pending().resolutions(),
             vec![ResolutionReport {
-                tick: Tick(7),
+                // The apply held the run's clock at its own tick — the
+                // journal and history attribution domain never rewinds
+                // — so the same-tick compare pairs the image staged at
+                // that tick and the resolution journals there, not at
+                // the stream's 7.
+                tick: Tick(8),
                 compared: vec![Divergence {
                     point: OUTPUT,
                     staged: Value::Float(2.0),
@@ -2669,11 +7015,11 @@ mod tests {
     }
 
     /// The promotion boundary's `final_sync` sets the staged image
-    /// aside for its own transfer — a same-tick comparison there would
-    /// flag the one-tick command lag spuriously — but a promote the
-    /// standing verdict refuses must hand it back: on a diverged peer
-    /// it is the only evidence the next same-tick apply can clear the
-    /// verdict on.
+    /// aside for its own transfer — a same-position comparison there
+    /// would flag the one-tick command lag spuriously — but a promote
+    /// the standing verdict refuses must hand it back: on a diverged
+    /// peer it is the only evidence the next same-position apply can
+    /// clear the verdict on.
     #[test]
     fn a_refused_promotions_boundary_sync_keeps_the_divergence_evidence() {
         let field = StubDriver::field(&[(INPUT, Value::Float(2.0)), (OUTPUT, Value::Float(0.0))]);
@@ -2714,7 +7060,7 @@ mod tests {
             }],
         };
         assert_eq!(standby.sync_state(), &diverged);
-        standby.take_divergences();
+        standby.drain_pending().divergences();
 
         // The active's next scan overwrote the skew — the field carries
         // its write again — and the diverged peer's promote runs its
@@ -2741,7 +7087,7 @@ mod tests {
             &StandbySync::Tracking { aligned: Tick(6) }
         );
         assert_eq!(
-            standby.take_resolutions(),
+            standby.drain_pending().resolutions(),
             vec![ResolutionReport {
                 tick: Tick(6),
                 compared: vec![Divergence {
@@ -2755,11 +7101,11 @@ mod tests {
         assert!(gate.is_open());
     }
 
-    /// A diverged peer whose next apply runs no same-tick field
-    /// comparison — the staged image's tick never matched the applied
-    /// checkpoint's — stays diverged: the apply carried no
-    /// field-matching evidence, so the promotion-blocking verdict
-    /// stands and no resolution queues.
+    /// A diverged peer whose next apply runs no same-position field
+    /// comparison — the staged image's predicted position never matched
+    /// the applied checkpoint's tick — stays diverged: the apply
+    /// carried no field-matching evidence, so the promotion-blocking
+    /// verdict stands and no resolution queues.
     #[test]
     fn diverged_verdict_stands_on_an_apply_that_ran_no_compare() {
         let field = StubDriver::field(&[(INPUT, Value::Float(2.0)), (OUTPUT, Value::Float(0.0))]);
@@ -2787,7 +7133,7 @@ mod tests {
         standby.scan();
         cycle(&mut active, &mut standby);
         assert!(matches!(standby.sync_state(), StandbySync::Diverged { .. }));
-        assert_eq!(standby.take_divergences().len(), 1);
+        assert_eq!(standby.drain_pending().divergences().len(), 1);
 
         // The detecting apply consumed the staged image; two active
         // scans before the next apply leave no staged image whose tick
@@ -2797,7 +7143,7 @@ mod tests {
         active.scan();
         standby.apply(&active.checkpoint()).unwrap();
         assert!(matches!(standby.sync_state(), StandbySync::Diverged { .. }));
-        assert!(standby.take_resolutions().is_empty());
+        assert!(standby.drain_pending().resolutions().is_empty());
         assert!(matches!(
             standby.promote(),
             Err(SwitchError::NotConverged {
@@ -2834,7 +7180,7 @@ mod tests {
         standby.scan();
         cycle(&mut active, &mut standby);
         assert!(matches!(standby.sync_state(), StandbySync::Diverged { .. }));
-        standby.take_divergences();
+        standby.drain_pending().divergences();
 
         // The promote path's boundary pull: its apply would clear the
         // diverged state evidence-free, but the restored verdict keeps
@@ -2843,7 +7189,7 @@ mod tests {
         active.scan();
         standby.final_sync(|| Ok(active.checkpoint()));
         assert!(matches!(standby.sync_state(), StandbySync::Diverged { .. }));
-        assert_eq!(standby.take_resolutions(), vec![]);
+        assert_eq!(standby.drain_pending().resolutions(), vec![]);
         assert!(matches!(
             standby.promote(),
             Err(SwitchError::NotConverged {
@@ -2976,6 +7322,221 @@ mod tests {
         assert!(!gate.is_open());
     }
 
+    /// A scripted field-claim arbitration — the plant server's rule in
+    /// miniature: `holder` carries the standing claim's owner token
+    /// while one stands and `None` while the field is unclaimed, and
+    /// `live` whether a live attachment stands behind that claim —
+    /// `freeze` drops the holders while the claim keeps standing, the
+    /// merely transport-frozen incumbent the bound `reclaim` grant
+    /// preempts while `ensure` refuses either way. `claim` takes it
+    /// unconditionally, as a promotion's arbitration does; `probe`
+    /// reads the standing state without touching it — an observation
+    /// cannot seize the field it reports.
+    struct ScriptedClaim {
+        holder: Mutex<Option<u64>>,
+        live: AtomicBool,
+    }
+
+    impl ScriptedClaim {
+        /// A field no attachment owns — the fail-closed window a
+        /// released or restarted claim leaves.
+        fn unclaimed() -> Self {
+            Self {
+                holder: Mutex::new(None),
+                live: AtomicBool::new(false),
+            }
+        }
+
+        /// The read-only observation: `held` while an owner stands —
+        /// this attachment's own hold or a standing owner's, which the
+        /// report need not distinguish — `unclaimed` while none does.
+        fn probe(&self) -> FieldClaim {
+            match *self.holder.lock().unwrap() {
+                Some(_) => FieldClaim::Held,
+                None => FieldClaim::Unclaimed,
+            }
+        }
+
+        /// The unconditional grant a promotion claims through.
+        fn claim(&self, owner: u64) {
+            *self.holder.lock().unwrap() = Some(owner);
+            self.live.store(true, Ordering::Relaxed);
+        }
+
+        /// The conditional grant the orphan cycle probes: takes the
+        /// claim for `owner` only while the field stands unclaimed or
+        /// already names the token — refused while a different owner
+        /// stands, so the probe never preempts.
+        fn ensure(&self, owner: u64) -> bool {
+            let mut holder = self.holder.lock().unwrap();
+            match *holder {
+                Some(standing) if standing != owner => false,
+                _ => {
+                    *holder = Some(owner);
+                    self.live.store(true, Ordering::Relaxed);
+                    true
+                }
+            }
+        }
+
+        /// The bound conditional grant the fencing-loss reclaim
+        /// probes: grants where the field stands unclaimed or already
+        /// names `owner`, and preempts a different owner's *holderless*
+        /// claim — the dead-owner or transport-frozen shape the field's
+        /// arbitration cannot tell apart — refusing only while a
+        /// different owner's claim still has a live attachment.
+        fn reclaim(&self, owner: u64) -> bool {
+            let mut holder = self.holder.lock().unwrap();
+            match *holder {
+                Some(standing) if standing != owner && self.live.load(Ordering::Relaxed) => false,
+                _ => {
+                    *holder = Some(owner);
+                    self.live.store(true, Ordering::Relaxed);
+                    true
+                }
+            }
+        }
+
+        /// The last holder's release — the field returns to unclaimed.
+        fn release(&self) {
+            *self.holder.lock().unwrap() = None;
+            self.live.store(false, Ordering::Relaxed);
+        }
+
+        /// The holders' transport freeze: the claim keeps standing —
+        /// `probe` still answers `held` — with no live attachment
+        /// behind it, the shape a thawing connection leaves until the
+        /// incumbent re-attaches.
+        fn freeze(&self) {
+            self.live.store(false, Ordering::Relaxed);
+        }
+
+        /// The standing owner, for the test's own assertions.
+        fn holder(&self) -> Option<u64> {
+            *self.holder.lock().unwrap()
+        }
+    }
+
+    /// The unclaimed-field signal: a tracking peer's per-scan probe
+    /// reports the field's write-ownership through `field_claim` —
+    /// `unclaimed` while no claim stands — without seizing it. The
+    /// probe is the claim's read-only half: no claim ran, the gate
+    /// stays closed, the role does not move, and nothing queues for
+    /// the journal.
+    #[test]
+    fn an_unclaimed_field_reports_on_the_tracking_peer_without_seizing_it() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let field = ScriptedClaim::unclaimed();
+        let claimed = AtomicBool::new(false);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_field_claim(|| {
+                claimed.store(true, Ordering::Relaxed);
+                Ok(())
+            })
+            .with_field_probe(|| Ok(field.probe()));
+
+        // Before the first scan no claim question was answered — `None`
+        // is not `held`.
+        assert_eq!(peer.report().field_claim, None);
+
+        peer.scan();
+        let report = peer.report();
+        assert_eq!(report.field_claim, Some(FieldClaim::Unclaimed));
+        assert_eq!(report.role, Role::Standby);
+        assert!(!gate.is_open());
+        assert!(
+            !claimed.load(Ordering::Relaxed),
+            "the probe must never run the claim"
+        );
+        assert_eq!(
+            field.holder(),
+            None,
+            "reporting an unclaimed field must not seize it"
+        );
+        assert!(peer.drain_pending().role_changes().is_empty());
+        assert!(peer.drain_pending().fencing_losses().is_empty());
+        assert!(peer.drain_pending().orphans().is_empty());
+    }
+
+    /// `held` is the answer a standing owner gives — the fenced
+    /// observation (a different attachment holds the claim) and the
+    /// claimed one (this run's own hold) report identically: the
+    /// signal distinguishes "an owner stands" from "none does", not
+    /// whose it is.
+    #[test]
+    fn a_held_claim_reports_held_whether_the_owner_is_foreign_or_own() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let field = ScriptedClaim::unclaimed();
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_field_claim(|| {
+                field.claim(7);
+                Ok(())
+            })
+            .with_field_probe(|| Ok(field.probe()));
+
+        // A foreign owner stands: the probe's fenced verdict reports
+        // `held`, not `unclaimed`.
+        field.claim(9);
+        peer.scan();
+        assert_eq!(peer.report().field_claim, Some(FieldClaim::Held));
+
+        // The release leaves the field unclaimed: the next probe
+        // reports the fail-closed window.
+        field.release();
+        peer.scan();
+        assert_eq!(peer.report().field_claim, Some(FieldClaim::Unclaimed));
+
+        // Converged and promoted, the peer's own claim is the standing
+        // owner — the probe reports `held` again.
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(3);
+        peer.apply(&source.checkpoint()).unwrap();
+        peer.promote().unwrap();
+        peer.scan();
+        assert_eq!(peer.role(), Role::Active);
+        assert_eq!(field.holder(), Some(7));
+        assert_eq!(peer.report().field_claim, Some(FieldClaim::Held));
+    }
+
+    /// A probe the field cannot answer is no observation: the report
+    /// keeps the last answer rather than guessing — `None` before any
+    /// answer, the standing verdict afterward.
+    #[test]
+    fn a_failed_claim_probe_leaves_the_last_observation_standing() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let field = ScriptedClaim::unclaimed();
+        let reachable = AtomicBool::new(false);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate)).with_field_probe(|| {
+            if reachable.load(Ordering::Relaxed) {
+                Ok(field.probe())
+            } else {
+                Err("plant unreachable".to_string())
+            }
+        });
+
+        // A probe that never answered reports `None`.
+        peer.scan();
+        assert_eq!(peer.report().field_claim, None);
+
+        reachable.store(true, Ordering::Relaxed);
+        peer.scan();
+        assert_eq!(peer.report().field_claim, Some(FieldClaim::Unclaimed));
+
+        // The field changes hands behind a dead probe: the last
+        // observation stands until a probe answers again.
+        field.claim(9);
+        reachable.store(false, Ordering::Relaxed);
+        peer.scan();
+        assert_eq!(peer.report().field_claim, Some(FieldClaim::Unclaimed));
+        reachable.store(true, Ordering::Relaxed);
+        peer.scan();
+        assert_eq!(peer.report().field_claim, Some(FieldClaim::Held));
+    }
+
     /// Without a failover budget the miss count still reports but never
     /// arms — manual promotion carries the pair alone.
     #[test]
@@ -2991,6 +7552,111 @@ mod tests {
             Err(SwitchError::NotConverged {
                 sync: StandbySync::Degraded { detail: "b".into() }
             })
+        );
+    }
+
+    /// An armed peer's report serves the failover gate's evidence: the
+    /// standing convergence proof `self_promote` reads, bundled with
+    /// the consecutive-miss count and the armed budget bounding it — a
+    /// mid-window `degraded` report reads "proof stands, misses k of
+    /// N", and past the budget the served proof reads voided.
+    #[test]
+    fn an_armed_peers_report_serves_the_failover_gates_evidence() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate)).with_failover(2);
+
+        // Armed but never converged: the accounting reports while the
+        // proof does not yet stand.
+        assert_eq!(
+            peer.report().failover,
+            Some(FailoverEvidence {
+                converged: false,
+                misses: 0,
+                budget: 2,
+            })
+        );
+
+        // Converged and tracking: proof stands with no misses on it.
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(3);
+        peer.apply(&source.checkpoint()).unwrap();
+        assert_eq!(
+            peer.report().failover,
+            Some(FailoverEvidence {
+                converged: true,
+                misses: 0,
+                budget: 2,
+            })
+        );
+
+        // Mid-window: the verdict degrades on the produced-nothing pull
+        // while the standing proof holds — "verdict degraded, proof
+        // stands, misses 1 of 2".
+        peer.note_transfer_failed("a");
+        let report = peer.report();
+        assert_eq!(
+            report.sync,
+            Some(StandbySync::Degraded { detail: "a".into() })
+        );
+        assert_eq!(
+            report.failover,
+            Some(FailoverEvidence {
+                converged: true,
+                misses: 1,
+                budget: 2,
+            })
+        );
+
+        // At the boundary the proof still stands — the failover's own
+        // fire point — and past it the served proof reads voided.
+        peer.note_transfer_failed("b");
+        assert!(peer.failover_due());
+        assert_eq!(
+            peer.report().failover,
+            Some(FailoverEvidence {
+                converged: true,
+                misses: 2,
+                budget: 2,
+            })
+        );
+        peer.note_transfer_failed("c");
+        assert!(!peer.failover_due());
+        assert_eq!(
+            peer.report().failover,
+            Some(FailoverEvidence {
+                converged: false,
+                misses: 3,
+                budget: 2,
+            })
+        );
+    }
+
+    /// An unarmed peer's report carries no failover accounting at all:
+    /// the bare proof flag would survive unbounded misses, so the
+    /// record forbids serving it without the armed budget's bound.
+    #[test]
+    fn an_unarmed_peers_report_carries_no_failover_accounting() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut peer = Peer::standby(executor(&driver), None);
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(3);
+        peer.apply(&source.checkpoint()).unwrap();
+        assert_eq!(peer.report().failover, None);
+
+        // Misses still count — `missed_transfers` reports them — but
+        // nothing of the failover gate lands on the served report.
+        peer.note_transfer_failed("a");
+        peer.note_transfer_failed("b");
+        assert_eq!(peer.missed_transfers(), 2);
+        let report = peer.report();
+        assert_eq!(report.failover, None);
+        assert_eq!(
+            report.sync,
+            Some(StandbySync::Degraded { detail: "b".into() })
         );
     }
 
@@ -3088,11 +7754,13 @@ mod tests {
         }
         assert!(gate.is_open());
         assert_eq!(
-            peer.take_role_changes(),
+            peer.drain_pending().role_changes(),
             vec![RoleChange {
                 tick: Tick(3),
                 from: Role::Standby,
                 to: Role::Promoting,
+                origin: SwitchOrigin::Failover,
+                actor: None,
             }]
         );
 
@@ -3100,6 +7768,62 @@ mod tests {
         // check — a pull that would fail never runs.
         let report = peer.track_once(|| panic!("a field owner pulls nothing"));
         assert_eq!(report, TrackReport::OwnsField);
+    }
+
+    /// The failover marker: a self-promotion's queued transitions carry
+    /// `origin: failover` with no actor on both the request and the
+    /// settle — never reading as an unattributed operator request,
+    /// whose transitions carry `origin: request` instead.
+    #[test]
+    fn a_self_promotions_transitions_journal_the_failover_origin() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate)).with_failover(2);
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(3);
+        peer.apply(&source.checkpoint()).unwrap();
+        peer.note_transfer_failed("a");
+        peer.note_transfer_failed("b");
+        peer.self_promote().unwrap();
+        peer.scan();
+
+        let drained = peer.drain_pending();
+        let changes = drained.role_changes();
+        assert_eq!(changes.len(), 2);
+        for change in changes {
+            assert_eq!(change.origin, SwitchOrigin::Failover);
+            assert_eq!(change.actor, None);
+        }
+        assert_eq!(
+            changes
+                .iter()
+                .map(|change| (change.from, change.to))
+                .collect::<Vec<_>>(),
+            vec![
+                (Role::Standby, Role::Promoting),
+                (Role::Promoting, Role::Active),
+            ]
+        );
+    }
+
+    /// The distinction holds the other way too: a requested switch
+    /// journals `origin: request` — attributed or not — and only the
+    /// declared actor a request carried.
+    #[test]
+    fn a_requested_switchs_transitions_journal_the_request_origin() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = converged_standby(&gate);
+
+        peer.promote_as(Some("operator-7".to_string())).unwrap();
+        peer.scan();
+
+        for change in peer.drain_pending().role_changes() {
+            assert_eq!(change.origin, SwitchOrigin::Request);
+            assert_eq!(change.actor.as_deref(), Some("operator-7"));
+        }
     }
 
     /// The budget-th miss on a peer whose convergence proof does not
@@ -3127,7 +7851,47 @@ mod tests {
         }
         assert_eq!(peer.role(), Role::Standby);
         assert!(!gate.is_open());
-        assert!(peer.take_role_changes().is_empty());
+        assert!(peer.drain_pending().role_changes().is_empty());
+    }
+
+    /// The durable-trace half of a fired-but-refused gate: the armed
+    /// boundary attempt the voided convergence proof turns back
+    /// queues exactly one journal-bound [`PromotionRefusal`] naming
+    /// the refusal cause and the miss count it fired at, so the
+    /// durable record reads "fired and refused" rather than staying
+    /// silent the way an unarmed peer's journal does; and the
+    /// still-closed window's further evidence-free misses queue no
+    /// more — the refusal trail stays bounded, not one row per miss.
+    #[test]
+    fn a_refused_self_promotion_queues_one_named_refusal() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate)).with_failover(2);
+
+        // Evidence-free misses reach the armed budget with no
+        // convergence proof ever standing — the voided-gate window
+        // in miniature: the budget-th miss fires the gate and the
+        // attempt comes back refused.
+        peer.track_once(|| Err("a".to_string()));
+        let report = peer.track_once(|| Err("b".to_string()));
+        assert!(matches!(report, TrackReport::PromotionRefused { .. }));
+        assert_eq!(
+            peer.drain_pending().promotion_refusals(),
+            vec![PromotionRefusal {
+                tick: peer.tick(),
+                misses: 2,
+                error: SwitchError::NotConverged {
+                    sync: StandbySync::Degraded { detail: "b".into() },
+                },
+            }]
+        );
+
+        // Past the voided boundary the window stays closed for this
+        // episode — a further evidence-free miss is a miss, not
+        // another refusal record.
+        let report = peer.track_once(|| Err("c".to_string()));
+        assert!(matches!(report, TrackReport::Missed { .. }));
+        assert!(peer.drain_pending().promotion_refusals().is_empty());
     }
 
     /// A field-owning peer runs no pull and no failover check — the
@@ -3143,6 +7907,1353 @@ mod tests {
         assert_eq!(report, TrackReport::OwnsField);
         assert_eq!(peer.missed_transfers(), 0);
         assert_eq!(peer.sync_state(), &StandbySync::Unsynchronized);
+    }
+
+    /// `Peer::checkpoint` stamps the serving run's field ownership — the
+    /// mark a tracking puller reads to name the mutual-standby wedge —
+    /// while a bare `Executor::checkpoint` carries no claim either way.
+    #[test]
+    fn served_checkpoints_carry_the_field_ownership_stamp() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut active = Peer::active(executor(&gate), Some(&gate));
+        active.activate().unwrap();
+        assert_eq!(active.checkpoint().source_owns_field, Some(true));
+
+        let standby_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let standby = Peer::standby(executor(&standby_driver), None);
+        assert_eq!(standby.checkpoint().source_owns_field, Some(false));
+
+        let bare_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        assert_eq!(executor(&bare_driver).checkpoint().source_owns_field, None);
+    }
+
+    /// A cleanly applying checkpoint whose serving run owns no field
+    /// writes reports `orphaned` — never a healthy `tracking` — queues
+    /// one `OrphanReport` for the journal, and counts the cycle's
+    /// heartbeat miss: the tracked owner did not serve.
+    #[test]
+    fn a_checkpoint_from_a_non_owning_source_orphans_the_line() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate));
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(5);
+        let mut checkpoint = source.checkpoint();
+        checkpoint.source_owns_field = Some(false);
+
+        peer.apply(&checkpoint).unwrap();
+        assert_eq!(
+            peer.sync_state(),
+            &StandbySync::Orphaned { aligned: Tick(5) }
+        );
+        assert_eq!(peer.aligned_tick(), Some(Tick(5)));
+        assert_eq!(peer.missed_transfers(), 1);
+        assert_eq!(
+            peer.drain_pending().orphans(),
+            vec![OrphanReport {
+                tick: Tick(5),
+                aligned: Tick(5),
+            }]
+        );
+
+        // Repeat pulls on the orphaned line keep reporting it without
+        // re-journaling the transition — and keep counting misses.
+        source.run(1);
+        let mut next = source.checkpoint();
+        next.source_owns_field = Some(false);
+        peer.apply(&next).unwrap();
+        assert_eq!(peer.missed_transfers(), 2);
+        assert!(peer.drain_pending().orphans().is_empty());
+    }
+
+    /// The QA finding `field-orphaned-journal-flood`: a peer pinned on
+    /// a non-advancing adopted source — the same frozen checkpoint
+    /// landing on every completed pull while the fetch worker's
+    /// in-flight cycles count produced-nothing misses between them —
+    /// journaled `field_orphaned` on every apply, an unbounded run of
+    /// identical entries. The miss is the cycle producing no
+    /// checkpoint, not evidence the tracked line gained a field owner,
+    /// so it cannot end the episode: a standing `Orphaned` verdict
+    /// rides the miss out the way a standing `Diverged` does, and the
+    /// episode's one transition journals once.
+    #[test]
+    fn a_missed_pull_does_not_end_the_orphan_episode() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate));
+
+        // The pinned source's document is frozen — an unadvanced tick —
+        // and reports no field owner, the static standby shape an
+        // adopted endpoint can serve indefinitely.
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(5);
+        let mut checkpoint = source.checkpoint();
+        checkpoint.source_owns_field = Some(false);
+        assert!(matches!(
+            peer.track_once(|| Ok(checkpoint.clone())),
+            TrackReport::Applied(_)
+        ));
+        assert_eq!(
+            peer.sync_state(),
+            &StandbySync::Orphaned { aligned: Tick(5) }
+        );
+        assert_eq!(peer.drain_pending().orphans().len(), 1);
+
+        // The pull cadence's in-flight cycles count misses between the
+        // completed pulls; neither the miss nor the re-landed identical
+        // document may re-journal the episode, and the reported verdict
+        // must not flicker to `degraded` on evidence-free cycles.
+        for _ in 0..8 {
+            assert!(matches!(
+                peer.track_once(|| Err("checkpoint pull still in flight".to_string())),
+                TrackReport::Missed { .. }
+            ));
+            assert!(matches!(peer.sync_state(), StandbySync::Orphaned { .. }));
+            peer.scan();
+            assert!(matches!(
+                peer.track_once(|| Ok(checkpoint.clone())),
+                TrackReport::Applied(_)
+            ));
+        }
+        assert!(
+            peer.drain_pending().orphans().is_empty(),
+            "the one orphan episode journals once, not once per pull"
+        );
+    }
+
+    /// `Orphaned` is promotable on the same evidence `Tracking` stands
+    /// on: the run is still current with the tracked line — the
+    /// promotion's own claim supplies the missing field owner, the
+    /// documented escape from the mutual-standby wedge.
+    #[test]
+    fn an_orphaned_standby_promotes() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate));
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(5);
+        let mut checkpoint = source.checkpoint();
+        checkpoint.source_owns_field = Some(false);
+        peer.apply(&checkpoint).unwrap();
+
+        peer.promote().unwrap();
+        assert_eq!(peer.role(), Role::Promoting);
+        assert!(gate.is_open());
+        peer.scan();
+        assert_eq!(peer.role(), Role::Active);
+    }
+
+    /// The QA finding `demoted-peer-adopts-standby-line-into-
+    /// promotable-stale-island`: an orphaned run's tracking evidence
+    /// cannot tell a dead owner — the wedge the orphan promote exists
+    /// to break — from a live incumbent the run lost track of, so the
+    /// armed conditional claim decides. `Ok(true)` grants and the
+    /// promotion proceeds; the unconditional claim never runs for it.
+    #[test]
+    fn an_orphaned_promotion_claims_conditionally() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let orphan_claimed = AtomicBool::new(false);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_field_claim(|| panic!("an orphaned promotion never claims unconditionally"))
+            .with_field_orphan_claim(|| {
+                orphan_claimed.store(true, Ordering::Relaxed);
+                Ok(true)
+            });
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(5);
+        let mut checkpoint = source.checkpoint();
+        checkpoint.source_owns_field = Some(false);
+        peer.apply(&checkpoint).unwrap();
+
+        peer.promote().unwrap();
+        assert!(orphan_claimed.load(Ordering::Relaxed));
+        assert_eq!(peer.role(), Role::Promoting);
+        assert!(gate.is_open());
+    }
+
+    /// `Ok(false)` — a live attachment holds a different owner's
+    /// unyielded claim — refuses the promotion as `FieldClaimFailed`
+    /// with the gate still closed: the islanded run's stale image
+    /// never preempts the incumbent's applied state and outputs.
+    #[test]
+    fn an_orphaned_promotion_a_live_incumbent_refuses_stays_gated() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_field_claim(|| panic!("an orphaned promotion never claims unconditionally"))
+            .with_field_orphan_claim(|| Ok(false));
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(5);
+        let mut checkpoint = source.checkpoint();
+        checkpoint.source_owns_field = Some(false);
+        peer.apply(&checkpoint).unwrap();
+
+        let Err(SwitchError::FieldClaimFailed { detail }) = peer.promote() else {
+            panic!("a live incumbent's claim must refuse the orphaned promotion")
+        };
+        assert!(detail.contains("live controller holds the field"));
+        assert_eq!(peer.role(), Role::Standby);
+        assert!(!gate.is_open());
+    }
+
+    /// `Err` — the field's arbitration itself failed — refuses the
+    /// same way, naming the backend's detail.
+    #[test]
+    fn an_orphaned_promotion_surfaces_the_claim_error() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_field_orphan_claim(|| Err("plant unreachable".to_string()));
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(5);
+        let mut checkpoint = source.checkpoint();
+        checkpoint.source_owns_field = Some(false);
+        peer.apply(&checkpoint).unwrap();
+
+        assert_eq!(
+            peer.promote(),
+            Err(SwitchError::FieldClaimFailed {
+                detail: "plant unreachable".to_string()
+            })
+        );
+        assert!(!gate.is_open());
+    }
+
+    /// A proven `Tracking` convergence is the deliberate takeover, not
+    /// the orphaned guess: the unconditional claim stands and the
+    /// orphan hook never runs.
+    #[test]
+    fn a_tracking_promotion_ignores_the_orphan_claim() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let claimed = AtomicBool::new(false);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_field_claim(|| {
+                claimed.store(true, Ordering::Relaxed);
+                Ok(())
+            })
+            .with_field_orphan_claim(|| {
+                panic!("a converged promotion never runs the orphan claim")
+            });
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(5);
+        let mut checkpoint = source.checkpoint();
+        checkpoint.source_owns_field = Some(true);
+        peer.apply(&checkpoint).unwrap();
+
+        peer.promote().unwrap();
+        assert!(claimed.load(Ordering::Relaxed));
+        assert!(gate.is_open());
+    }
+
+    /// The budget-th orphaned pull's self-promotion runs the same
+    /// conditional gate: a live incumbent's claim refuses it as the
+    /// named `PromotionRefused`, with the peer still reporting its
+    /// orphaned convergence.
+    #[test]
+    fn failover_orphaned_promotion_a_live_incumbent_refuses() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_failover(1)
+            .with_field_orphan_claim(|| Ok(false));
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(3);
+        let mut orphaned = source.checkpoint();
+        orphaned.source_owns_field = Some(false);
+        match peer.track_once(|| Ok(orphaned)) {
+            TrackReport::PromotionRefused { error, .. } => {
+                assert!(matches!(error, SwitchError::FieldClaimFailed { .. }));
+            }
+            other => panic!("a live incumbent must refuse the failover, got {other:?}"),
+        }
+        assert!(!gate.is_open());
+        assert!(matches!(peer.sync_state(), StandbySync::Orphaned { .. }));
+    }
+
+    /// The QA finding
+    /// `unkeyed-claimant-preempts-keyed-pair-and-strands-it`: a
+    /// diagnosed foreign writer is not an incumbent the conditional
+    /// orphan grant must defer to, so a `Usurped` promotion runs the
+    /// *unconditional* claim against the live standing writer and
+    /// journals the preemption naming the endpoint it took the field
+    /// from. The orphan hook the plain `Orphaned` verdict runs is
+    /// never asked.
+    #[test]
+    fn a_usurped_promotion_takes_the_field_from_the_live_foreign_writer() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let writer: SocketAddr = "127.0.0.1:9099".parse().unwrap();
+        let claimed = AtomicBool::new(false);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_field_claim(|| {
+                claimed.store(true, Ordering::Relaxed);
+                Ok(())
+            })
+            .with_field_orphan_claim(|| {
+                panic!("a diagnosed foreign writer is preempted unconditionally")
+            });
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(5);
+        let mut orphaned = source.checkpoint();
+        orphaned.source_owns_field = Some(false);
+        peer.apply(&orphaned).unwrap();
+        assert_eq!(
+            peer.sync_state(),
+            &StandbySync::Orphaned { aligned: Tick(5) }
+        );
+
+        // The monitoring surface's diagnosis: the endpoint the field's
+        // own arbitration named could not prove the line's key.
+        peer.note_foreign_writer(Some(writer));
+        assert_eq!(
+            peer.sync_state(),
+            &StandbySync::Usurped { aligned: Tick(5) },
+            "the diagnosis must narrow the ownerless verdict on the wire"
+        );
+        assert_eq!(peer.foreign_writer(), Some(writer));
+
+        peer.promote().unwrap();
+        assert!(claimed.load(Ordering::Relaxed));
+        assert!(gate.is_open());
+        assert_eq!(
+            peer.drain_pending().foreign_claims(),
+            vec![ForeignClaimPreempt {
+                tick: Tick(5),
+                writer,
+            }],
+            "the granted takeover must name the endpoint it took the \
+             field from"
+        );
+        // The claim landed, so nothing stands to have preempted this
+        // run: the diagnosis is spent, and the next orphaned apply
+        // reports the plain ownerless verdict again.
+        assert_eq!(peer.foreign_writer(), None);
+        peer.scan();
+        peer.demote().unwrap();
+        source.run(1);
+        let mut next = source.checkpoint();
+        next.source_owns_field = Some(false);
+        peer.apply(&next).unwrap();
+        assert_eq!(
+            peer.sync_state(),
+            &StandbySync::Orphaned { aligned: Tick(6) }
+        );
+    }
+
+    /// The armed half of the same recovery: the budget-th orphaned pull
+    /// self-promotes off a `Usurped` verdict on the unconditional
+    /// claim, so a keyed pair whose failover is armed is not gated out
+    /// of its own field by the process that preempted it.
+    #[test]
+    fn armed_failover_reclaims_the_field_from_a_diagnosed_foreign_writer() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let writer: SocketAddr = "127.0.0.1:9099".parse().unwrap();
+        let claimed = AtomicBool::new(false);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_failover(1)
+            .with_field_claim(|| {
+                claimed.store(true, Ordering::Relaxed);
+                Ok(())
+            })
+            // The conditional gate, still armed: it is the grant the
+            // first budget-th orphaned pull meets, and the one the
+            // diagnosed verdict must route around rather than remove.
+            .with_field_orphan_claim(|| Ok(false));
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(3);
+        let mut orphaned = source.checkpoint();
+        orphaned.source_owns_field = Some(false);
+        match peer.track_once(|| Ok(orphaned.clone())) {
+            TrackReport::PromotionRefused { error, .. } => {
+                assert!(matches!(error, SwitchError::FieldClaimFailed { .. }));
+            }
+            other => panic!("an undiagnosed live writer must refuse the gate, got {other:?}"),
+        }
+        assert!(!gate.is_open());
+        assert!(matches!(peer.sync_state(), StandbySync::Orphaned { .. }));
+
+        // The diagnosis lands; the same armed gate fires on the next
+        // budget cycle, now off the unconditional claim.
+        peer.note_foreign_writer(Some(writer));
+        source.run(1);
+        let mut next = source.checkpoint();
+        next.source_owns_field = Some(false);
+        match peer.track_once(|| Ok(next)) {
+            TrackReport::Promoted { report, .. } => assert_eq!(report.role, Role::Promoting),
+            other => panic!("the armed gate must fire off the usurped verdict, got {other:?}"),
+        }
+        assert!(claimed.load(Ordering::Relaxed));
+        assert!(gate.is_open());
+        assert_eq!(peer.drain_pending().foreign_claims().len(), 1);
+    }
+
+    /// A diagnosis that stops holding is not latched: the writer
+    /// proving the line's key, going silent, or the tracked line
+    /// regaining an owner each drop the run back to the orphan verdict
+    /// and the conditional grant that protects whatever writer the
+    /// field does name.
+    #[test]
+    fn a_cleared_diagnosis_returns_the_run_to_the_conditional_claim() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let writer: SocketAddr = "127.0.0.1:9099".parse().unwrap();
+        let mut peer = Peer::standby(executor(&gate), Some(&gate));
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(5);
+        let mut orphaned = source.checkpoint();
+        orphaned.source_owns_field = Some(false);
+        peer.apply(&orphaned).unwrap();
+        peer.note_foreign_writer(Some(writer));
+        assert!(matches!(peer.sync_state(), StandbySync::Usurped { .. }));
+
+        peer.note_foreign_writer(None);
+        assert_eq!(
+            peer.sync_state(),
+            &StandbySync::Orphaned { aligned: Tick(5) },
+            "an unanswered re-verification is no diagnosis, so the \
+             conditional claim stands again"
+        );
+        assert_eq!(peer.foreign_writer(), None);
+
+        // A verdict that is no longer ownerless drops the diagnosis
+        // outright rather than leaving it for the next orphaned apply.
+        peer.note_foreign_writer(Some(writer));
+        assert!(matches!(peer.sync_state(), StandbySync::Usurped { .. }));
+        let mut owned = source.checkpoint();
+        owned.source_owns_field = Some(true);
+        peer.apply(&owned).unwrap();
+        assert!(matches!(peer.sync_state(), StandbySync::Tracking { .. }));
+        peer.note_foreign_writer(Some(writer));
+        assert_eq!(peer.foreign_writer(), None);
+    }
+
+    /// The QA finding
+    /// `demote-during-interlock-release-leaves-field-energized-and-
+    /// wedges-pair`: a demote inside a release-propagation window can
+    /// land a peer in `Diverged` on the last `Some(true)` checkpoint
+    /// the demoting owner served — the staged image computed the
+    /// released outputs while the field kept the last energized
+    /// write — before the ownerless stream began. An orphaned apply
+    /// must re-adjudicate that standing verdict rather than wedge on
+    /// it: the mismatch it stands on is the ownerless condition
+    /// itself, no comparison on an ownerless stream can ever clear
+    /// it, and the promotion it blocks is exactly the write that
+    /// converges the field.
+    #[test]
+    fn an_orphaned_apply_supersedes_a_standing_diverged_verdict() {
+        let field = StubDriver::field(&[(INPUT, Value::Float(2.0)), (OUTPUT, Value::Float(0.0))]);
+        let biased = BiasedDriver {
+            inner: &field,
+            point: INPUT,
+            offset: 5.0,
+            armed: AtomicBool::new(true),
+        };
+        let gate = WriteGate::closed(&biased);
+        let mut standby = Peer::standby(
+            Executor::new(&gate, loop_map(), vec![Box::new(PassThrough)]).unwrap(),
+            Some(&gate),
+        );
+        let mut active = Peer::active(
+            Executor::new(&field, loop_map(), vec![Box::new(PassThrough)]).unwrap(),
+            None,
+        );
+
+        // Converge, then diverge on the same-tick compare — the staged
+        // image the skewed read produced against the field the owner
+        // last wrote.
+        active.scan();
+        standby.apply(&active.checkpoint()).unwrap();
+        standby.scan();
+        cycle(&mut active, &mut standby);
+        assert!(matches!(standby.sync_state(), StandbySync::Diverged { .. }));
+        standby.drain_pending().divergences();
+        assert!(matches!(
+            standby.promote(),
+            Err(SwitchError::NotConverged {
+                sync: StandbySync::Diverged { .. }
+            })
+        ));
+
+        // The line goes ownerless — the demoted owner keeps serving
+        // checkpoints stamped `source_owns_field: false`. The orphan
+        // adjudication replaces the diverged verdict it can never
+        // resolve, journaled as the transition it is — and the peer
+        // is promotable again: its promoted scans write the staged
+        // release the demotion abandoned.
+        active.scan();
+        let mut orphaned = active.checkpoint();
+        orphaned.source_owns_field = Some(false);
+        standby.apply(&orphaned).unwrap();
+        assert_eq!(
+            standby.sync_state(),
+            &StandbySync::Orphaned {
+                aligned: orphaned.tick,
+            }
+        );
+        assert_eq!(standby.drain_pending().orphans().len(), 1);
+        assert!(standby.drain_pending().resolutions().is_empty());
+        standby.promote().unwrap();
+        assert!(gate.is_open());
+    }
+
+    /// A field-owning source's checkpoint ends the orphan report: the
+    /// tracked line has an owner again and the peer reconverges to
+    /// `tracking`.
+    #[test]
+    fn a_field_owning_source_clears_the_orphan() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate));
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(5);
+        let mut orphaned = source.checkpoint();
+        orphaned.source_owns_field = Some(false);
+        peer.apply(&orphaned).unwrap();
+        assert!(matches!(peer.sync_state(), StandbySync::Orphaned { .. }));
+
+        source.run(1);
+        let mut owned = source.checkpoint();
+        owned.source_owns_field = Some(true);
+        peer.apply(&owned).unwrap();
+        assert_eq!(
+            peer.sync_state(),
+            &StandbySync::Tracking { aligned: Tick(6) }
+        );
+        assert_eq!(peer.missed_transfers(), 0);
+    }
+
+    /// The orphan cycle's conditional re-arm: an ex-owner whose
+    /// ownership the *field* ended — a preempted claim fencing its
+    /// write, not its own demote request — probes the claim the
+    /// demotion released, granted while the field stands unclaimed,
+    /// and the landing queues one [`ClaimRearm`] record per granted
+    /// streak so the durable trail can name who re-took the field. A
+    /// peer that never owned the field probes nothing.
+    #[test]
+    fn the_fencing_demoted_ex_owner_re_arms_its_released_claim() {
+        let driver = StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let fenced = FencingDriver {
+            inner: &driver,
+            armed: AtomicBool::new(false),
+        };
+        let gate = WriteGate::closed(&fenced);
+        // The field's single-writer claim as the driver surface sees
+        // it: `Some(owner)` while claimed, `None` once released.
+        let field = Mutex::new(None::<u64>);
+        let mut peer = Peer::active(
+            Executor::new(&gate, loop_map(), vec![Box::new(PassThrough)]).unwrap(),
+            Some(&gate),
+        )
+        .with_field_claim(|| {
+            *field.lock().unwrap() = Some(7);
+            Ok(())
+        })
+        .with_field_release(|| {
+            let mut held = field.lock().unwrap();
+            if *held == Some(7) {
+                *held = None;
+            }
+        })
+        .with_field_ensure(|| {
+            let mut held = field.lock().unwrap();
+            match *held {
+                None | Some(7) => {
+                    *held = Some(7);
+                    Ok(true)
+                }
+                Some(_) => Ok(false),
+            }
+        });
+        peer.activate().unwrap();
+        peer.scan();
+        assert_eq!(*field.lock().unwrap(), Some(7));
+
+        // A preempting claim fenced the next write: the field took the
+        // ownership, so the demotion keeps its orphan coverage. The
+        // release still leaves the claim unclaimed, and the run
+        // settles standby.
+        fenced.armed.store(true, Ordering::Relaxed);
+        peer.scan();
+        peer.scan();
+        assert_eq!(*field.lock().unwrap(), None);
+        assert_eq!(peer.role(), Role::Standby);
+        assert!(peer.drain_pending().claim_rearms().is_empty());
+
+        // The tracked line's checkpoint reports no field owner: the
+        // orphan cycle probes the ensure, which re-arms the released
+        // claim — the field is not left open to a foreign grab — and
+        // the landing journals once, naming the run's token through
+        // the point the fencing loss marked.
+        let source_driver =
+            StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let mut source =
+            Executor::new(&source_driver, loop_map(), vec![Box::new(PassThrough)]).unwrap();
+        source.run(9);
+        let mut checkpoint = source.checkpoint();
+        checkpoint.source_owns_field = Some(false);
+        let report = peer.track_once(|| Ok(checkpoint.clone()));
+        assert_eq!(report, TrackReport::Applied(Transfer::Applied));
+        assert!(matches!(peer.sync_state(), StandbySync::Orphaned { .. }));
+        assert_eq!(*field.lock().unwrap(), Some(7));
+        assert_eq!(
+            peer.drain_pending().claim_rearms(),
+            vec![ClaimRearm {
+                tick: Tick(9),
+                point: OUTPUT,
+            }]
+        );
+        // Re-arming the claim changes no reported state by itself: the
+        // peer stays standby/orphaned — surfaced, never silently
+        // healthy — until a promotion or a field-owning source ends it.
+        assert_eq!(peer.role(), Role::Standby);
+
+        // Repeat probes confirming the same standing claim are one
+        // landing: the granted streak deduplicates the record.
+        peer.track_once(|| Ok(checkpoint.clone()));
+        peer.track_once(|| Ok(checkpoint.clone()));
+        assert!(peer.drain_pending().claim_rearms().is_empty());
+
+        // A different owner between landings resets the streak: the
+        // next grant is a new landing and journals again.
+        *field.lock().unwrap() = Some(99);
+        peer.track_once(|| Ok(checkpoint.clone()));
+        assert!(peer.drain_pending().claim_rearms().is_empty());
+        *field.lock().unwrap() = None;
+        peer.track_once(|| Ok(checkpoint));
+        assert_eq!(*field.lock().unwrap(), Some(7));
+        assert_eq!(peer.drain_pending().claim_rearms().len(), 1);
+    }
+
+    /// The demotion the orphan cycle's re-arm must not undo — the QA
+    /// finding's defect leg: a peer whose own *requested* demotion
+    /// released the claim hands the field to the successor's
+    /// conditional paths. Its own ensure probe never runs — the claim
+    /// it gave up stands released however many orphaned pulls arrive,
+    /// no `ClaimRearm` journals, and the member reporting `standby`
+    /// holds no field arbitration.
+    ///
+    /// The hand-back mark is per-ownership, not per-run: a re-promoted
+    /// peer's later *fencing* demotion re-arms its released claim
+    /// exactly as any other field-forced release does.
+    #[test]
+    fn a_voluntarily_demoted_owner_leaves_the_released_claim_alone() {
+        let driver = StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let fenced = FencingDriver {
+            inner: &driver,
+            armed: AtomicBool::new(false),
+        };
+        let gate = WriteGate::closed(&fenced);
+        let field = Mutex::new(None::<u64>);
+        let probed = AtomicBool::new(false);
+        let mut peer = Peer::active(
+            Executor::new(&gate, loop_map(), vec![Box::new(PassThrough)]).unwrap(),
+            Some(&gate),
+        )
+        .with_field_claim(|| {
+            *field.lock().unwrap() = Some(7);
+            Ok(())
+        })
+        .with_field_release(|| {
+            let mut held = field.lock().unwrap();
+            if *held == Some(7) {
+                *held = None;
+            }
+        })
+        .with_field_ensure(|| {
+            probed.store(true, Ordering::Relaxed);
+            let mut held = field.lock().unwrap();
+            match *held {
+                None | Some(7) => {
+                    *held = Some(7);
+                    Ok(true)
+                }
+                Some(_) => Ok(false),
+            }
+        });
+        peer.activate().unwrap();
+        peer.scan();
+        assert_eq!(*field.lock().unwrap(), Some(7));
+
+        // The routine maintenance action: the requested demotion's
+        // release leaves the field unclaimed.
+        peer.demote().unwrap();
+        peer.scan();
+        assert_eq!(*field.lock().unwrap(), None);
+        assert_eq!(peer.role(), Role::Standby);
+
+        // Orphaned pulls arrive: the probe the field would grant never
+        // runs — the run's own release stays released rather than
+        // re-arming under the standby's token within a scan.
+        let source_driver =
+            StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let mut source =
+            Executor::new(&source_driver, loop_map(), vec![Box::new(PassThrough)]).unwrap();
+        source.run(9);
+        let mut checkpoint = source.checkpoint();
+        checkpoint.source_owns_field = Some(false);
+        peer.track_once(|| Ok(checkpoint.clone()));
+        peer.track_once(|| Ok(checkpoint));
+        assert!(matches!(peer.sync_state(), StandbySync::Orphaned { .. }));
+        assert_eq!(
+            *field.lock().unwrap(),
+            None,
+            "a voluntary demotion's release must not re-arm under the standby's token"
+        );
+        assert!(
+            !probed.load(Ordering::Relaxed),
+            "the yielded mark must skip the orphan-cycle ensure"
+        );
+        assert!(peer.drain_pending().claim_rearms().is_empty());
+        assert_eq!(peer.role(), Role::Standby);
+
+        // The mark is no lifetime ban: the re-promoted run's fresh
+        // ownership clears it — a *fenced* demotion of that new
+        // ownership probes and re-arms the released claim as before.
+        peer.promote().unwrap();
+        peer.scan();
+        assert_eq!(peer.role(), Role::Active);
+        assert_eq!(*field.lock().unwrap(), Some(7));
+        peer.demote_inner(SwitchAttribution {
+            origin: SwitchOrigin::Fenced,
+            actor: None,
+        })
+        .unwrap();
+        peer.scan();
+        assert_eq!(peer.role(), Role::Standby);
+        assert_eq!(*field.lock().unwrap(), None);
+        let mut orphaned = source.checkpoint();
+        orphaned.source_owns_field = Some(false);
+        peer.track_once(|| Ok(orphaned));
+        assert!(probed.load(Ordering::Relaxed));
+        assert_eq!(*field.lock().unwrap(), Some(7));
+        assert_eq!(peer.drain_pending().claim_rearms().len(), 1);
+    }
+
+    /// The stand-down is not the arm's end: a fencing-demoted ex-owner
+    /// that reconverged on the preemptor's owning checkpoints — its
+    /// loss mark stood down while a live owner stood — probes nothing
+    /// while that tracking lasts, and re-arms the bound reclaim on the
+    /// orphaned pull's evidence once the successor's claim stands
+    /// released. The grant re-binds the run's token and walks
+    /// `promoting` → `active`: the voluntary demotion's hand-back
+    /// reaching the ex-owner the release handed the field to. A
+    /// voluntarily demoted peer's `yielded` mark would keep the probe
+    /// off through the same orphaned pulls.
+    #[test]
+    fn an_orphaned_pull_re_arms_the_reconverged_ex_owners_reclaim() {
+        const OWNER: u64 = 7;
+        const FOREIGN: u64 = 99;
+        let driver = StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let fenced = FencingDriver {
+            inner: &driver,
+            armed: AtomicBool::new(false),
+        };
+        let gate = WriteGate::closed(&fenced);
+        let claim = ScriptedClaim::unclaimed();
+        let mut peer = Peer::active(
+            Executor::new(&gate, loop_map(), vec![Box::new(PassThrough)]).unwrap(),
+            Some(&gate),
+        )
+        .with_field_claim(|| {
+            claim.claim(OWNER);
+            Ok(())
+        })
+        .with_field_probe(|| Ok(claim.probe()))
+        .with_field_ensure(|| Ok(claim.ensure(OWNER)))
+        .with_field_reclaim(|| Ok(claim.ensure(OWNER)));
+        peer.activate().unwrap();
+        assert_eq!(peer.scan(), Tick(1));
+        assert_eq!(claim.holder(), Some(OWNER));
+
+        // The preemption: the foreign attachment takes the claim and
+        // the fenced write demotes this run — the loss mark stands.
+        claim.claim(FOREIGN);
+        fenced.armed.store(true, Ordering::Relaxed);
+        assert_eq!(peer.scan(), Tick(2));
+        assert_eq!(peer.scan(), Tick(3));
+        assert_eq!(peer.role(), Role::Standby);
+
+        let source_driver =
+            StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let mut source =
+            Executor::new(&source_driver, loop_map(), vec![Box::new(PassThrough)]).unwrap();
+        source.run(9);
+
+        // Tracking the preemptor's owning checkpoints resolves the
+        // succession — the loss mark stands down — and while that
+        // owner stands, neither probe runs: the released-preemption
+        // coverage must not linger to preempt a live incumbent.
+        let mut owned = source.checkpoint();
+        owned.source_owns_field = Some(true);
+        peer.track_once(|| Ok(owned));
+        for _ in 0..2 {
+            peer.scan();
+        }
+        assert_eq!(claim.holder(), Some(FOREIGN));
+        assert_eq!(peer.role(), Role::Standby);
+
+        // Even the foreign claim's release while the tracked line
+        // still reports an owner arms nothing — the arm is the
+        // orphaned pull's ownerless evidence, not the standby's
+        // residency.
+        claim.release();
+        peer.scan();
+        assert_eq!(claim.holder(), None);
+        assert_eq!(peer.role(), Role::Standby);
+
+        // The tracked line reports the field ownerless: the orphan
+        // cycle's ensure re-arms the released claim (journaling its
+        // landing), and the scan's bound reclaim — armed on the same
+        // evidence for an ownership this run did not hand back —
+        // binds the run's token to the claim and walks the peer back
+        // to `active`.
+        source.run(4);
+        let mut orphaned = source.checkpoint();
+        orphaned.source_owns_field = Some(false);
+        peer.track_once(|| Ok(orphaned));
+        assert!(matches!(peer.sync_state(), StandbySync::Orphaned { .. }));
+        assert_eq!(claim.holder(), Some(OWNER));
+        assert_eq!(peer.drain_pending().claim_rearms().len(), 1);
+        fenced.armed.store(false, Ordering::Relaxed);
+        assert_eq!(peer.scan(), Tick(14));
+        assert_eq!(peer.role(), Role::Promoting);
+        assert_eq!(peer.scan(), Tick(15));
+        assert_eq!(peer.role(), Role::Active);
+    }
+
+    /// A standby that never held the field has no claim to re-arm — the
+    /// orphan cycle leaves the field alone and the hook never runs.
+    #[test]
+    fn a_peer_that_never_owned_probes_no_claim() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let probed = AtomicBool::new(false);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate)).with_field_ensure(|| {
+            probed.store(true, Ordering::Relaxed);
+            Ok(true)
+        });
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(5);
+        let mut checkpoint = source.checkpoint();
+        checkpoint.source_owns_field = Some(false);
+        peer.track_once(|| Ok(checkpoint));
+
+        assert!(matches!(peer.sync_state(), StandbySync::Orphaned { .. }));
+        assert!(!probed.load(Ordering::Relaxed));
+    }
+
+    /// The ensure probe is conditional: while a *different* owner
+    /// stands on the field the re-arm is refused and nothing is
+    /// preempted — the wedge stays surfaced rather than silently
+    /// worsened.
+    #[test]
+    fn the_orphan_probe_never_preempts_a_standing_foreign_owner() {
+        let driver = StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let fenced = FencingDriver {
+            inner: &driver,
+            armed: AtomicBool::new(false),
+        };
+        let gate = WriteGate::closed(&fenced);
+        let field = Mutex::new(None::<u64>);
+        let mut peer = Peer::active(
+            Executor::new(&gate, loop_map(), vec![Box::new(PassThrough)]).unwrap(),
+            Some(&gate),
+        )
+        .with_field_claim(|| {
+            *field.lock().unwrap() = Some(7);
+            Ok(())
+        })
+        .with_field_release(|| {
+            let mut held = field.lock().unwrap();
+            if *held == Some(7) {
+                *held = None;
+            }
+        })
+        .with_field_ensure(|| {
+            let mut held = field.lock().unwrap();
+            match *held {
+                None | Some(7) => {
+                    *held = Some(7);
+                    Ok(true)
+                }
+                Some(_) => Ok(false),
+            }
+        });
+        peer.activate().unwrap();
+        peer.scan();
+        fenced.armed.store(true, Ordering::Relaxed);
+        peer.scan();
+        peer.scan();
+        assert_eq!(peer.role(), Role::Standby);
+
+        // A foreign owner claims the field between the demotion's
+        // release and the orphan probe.
+        *field.lock().unwrap() = Some(99);
+
+        let source_driver =
+            StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let mut source =
+            Executor::new(&source_driver, loop_map(), vec![Box::new(PassThrough)]).unwrap();
+        source.run(9);
+        let mut checkpoint = source.checkpoint();
+        checkpoint.source_owns_field = Some(false);
+        peer.track_once(|| Ok(checkpoint));
+
+        assert!(matches!(peer.sync_state(), StandbySync::Orphaned { .. }));
+        assert_eq!(*field.lock().unwrap(), Some(99));
+        assert_eq!(peer.role(), Role::Standby);
+        assert!(peer.drain_pending().claim_rearms().is_empty());
+    }
+
+    /// The audit half of the orphan probe's refusal: a foreign
+    /// `claim_writer` that took the released field is an episode the
+    /// demoted run never fenced a write against — no
+    /// `field_claim_lost` can fire for it — so the refused re-arm's
+    /// verdict is the only evidence. The observation journals one
+    /// attributed record naming the standing owner token, once however
+    /// many orphaned pulls refuse against the same claim, and a claim
+    /// that changes hands mid-episode journals each distinct claimant.
+    #[test]
+    fn a_refused_orphan_probe_journals_the_observed_claimant_once() {
+        let driver = StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let fenced = FencingDriver {
+            inner: &driver,
+            armed: AtomicBool::new(false),
+        };
+        let gate = WriteGate::closed(&fenced);
+        // The field's single-writer claim as the driver surface sees
+        // it: `Some(owner)` while claimed, `None` once released.
+        let field = Mutex::new(None::<u64>);
+        let mut peer = Peer::active(
+            Executor::new(&gate, loop_map(), vec![Box::new(PassThrough)]).unwrap(),
+            Some(&gate),
+        )
+        .with_field_claim(|| {
+            *field.lock().unwrap() = Some(7);
+            Ok(())
+        })
+        .with_field_release(|| {
+            let mut held = field.lock().unwrap();
+            if *held == Some(7) {
+                *held = None;
+            }
+        })
+        .with_field_ensure(|| {
+            let mut held = field.lock().unwrap();
+            match *held {
+                None | Some(7) => {
+                    *held = Some(7);
+                    Ok(true)
+                }
+                Some(_) => Ok(false),
+            }
+        })
+        .with_claim_observer(|| (*field.lock().unwrap()).into_iter().collect());
+        peer.activate().unwrap();
+        peer.scan();
+        fenced.armed.store(true, Ordering::Relaxed);
+        peer.scan();
+        peer.scan();
+        assert_eq!(peer.role(), Role::Standby);
+        assert!(peer.drain_pending().claim_observations().is_empty());
+
+        // A foreign claim_writer takes the field the demotion
+        // released — landing between the run's own writes, so no
+        // fencing verdict ever attributes it.
+        *field.lock().unwrap() = Some(99);
+
+        let source_driver =
+            StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let mut source =
+            Executor::new(&source_driver, loop_map(), vec![Box::new(PassThrough)]).unwrap();
+        source.run(9);
+        let mut checkpoint = source.checkpoint();
+        checkpoint.source_owns_field = Some(false);
+
+        // The refused re-arm names the standing owner — one attributed
+        // record, the episode no longer silent in the audit. The tick
+        // is the run's own — tracking adopted the stream's tick 9.
+        peer.track_once(|| Ok(checkpoint.clone()));
+        assert_eq!(
+            peer.drain_pending().claim_observations(),
+            vec![ClaimObservation {
+                tick: Tick(9),
+                point: OUTPUT,
+                claimant: 99,
+            }]
+        );
+
+        // The standing foreign claim journals once: however many
+        // orphaned pulls refuse against it, nothing further queues.
+        peer.track_once(|| Ok(checkpoint.clone()));
+        peer.track_once(|| Ok(checkpoint.clone()));
+        assert!(peer.drain_pending().claim_observations().is_empty());
+
+        // The claim changing hands is a new episode: the next refusal
+        // names a token the run has not journaled and records it too.
+        *field.lock().unwrap() = Some(55);
+        peer.track_once(|| Ok(checkpoint));
+        assert_eq!(
+            peer.drain_pending().claim_observations(),
+            vec![ClaimObservation {
+                tick: Tick(9),
+                point: OUTPUT,
+                claimant: 55,
+            }]
+        );
+    }
+
+    /// Each orphan pull counts the heartbeat miss the missing field
+    /// owner is: a failover-armed peer self-promotes on the budget-th
+    /// orphaned checkpoint, taking the claim and the gate at that scan
+    /// boundary — the tracked line's serving run owns nothing, which
+    /// is precisely the dead-owner condition failover exists for.
+    #[test]
+    fn failover_promotes_on_the_budget_orphaned_pull() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let claimed = AtomicBool::new(false);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_failover(2)
+            .with_field_claim(|| {
+                claimed.store(true, Ordering::Relaxed);
+                Ok(())
+            });
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(3);
+        let mut first = source.checkpoint();
+        first.source_owns_field = Some(false);
+        assert_eq!(
+            peer.track_once(|| Ok(first)),
+            TrackReport::Applied(Transfer::Applied)
+        );
+        assert_eq!(peer.missed_transfers(), 1);
+        assert!(!peer.failover_due());
+        assert_eq!(peer.role(), Role::Standby);
+
+        source.run(1);
+        let mut second = source.checkpoint();
+        second.source_owns_field = Some(false);
+        match peer.track_once(|| Ok(second)) {
+            TrackReport::Promoted { detail, report } => {
+                assert_eq!(
+                    detail,
+                    "the tracked line's serving run owns no field writes"
+                );
+                assert_eq!(report.role, Role::Promoting);
+            }
+            other => panic!("the budget-th orphan promotes, got {other:?}"),
+        }
+        assert!(claimed.load(Ordering::Relaxed));
+        assert!(gate.is_open());
+        assert_eq!(
+            peer.drain_pending().role_changes(),
+            vec![RoleChange {
+                tick: Tick(4),
+                from: Role::Standby,
+                to: Role::Promoting,
+                origin: SwitchOrigin::Failover,
+                actor: None,
+            }]
+        );
+    }
+
+    /// The QA finding `failover-refused-once-window-closed-forever`:
+    /// an armed peer orphaned on an ownerless line whose budget-th
+    /// self-promotion a live incumbent's standing claim correctly
+    /// refuses must keep the gate armed for the rest of the episode —
+    /// every landed orphaned apply re-proves convergence, so the
+    /// misses climbing past the budget keep `failover_due` live and
+    /// each due cycle retries the claim — and when the incumbent dies
+    /// and its claim stands dead-owned, a later due cycle's retry
+    /// preempts it and promotes. On the reported build the budget-th
+    /// miss was the only boundary: the next apply's `misses > budget`
+    /// voided the proof outright, the peer stranded `standby` beside
+    /// the dead-owned field until an operator's promote.
+    #[test]
+    fn a_refused_armed_failover_retries_until_the_claim_frees() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        // The incumbent's claim on the shared field: `true` while a
+        // live controller holds it — the conditional grant's refusal
+        // — `false` once it dies, the claim standing dead-owned.
+        let incumbent_alive = AtomicBool::new(true);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_failover(2)
+            .with_field_orphan_claim(|| Ok(!incumbent_alive.load(Ordering::Relaxed)));
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        let orphaned_pull = |source: &mut Executor<'_>| {
+            source.run(1);
+            let mut checkpoint = source.checkpoint();
+            checkpoint.source_owns_field = Some(false);
+            checkpoint
+        };
+
+        // The first orphaned apply: the counted miss under budget.
+        let checkpoint = orphaned_pull(&mut source);
+        assert_eq!(
+            peer.track_once(|| Ok(checkpoint)),
+            TrackReport::Applied(Transfer::Applied)
+        );
+        assert_eq!(peer.missed_transfers(), 1);
+        assert!(!peer.failover_due());
+
+        // The budget-th miss fires the conditional claim — the live
+        // incumbent's refusal is the correct verdict at fire time and
+        // journals the attempt.
+        let checkpoint = orphaned_pull(&mut source);
+        match peer.track_once(|| Ok(checkpoint)) {
+            TrackReport::PromotionRefused { error, .. } => {
+                assert!(matches!(error, SwitchError::FieldClaimFailed { .. }));
+            }
+            other => panic!("a live incumbent must refuse the failover, got {other:?}"),
+        }
+        let refused = peer.drain_pending();
+        let refusals = refused.promotion_refusals();
+        assert_eq!(refusals.len(), 1, "the refused attempt must journal");
+        assert_eq!(refusals[0].misses, 2);
+        assert!(matches!(
+            refusals[0].error,
+            SwitchError::FieldClaimFailed { .. }
+        ));
+        assert_eq!(peer.role(), Role::Standby);
+        assert!(!gate.is_open());
+
+        // The strand the repro hit: orphaned applies keep landing, the
+        // misses climb past the budget — but every apply re-proves the
+        // run, so the gate stays armed and each due cycle retries the
+        // still-held claim rather than voiding for the episode.
+        for expected_misses in 3..=5_u32 {
+            let checkpoint = orphaned_pull(&mut source);
+            match peer.track_once(|| Ok(checkpoint)) {
+                TrackReport::PromotionRefused { error, .. } => {
+                    assert!(matches!(error, SwitchError::FieldClaimFailed { .. }));
+                }
+                other => panic!("the armed gate must keep retrying, got {other:?}"),
+            }
+            assert_eq!(peer.missed_transfers(), expected_misses);
+            assert!(
+                peer.failover_due(),
+                "the gate must stay armed while applies re-prove it"
+            );
+        }
+        assert!(
+            peer.drain_pending().promotion_refusals().is_empty(),
+            "a standing refusal cause journals once, not once per retried cycle"
+        );
+        assert_eq!(
+            peer.report().failover,
+            Some(FailoverEvidence {
+                converged: true,
+                misses: 5,
+                budget: 2,
+            }),
+            "the served proof stays live past the budget the repro voided at"
+        );
+
+        // The incumbent dies — the claim stands dead-owned, which the
+        // conditional grant preempts: the next due cycle's retry is
+        // the automatic recovery the stranded pair needed an operator
+        // for.
+        incumbent_alive.store(false, Ordering::Relaxed);
+        let checkpoint = orphaned_pull(&mut source);
+        match peer.track_once(|| Ok(checkpoint)) {
+            TrackReport::Promoted { report, .. } => {
+                assert_eq!(report.role, Role::Promoting);
+            }
+            other => panic!("the freed claim must promote the peer, got {other:?}"),
+        }
+        assert!(gate.is_open());
+        peer.scan();
+        assert_eq!(peer.role(), Role::Active);
+        for change in peer.drain_pending().role_changes() {
+            assert_eq!(change.origin, SwitchOrigin::Failover);
+            assert_eq!(change.actor, None);
+        }
+    }
+
+    /// The dedup contract: a continuous refused streak queues one
+    /// [`PromotionRefusal`] per *distinct* cause — a retried scan
+    /// naming the same refusal queues nothing — and an outcome that
+    /// is not a refused self-promotion ends the streak, so the same
+    /// cause in a later episode journals fresh.
+    #[test]
+    fn a_refused_streak_journals_each_distinct_cause_once() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        // The claim's scripted answers across the episode: the live
+        // incumbent's refusal, then a transient ask — a distinct cause
+        // the streak journals separately — then, after a field-owning
+        // checkpoint ends the streak, the same incumbent refusal
+        // journaling as the new episode it is, and the grant.
+        let script: Mutex<Vec<Result<bool, String>>> = Mutex::new(vec![
+            Ok(false),
+            Err("plant unreachable".to_string()),
+            Ok(false),
+            Ok(true),
+        ]);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_failover(2)
+            .with_field_orphan_claim(|| {
+                let mut script = script.lock().unwrap();
+                if script.is_empty() {
+                    Ok(true)
+                } else {
+                    script.remove(0)
+                }
+            });
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        let pull = |source: &mut Executor<'_>, owns: bool| {
+            source.run(1);
+            let mut checkpoint = source.checkpoint();
+            checkpoint.source_owns_field = Some(owns);
+            checkpoint
+        };
+
+        // Miss one under budget, then the two distinct refusals.
+        let checkpoint = pull(&mut source, false);
+        peer.track_once(|| Ok(checkpoint));
+        let checkpoint = pull(&mut source, false);
+        assert!(matches!(
+            peer.track_once(|| Ok(checkpoint)),
+            TrackReport::PromotionRefused { .. }
+        ));
+        let checkpoint = pull(&mut source, false);
+        assert!(matches!(
+            peer.track_once(|| Ok(checkpoint)),
+            TrackReport::PromotionRefused { .. }
+        ));
+        let refused = peer.drain_pending();
+        let refusals = refused.promotion_refusals();
+        assert_eq!(refusals.len(), 2);
+        assert_eq!(refusals[0].misses, 2);
+        assert_eq!(refusals[1].misses, 3);
+        assert!(
+            refusals[0].error != refusals[1].error,
+            "each distinct refusal cause journals its own entry"
+        );
+
+        // A landed owner-serving checkpoint is a non-refusal outcome:
+        // the streak ends and the miss count resets.
+        let checkpoint = pull(&mut source, true);
+        assert_eq!(
+            peer.track_once(|| Ok(checkpoint)),
+            TrackReport::Applied(Transfer::Applied)
+        );
+        assert_eq!(peer.missed_transfers(), 0);
+
+        // The line going ownerless again re-arms the climb: the same
+        // incumbent refusal journals fresh — a new episode, not a
+        // dedup repeat — and the grant promotes.
+        let checkpoint = pull(&mut source, false);
+        peer.track_once(|| Ok(checkpoint));
+        let checkpoint = pull(&mut source, false);
+        assert!(matches!(
+            peer.track_once(|| Ok(checkpoint)),
+            TrackReport::PromotionRefused { .. }
+        ));
+        let refused = peer.drain_pending();
+        let refusals = refused.promotion_refusals();
+        assert_eq!(refusals.len(), 1, "the new episode journals fresh");
+        assert_eq!(refusals[0].misses, 2);
+
+        let checkpoint = pull(&mut source, false);
+        assert!(matches!(
+            peer.track_once(|| Ok(checkpoint)),
+            TrackReport::Promoted { .. }
+        ));
+        assert!(gate.is_open());
+    }
+
+    /// The staleness bound the armed retry keeps: a run of
+    /// evidence-free misses — pulls that produced no checkpoint at
+    /// all — past the budget still voids the convergence proof and
+    /// closes the gate. The void is only as permanent as the silence
+    /// producing it: the next landed apply — an `Orphaned` one on an
+    /// ownerless line included — re-proves the run and re-arms it.
+    #[test]
+    fn an_evidence_free_run_past_budget_closes_the_gate_until_an_apply_reproves() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_failover(2)
+            .with_field_orphan_claim(|| Ok(true));
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(3);
+        peer.apply(&source.checkpoint()).unwrap();
+
+        // Three produced-nothing pulls — the third carries the miss
+        // run past the budget and voids the proof: the window closes
+        // on staleness, the gate reporting rather than promoting.
+        peer.note_transfer_failed("a");
+        peer.note_transfer_failed("b");
+        peer.note_transfer_failed("c");
+        assert!(!peer.failover_due());
+        assert_eq!(
+            peer.report().failover,
+            Some(FailoverEvidence {
+                converged: false,
+                misses: 3,
+                budget: 2,
+            })
+        );
+        assert!(matches!(
+            peer.self_promote(),
+            Err(SwitchError::NotConverged {
+                sync: StandbySync::Degraded { .. }
+            })
+        ));
+
+        // The source returns ownerless: the landed orphaned apply is
+        // fresh evidence — the proof re-stands — and the armed gate
+        // fires at the same due cycle rather than staying stranded.
+        source.run(1);
+        let mut orphaned = source.checkpoint();
+        orphaned.source_owns_field = Some(false);
+        match peer.track_once(|| Ok(orphaned)) {
+            TrackReport::Promoted { report, .. } => {
+                assert_eq!(report.role, Role::Promoting);
+            }
+            other => panic!("the re-proved gate must fire, got {other:?}"),
+        }
+        assert!(gate.is_open());
     }
 
     /// The declared-command emitter the command/event redundancy tests
@@ -3588,7 +9699,7 @@ mod tests {
             &StandbySync::Tracking { aligned: Tick(1) }
         );
         assert_eq!(
-            peer.take_source_restarts(),
+            peer.drain_pending().source_restarts(),
             vec![SourceRestart {
                 tick: Tick(9),
                 was_aligned: Some(Tick(7)),
@@ -3607,7 +9718,7 @@ mod tests {
         assert_eq!(peer.aligned_tick(), Some(Tick(2)));
         peer.scan();
         assert_eq!(peer.tick(), Tick(10));
-        assert!(peer.take_source_restarts().is_empty());
+        assert!(peer.drain_pending().source_restarts().is_empty());
 
         // A second cold start regresses the stream again: another
         // named report, and the apply lands at the run's tick again.
@@ -3617,7 +9728,7 @@ mod tests {
         peer.apply(&again.checkpoint()).unwrap();
         assert_eq!(peer.tick(), Tick(10));
         assert_eq!(
-            peer.take_source_restarts(),
+            peer.drain_pending().source_restarts(),
             vec![SourceRestart {
                 tick: Tick(10),
                 was_aligned: Some(Tick(2)),
@@ -3636,7 +9747,7 @@ mod tests {
         again.run(1);
         peer.apply(&again.checkpoint()).unwrap();
         assert_eq!(peer.tick(), Tick(13));
-        assert!(peer.take_source_restarts().is_empty());
+        assert!(peer.drain_pending().source_restarts().is_empty());
     }
 
     /// The demoted-peer half of the finding — the driven-failover
@@ -3668,7 +9779,7 @@ mod tests {
         assert_eq!(peer.tick(), Tick(6));
         assert_eq!(peer.aligned_tick(), Some(Tick(1)));
         assert_eq!(
-            peer.take_source_restarts(),
+            peer.drain_pending().source_restarts(),
             vec![SourceRestart {
                 tick: Tick(6),
                 was_aligned: None,
@@ -3712,7 +9823,7 @@ mod tests {
         peer.apply(&source.checkpoint()).unwrap();
         assert_eq!(peer.tick(), Tick(3));
         assert_eq!(peer.aligned_tick(), Some(Tick(2)));
-        assert!(peer.take_source_restarts().is_empty());
+        assert!(peer.drain_pending().source_restarts().is_empty());
     }
 
     /// The generation check's other half on the same shape: the
@@ -3741,7 +9852,7 @@ mod tests {
         assert_eq!(peer.tick(), Tick(3));
         assert_eq!(peer.aligned_tick(), Some(Tick(1)));
         assert_eq!(
-            peer.take_source_restarts(),
+            peer.drain_pending().source_restarts(),
             vec![SourceRestart {
                 tick: Tick(3),
                 was_aligned: None,
@@ -3750,13 +9861,20 @@ mod tests {
         );
     }
 
-    /// The contrast case the offset must not break: a post-miss
+    /// The QA finding
+    /// `history-ring-tick-regression-on-checkpoint-realign`: a post-miss
     /// catch-up checkpoint lags the run's tick but continues the same
-    /// generation — the apply still realigns the run to the stream's
-    /// own tick, the rewind the freshness budgets are measured
-    /// against.
+    /// generation — and still must not move the run's clock back. The
+    /// stale alignment hides the lag from the regression comparison,
+    /// but the run's tick is the journal and history attribution
+    /// domain: rewinding it re-issues ticks the retained rings already
+    /// recorded, double-covering the range. The apply adopts the
+    /// lagging stream's state at the run's own tick instead — the same
+    /// hold-the-clock landing a regression gets — and the live-lead
+    /// offset lands each later checkpoint at the run's tick until the
+    /// stream recovers to it.
     #[test]
-    fn a_same_generation_catch_up_still_realigns_the_run_tick() {
+    fn a_same_generation_catch_up_holds_the_run_tick() {
         let driver = StubDriver::new(PointId(1), Value::Float(0.0));
         let gate = WriteGate::closed(&driver);
         let mut peer = Peer::standby(executor(&gate), Some(&gate));
@@ -3775,20 +9893,37 @@ mod tests {
         assert_eq!(peer.tick(), Tick(6));
 
         // The source's resumed stream — warm-restarted or merely
-        // lagging — still realigns the run at its own tick: same
-        // generation, not a restart, so the apply does move the clock
-        // back to the stream's line.
+        // lagging — lags the run's clock while continuing the line:
+        // same generation, not a restart, so nothing journals, but the
+        // run's tick stands — the apply lands at 6 rather than
+        // rewinding the recorded 5..6 stretch to the stream's 5.
         source.run(1);
         peer.apply(&source.checkpoint()).unwrap();
-        assert_eq!(peer.tick(), Tick(5));
+        assert_eq!(peer.tick(), Tick(6));
         assert_eq!(peer.aligned_tick(), Some(Tick(5)));
-        assert!(peer.take_source_restarts().is_empty());
+        assert!(peer.drain_pending().source_restarts().is_empty());
+
+        // Each later checkpoint lands under the live lead — the apply
+        // keeps holding the run's clock while the stream lags — and
+        // once the stream recovers to the run's tick the run rejoins
+        // the stream's domain outright.
+        source.run(1);
+        peer.scan();
+        peer.apply(&source.checkpoint()).unwrap();
+        assert_eq!(peer.tick(), Tick(7));
+        assert_eq!(peer.aligned_tick(), Some(Tick(6)));
+        source.run(2);
+        peer.apply(&source.checkpoint()).unwrap();
+        assert_eq!(peer.tick(), Tick(8));
+        assert_eq!(peer.aligned_tick(), Some(Tick(8)));
+        assert!(peer.drain_pending().source_restarts().is_empty());
     }
 
     /// QA finding `mutual-tracking-regressed-offset-ratchets-run-tick`:
     /// under mutual tracking — two standby peers applying each other's
     /// checkpoints, the transient every demote creates — a regressed
-    /// apply that seeds a nonzero `tick_offset` must never feed back:
+    /// apply that seeds a nonzero lead over the stream must never feed
+    /// back:
     /// each apply lands the run at the tracked tick or holds it at its
     /// own, never ahead of both, so alternating applies keep both run
     /// ticks bounded by the scan count instead of compounding each
@@ -3821,12 +9956,12 @@ mod tests {
         let mut cold_a = executor(&cold_driver_a);
         cold_a.run(1);
         a.apply(&cold_a.checkpoint()).unwrap();
-        assert_eq!(a.take_source_restarts().len(), 1);
+        assert_eq!(a.drain_pending().source_restarts().len(), 1);
         let cold_driver_b = StubDriver::new(PointId(1), Value::Float(0.0));
         let mut cold_b = executor(&cold_driver_b);
         cold_b.run(1);
         b.apply(&cold_b.checkpoint()).unwrap();
-        assert_eq!(b.take_source_restarts().len(), 1);
+        assert_eq!(b.drain_pending().source_restarts().len(), 1);
 
         // The mutual cycle resumes. Without the offset's re-evaluation
         // each apply lands at the peer's served tick plus the standing
@@ -3942,25 +10077,20 @@ mod tests {
         // suspends it. The demoted peer's first tracking apply then
         // adopts a receipt log whose high-water passed the entry's
         // index carrying a different command: orphaned, it settles
-        // superseded — re-minted past the adopted window's high-water
-        // rather than silently overwritten, so the served audit keeps
-        // it — and queues for the journal rather than vanishing
-        // unaudited.
+        // superseded and queues for the journal rather than vanishing
+        // unaudited. Neither run mints a submission identity here — an
+        // unminted pair cannot name a collision — so the merge keeps
+        // the line's window verbatim and the settlement journals under
+        // the orphan's own index; the identified case is the collision
+        // tests below.
         peer.submit_command(Clocked::bump(7));
         peer.demote().unwrap();
         peer.apply(&source.checkpoint()).unwrap();
-        assert_eq!(peer.receipts()[..1], source.receipts()[..]);
-        assert_eq!(peer.receipts().len(), 2);
-        assert_eq!(peer.receipts()[1].command, Clocked::bump(7));
-        assert_eq!(
-            peer.receipts()[1].outcome,
-            CommandOutcome::Rejected {
-                reason: CommandError::Superseded { point: None }
-            }
-        );
-        let superseded = peer.take_superseded_commands();
+        assert_eq!(peer.receipts(), source.receipts());
+        let drained = peer.drain_pending();
+        let superseded = drained.superseded_commands();
         assert_eq!(superseded.len(), 1, "{superseded:?}");
-        assert_eq!(superseded[0].0, 1);
+        assert_eq!(superseded[0].0, 0);
         assert_eq!(superseded[0].1.command, Clocked::bump(7));
         assert_eq!(
             superseded[0].1.outcome,
@@ -3969,7 +10099,7 @@ mod tests {
             }
         );
         // The drain empties — one settlement per orphan, journaled once.
-        assert!(peer.take_superseded_commands().is_empty());
+        assert!(peer.drain_pending().superseded_commands().is_empty());
         // No strays: the superseded command never re-queues, so the
         // demoted run's next scan applies nothing for it — the count
         // stays the adopted line's own bump, never the orphan's — and
@@ -3979,10 +10109,140 @@ mod tests {
         assert_eq!(Clocked::count(&peer.checkpoint()), Value::Int(3));
         peer.apply(&source.checkpoint()).unwrap();
         peer.scan();
-        assert!(peer.take_superseded_commands().is_empty());
-        assert_eq!(peer.receipts()[..1], source.receipts()[..]);
-        assert_eq!(peer.receipts().len(), 2);
+        assert!(peer.drain_pending().superseded_commands().is_empty());
+        assert_eq!(peer.receipts(), source.receipts());
         assert_eq!(Clocked::count(&peer.checkpoint()), Value::Int(3));
+    }
+
+    /// QA finding `suspended-command-absorbed-by-identical-carry-unaudited`:
+    /// the carry test is the receipt's identity, not its command. The
+    /// reproduction's shape — a suspended `write_value` whose
+    /// `(index, command)` equals a *different* submission in the
+    /// successor's adopted window — must not read as the line's own
+    /// carry: the suspended entry is abandoned, settles `Rejected`
+    /// carrying `Superseded`, and queues for the journal, while the
+    /// admission counter never regresses below the receipts the run
+    /// ever minted.
+    #[test]
+    fn an_identical_command_at_the_index_is_not_the_suspended_submission() {
+        use dcs_core::Command;
+        let map = || {
+            PointMap::new()
+                .with_writable_internal(
+                    PointId(301),
+                    Direction::In,
+                    ValueKind::Float,
+                    Value::Float(0.0),
+                )
+                .with_writable_internal(
+                    PointId(333),
+                    Direction::In,
+                    ValueKind::Float,
+                    Value::Float(0.0),
+                )
+        };
+        let write = |point: PointId| Command::WriteValue {
+            point,
+            kind: ValueKind::Float,
+            value: Value::Float(7.0),
+        };
+        // The reproduction's alternating points — batchB's commands are
+        // value-identical to what the successor's window adopted at the
+        // same absolute indices.
+        let points = [PointId(301), PointId(333), PointId(301), PointId(333)];
+
+        let field = StubDriver::field(&[]);
+        let gate = WriteGate::closed(&field);
+        let mut peer = Peer::active(
+            Executor::new(&gate, map(), Vec::new()).unwrap(),
+            Some(&gate),
+        );
+        peer.activate().unwrap();
+        peer.scan();
+
+        // batchA: the receipted writes on the active, settling before
+        // the promotion flight.
+        for point in points {
+            peer.submit_command_as(write(point), Some("batch-a".to_string()));
+        }
+        peer.scan();
+
+        // The tracking standby converges on the post-batchA line and
+        // promotes — the successor that never observed batchB.
+        let source_field = StubDriver::field(&[]);
+        let source_gate = WriteGate::closed(&source_field);
+        let mut source = Peer::standby(
+            Executor::new(&source_gate, map(), Vec::new()).unwrap(),
+            Some(&source_gate),
+        );
+        source.apply(&peer.checkpoint()).unwrap();
+        source.promote().unwrap();
+
+        // batchB — the sub-scan window the incumbent still admits:
+        // identical writes under a distinct actor, all accepted on the
+        // still-active ex-owner, then suspended at its demote.
+        for point in points {
+            peer.submit_command_as(write(point), Some("batch-b".to_string()));
+        }
+        peer.demote().unwrap();
+        let minted = peer.snapshot().command_queue.attempts;
+
+        // batchC: the new owner's own admissions push the adopted
+        // window's submission high-water past batchB's indices — the
+        // first four carrying the identical commands under its own
+        // actor.
+        for point in points.into_iter().cycle().take(8) {
+            source.submit_command_as(write(point), Some("batch-c".to_string()));
+        }
+        source.scan();
+
+        // The covering adoption: the adopted window holds different
+        // submissions at batchB's indices — the identical command is
+        // not the receipt's identity — so each suspended entry settles
+        // `Rejected`/`Superseded` and queues for the journal rather
+        // than evaporating as the line's carry.
+        peer.apply(&source.checkpoint()).unwrap();
+        let drained = peer.drain_pending();
+        let superseded = drained.superseded_commands();
+        assert_eq!(superseded.len(), 4, "{superseded:?}");
+        for (position, (index, receipt)) in superseded.iter().enumerate() {
+            assert_eq!(*index, 4 + position as u64);
+            assert_eq!(receipt.command, write(points[position]));
+            assert_eq!(receipt.actor.as_deref(), Some("batch-b"));
+            assert_eq!(
+                receipt.outcome,
+                CommandOutcome::Rejected {
+                    reason: CommandError::Superseded {
+                        point: Some(points[position])
+                    }
+                }
+            );
+        }
+        // The drain empties — one settlement per abandoned admission,
+        // journaled once.
+        assert!(peer.drain_pending().superseded_commands().is_empty());
+        // The merged log is the line's one audit — the successor's own
+        // receipts at those indices, none actor `batch-b` — and
+        // `attempts` never regressed below the receipts this run ever
+        // minted: the counter converges to the adopted window's own
+        // high-water, standing above the ex-owner's admission count.
+        assert_eq!(peer.receipts(), source.receipts());
+        assert!(
+            peer.receipts()
+                .iter()
+                .all(|receipt| receipt.actor.as_deref() != Some("batch-b"))
+        );
+        let attempts = peer.snapshot().command_queue.attempts;
+        assert!(attempts >= minted, "{attempts} < {minted}");
+        assert_eq!(attempts, source.snapshot().command_queue.attempts);
+
+        // No strays: a later adoption or scan mints nothing further,
+        // and the abandoned submissions stay out of the queue — the
+        // demoted run applies nothing for them.
+        peer.scan();
+        peer.apply(&source.checkpoint()).unwrap();
+        assert!(peer.drain_pending().superseded_commands().is_empty());
+        assert_eq!(peer.snapshot().command_queue.attempts, attempts);
     }
 
     /// QA finding `superseded-command-still-settles-applied`: the
@@ -4024,7 +10284,7 @@ mod tests {
         // settled `superseded` — nothing journals, and the checkpoint
         // this peer still serves keeps offering it.
         peer.apply(&source.checkpoint()).unwrap();
-        assert!(peer.take_superseded_commands().is_empty());
+        assert!(peer.drain_pending().superseded_commands().is_empty());
         assert_eq!(peer.receipt_base(), 0);
         assert_eq!(peer.receipts().len(), 1);
         assert!(matches!(
@@ -4055,7 +10315,7 @@ mod tests {
         // verdict: the receipt settles `applied` — the one terminal
         // outcome, with no `superseded` ever journaled beside it.
         peer.apply(&source.checkpoint()).unwrap();
-        assert!(peer.take_superseded_commands().is_empty());
+        assert!(peer.drain_pending().superseded_commands().is_empty());
         assert_eq!(peer.receipts(), source.receipts());
         assert_eq!(
             peer.receipts()[0].outcome,
@@ -4106,7 +10366,7 @@ mod tests {
         // `Applied` the line never ordered — and it settles once at
         // the promoted run's first field-owning scan.
         peer.apply(&source.checkpoint()).unwrap();
-        assert!(peer.take_superseded_commands().is_empty());
+        assert!(peer.drain_pending().superseded_commands().is_empty());
         assert_eq!(peer.receipts(), source.receipts());
         assert!(matches!(
             peer.receipts()[0].outcome,
@@ -4118,7 +10378,7 @@ mod tests {
             CommandOutcome::Accepted { .. }
         ));
         assert_eq!(Clocked::count(&peer.checkpoint()), Value::Int(0));
-        assert!(peer.take_superseded_commands().is_empty());
+        assert!(peer.drain_pending().superseded_commands().is_empty());
 
         peer.promote().unwrap();
         peer.scan();
@@ -4127,6 +10387,118 @@ mod tests {
             CommandOutcome::Applied { tick: Tick(4) }
         );
         assert_eq!(Clocked::count(&peer.checkpoint()), Value::Int(7));
+    }
+
+    /// QA finding `suspended-commands-park-on-repromoted-owner`: the
+    /// demote-carry contract's uncovered tail on the *same* run. The
+    /// suspended entry's adjudication runs through covering adoptions
+    /// alone — covered and re-queued, or passed by into `superseded` —
+    /// so a demoted peer re-promoted with no covering adoption ever
+    /// landing on its tail parks the receipt `Accepted` forever, the
+    /// queue reading depth 0 while the served checkpoint still offers
+    /// the command to a successor's deferred apply. But the
+    /// re-promoted run *is* the surviving line: its first field-owning
+    /// scan re-queues its own suspended commands and settles them at
+    /// that boundary — the once-settle the contract owes, on the owner
+    /// the operator submitted to.
+    #[test]
+    fn a_repromoted_owner_settles_its_own_suspended_commands() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::active(Clocked::executor(&gate), Some(&gate));
+        peer.activate().unwrap();
+        peer.scan();
+        peer.submit_command(Clocked::bump(7));
+        peer.demote().unwrap();
+
+        // The demoted peer's first tracking pull lands the ownerless
+        // line's document — the reproduction's orphaned-sync shape: a
+        // serving standby's own checkpoint, whose receipt window's
+        // high-water never reached the suspended index. The unreached
+        // tail restores suspended beside `Orphaned`, the convergence
+        // the re-promotion stands on.
+        let rest_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let rest_gate = WriteGate::closed(&rest_driver);
+        let rest = Peer::standby(Clocked::executor(&rest_gate), Some(&rest_gate));
+        peer.apply(&rest.checkpoint()).unwrap();
+        assert!(matches!(peer.sync_state(), StandbySync::Orphaned { .. }));
+        assert!(matches!(
+            peer.receipts()[0].outcome,
+            CommandOutcome::Accepted { .. }
+        ));
+        peer.scan();
+        assert_eq!(peer.role(), Role::Standby);
+        assert!(matches!(
+            peer.receipts()[0].outcome,
+            CommandOutcome::Accepted { .. }
+        ));
+
+        // The same run re-promotes — the field's claim answers, no
+        // covering adoption ever adjudicated the tail — and its first
+        // field-owning scan settles the suspended command itself:
+        // `Applied` once on this line, the receipt leaving `Accepted`
+        // rather than parking beside a depth-0 queue.
+        peer.promote().unwrap();
+        peer.scan();
+        assert_eq!(peer.role(), Role::Active);
+        assert!(matches!(
+            peer.receipts()[0].outcome,
+            CommandOutcome::Applied { .. }
+        ));
+        assert_eq!(Clocked::count(&peer.checkpoint()), Value::Int(7));
+        assert!(peer.drain_pending().superseded_commands().is_empty());
+    }
+
+    /// The finding's deferred-apply half: a fresh standby adopting the
+    /// re-promoted run's checkpoint must not apply the suspended
+    /// command at its own promotion. The owner's first field-owning
+    /// scan already settled it, so the adopted window carries the
+    /// line's one verdict — the successor queues nothing for it and
+    /// its promotion applies nothing the line did not order.
+    #[test]
+    fn a_standby_adopting_the_repromoted_owner_applies_no_deferred_command() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::active(Clocked::executor(&gate), Some(&gate));
+        peer.activate().unwrap();
+        peer.scan();
+        peer.submit_command(Clocked::bump(7));
+        peer.demote().unwrap();
+
+        // The reproduction's orphaned re-promotion: the suspended
+        // command settles on the re-taken line's own first
+        // field-owning scan, so every checkpoint the owner serves
+        // from there carries the settled verdict.
+        let rest_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let rest_gate = WriteGate::closed(&rest_driver);
+        let rest = Peer::standby(Clocked::executor(&rest_gate), Some(&rest_gate));
+        peer.apply(&rest.checkpoint()).unwrap();
+        peer.promote().unwrap();
+        peer.scan();
+        assert_eq!(peer.role(), Role::Active);
+        assert!(matches!(
+            peer.receipts()[0].outcome,
+            CommandOutcome::Applied { .. }
+        ));
+
+        // The fresh probe tracks the re-promoted owner: its window
+        // adopts the verdict, not a live admission — nothing queues
+        // for the command, so the probe's own promotion and
+        // field-owning scans apply nothing a second time and the two
+        // logs stay the line's one audit.
+        let probe_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let probe_gate = WriteGate::closed(&probe_driver);
+        let mut probe = Peer::standby(Clocked::executor(&probe_gate), Some(&probe_gate));
+        probe.apply(&peer.checkpoint()).unwrap();
+        probe.promote().unwrap();
+        probe.scan();
+        assert_eq!(probe.role(), Role::Active);
+        assert_eq!(probe.receipts(), peer.receipts());
+        assert_eq!(Clocked::count(&probe.checkpoint()), Value::Int(7));
+        probe.scan();
+        assert_eq!(probe.receipts(), peer.receipts());
+        assert_eq!(Clocked::count(&probe.checkpoint()), Value::Int(7));
+        assert!(probe.drain_pending().superseded_commands().is_empty());
     }
 
     /// QA finding `quiesced-standby-scan-settles-adopted-pending-commands`
@@ -4185,7 +10557,7 @@ mod tests {
             standby.receipts()[0].outcome,
             CommandOutcome::Accepted { .. }
         ));
-        assert!(standby.take_superseded_commands().is_empty());
+        assert!(standby.drain_pending().superseded_commands().is_empty());
         assert_eq!(
             standby.executor().sample(point).map(|sample| sample.value),
             Some(Value::Float(0.0))
@@ -4275,11 +10647,12 @@ mod tests {
             receipts[1].submission,
             Some(SubmissionId { origin: 1, seq: 0 })
         );
-        let rehomed = peer.take_rehomed_receipts();
+        let drained = peer.drain_pending();
+        let rehomed = drained.rehomed_receipts();
         assert_eq!(rehomed.len(), 1, "{rehomed:?}");
         assert_eq!((rehomed[0].0, rehomed[0].1), (0, 1));
         assert_eq!(rehomed[0].2, receipts[1]);
-        assert!(peer.take_superseded_commands().is_empty());
+        assert!(drained.superseded_commands().is_empty());
 
         // The displaced receipt stays settled and served through
         // further scans and adoptions — never re-queued, never
@@ -4288,8 +10661,9 @@ mod tests {
         peer.apply(&source.checkpoint()).unwrap();
         assert_eq!(peer.receipts().len(), 2);
         assert_eq!(peer.receipts()[1].command, Clocked::bump(7));
-        assert!(peer.take_rehomed_receipts().is_empty());
-        assert!(peer.take_superseded_commands().is_empty());
+        let drained = peer.drain_pending();
+        assert!(drained.rehomed_receipts().is_empty());
+        assert!(drained.superseded_commands().is_empty());
 
         // And the pair's audit reconciles on the far side too: a
         // fail-back adopts the re-minted window verbatim — identity and
@@ -4368,19 +10742,688 @@ mod tests {
                 reason: CommandError::Superseded { point: None }
             }
         );
-        let superseded = peer.take_superseded_commands();
+        let drained = peer.drain_pending();
+        let superseded = drained.superseded_commands();
         assert_eq!(superseded.len(), 1, "{superseded:?}");
         assert_eq!(superseded[0].0, 1);
         assert_eq!(superseded[0].1, receipts[1]);
-        assert!(peer.take_superseded_commands().is_empty());
-        assert!(peer.take_rehomed_receipts().is_empty());
+        assert!(drained.rehomed_receipts().is_empty());
 
         // The suspended submission never ran — the count is the
         // successor's own single bump, and nothing re-queues for it.
         peer.scan();
         assert_eq!(Clocked::count(&peer.checkpoint()), Value::Int(7));
         peer.apply(&source.checkpoint()).unwrap();
-        assert!(peer.take_superseded_commands().is_empty());
+        assert!(peer.drain_pending().superseded_commands().is_empty());
         assert_eq!(peer.receipts().len(), 2);
+    }
+
+    /// QA finding `stale-checkpoint-resurrects-receipted-unforce`
+    /// (#639): a standby restarting onto a staler peer's checkpoint
+    /// must not re-stand a force its own journal already receipted as
+    /// released. The applied `unforce` receipt is durable truth — the
+    /// adoption replays it over the adopted force set, the scan
+    /// reports the field's live value at `Good` quality, and no
+    /// adoption-audit receipt queues because the merged log already
+    /// accounts for the outcome.
+    #[test]
+    fn a_receipted_unforce_survives_adopting_a_stale_checkpoint() {
+        const POINT: PointId = PointId(10);
+        let map = || PointMap::new().with_writable_point(POINT, Direction::In, ValueKind::Float);
+        let force = || Command::ForcePoint {
+            point: POINT,
+            kind: ValueKind::Float,
+            value: Value::Float(5.0),
+        };
+
+        // The tracked peer forces the point; its served checkpoint
+        // freezes there — captured before the release could ever
+        // reach its journal.
+        let a_driver = StubDriver::new(POINT, Value::Float(1.0));
+        let a_gate = WriteGate::closed(&a_driver);
+        let mut a = Peer::active(
+            Executor::new(&a_gate, map(), Vec::new()).unwrap(),
+            Some(&a_gate),
+        );
+        a.activate().unwrap();
+        a.submit_command(force());
+        a.scan();
+        let stale = a.checkpoint();
+
+        // The standby adopts the force, promotes, and releases it —
+        // applied and journaled on its own run.
+        let b_driver = StubDriver::new(POINT, Value::Float(1.0));
+        let b_gate = WriteGate::closed(&b_driver);
+        let mut b = Peer::standby(
+            Executor::new(&b_gate, map(), Vec::new()).unwrap(),
+            Some(&b_gate),
+        );
+        b.apply(&stale).unwrap();
+        b.promote().unwrap();
+        b.scan();
+        b.submit_command(Command::UnforcePoint { point: POINT });
+        b.scan();
+        assert!(b.executor().forces().is_empty());
+        assert!(matches!(
+            b.receipts().last().unwrap().outcome,
+            CommandOutcome::Applied { .. }
+        ));
+
+        // The restart: a fresh peer resumes from the run's own state
+        // — the receipt log and the released force set carry — then
+        // tracks the stale image.
+        let resumed = Executor::restore(&b_gate, map(), Vec::new(), &b.checkpoint(), None).unwrap();
+        let mut restarted = Peer::standby(resumed, Some(&b_gate));
+        restarted.apply(&stale).unwrap();
+
+        // The adopted image's force set is already reverted by the
+        // journaled release: the resurrection never happens, so the
+        // audit queues nothing.
+        assert!(restarted.executor().forces().is_empty());
+        assert!(restarted.drain_pending().adoption_receipts().is_empty());
+
+        // And the scan reports the field's live value at `Good`
+        // quality — the silent `Substituted` return is the defect.
+        restarted.scan();
+        assert_eq!(
+            restarted.executor().sample(POINT),
+            Some(Sample::good(Value::Float(1.0), Tick(4)))
+        );
+        assert!(restarted.executor().snapshot().forces.is_empty());
+    }
+
+    /// The audit's positive half: a checkpoint whose force set stands
+    /// a force the merged receipt log cannot account for journals the
+    /// adoption itself — one `Applied` receipt whose `actor` names the
+    /// adopting checkpoint — rather than letting the change stand
+    /// silently.
+    #[test]
+    fn an_unbacked_adopted_force_journals_a_receipt_naming_the_source() {
+        use crate::checkpoint::CommandAdmissionCounts;
+        const POINT: PointId = PointId(10);
+        let map = || PointMap::new().with_writable_point(POINT, Direction::In, ValueKind::Float);
+
+        let a_driver = StubDriver::new(POINT, Value::Float(1.0));
+        let a_gate = WriteGate::closed(&a_driver);
+        let mut a = Peer::active(
+            Executor::new(&a_gate, map(), Vec::new()).unwrap(),
+            Some(&a_gate),
+        );
+        a.activate().unwrap();
+        a.submit_command(Command::ForcePoint {
+            point: POINT,
+            kind: ValueKind::Float,
+            value: Value::Float(5.0),
+        });
+        a.scan();
+        let mut checkpoint = a.checkpoint();
+        // The carried force loses its receipt: the merged log cannot
+        // account for the adopted state.
+        checkpoint.receipts.clear();
+        checkpoint.command_admission = CommandAdmissionCounts::default();
+
+        let b_driver = StubDriver::new(POINT, Value::Float(1.0));
+        let b_gate = WriteGate::closed(&b_driver);
+        let mut b = Peer::standby(
+            Executor::new(&b_gate, map(), Vec::new()).unwrap(),
+            Some(&b_gate),
+        );
+        b.apply(&checkpoint).unwrap();
+
+        assert_eq!(b.executor().forces()[&POINT], Value::Float(5.0));
+        assert_eq!(
+            b.drain_pending().adoption_receipts(),
+            vec![CommandReceipt {
+                command: Command::ForcePoint {
+                    point: POINT,
+                    kind: ValueKind::Float,
+                    value: Value::Float(5.0),
+                },
+                outcome: CommandOutcome::Applied { tick: Tick(1) },
+                actor: Some("checkpoint@1".to_string()),
+                reason: None,
+                submission: None,
+            }]
+        );
+        // The drain empties — one audit receipt per unbacked change.
+        assert!(b.drain_pending().adoption_receipts().is_empty());
+    }
+
+    /// The mirror image: an adoption that *drops* a standing force the
+    /// merged log still shows receipted journals the release the same
+    /// way — while a drop the adopted log's own `unforce` verdict
+    /// explains queues nothing.
+    #[test]
+    fn an_unbacked_dropped_force_journals_a_release_naming_the_source() {
+        const POINT: PointId = PointId(10);
+        let map = || PointMap::new().with_writable_point(POINT, Direction::In, ValueKind::Float);
+
+        let a_driver = StubDriver::new(POINT, Value::Float(1.0));
+        let a_gate = WriteGate::closed(&a_driver);
+        let mut a = Peer::active(
+            Executor::new(&a_gate, map(), Vec::new()).unwrap(),
+            Some(&a_gate),
+        );
+        a.activate().unwrap();
+        a.submit_command(Command::ForcePoint {
+            point: POINT,
+            kind: ValueKind::Float,
+            value: Value::Float(5.0),
+        });
+        a.scan();
+        let forced = a.checkpoint();
+
+        let b_driver = StubDriver::new(POINT, Value::Float(1.0));
+        let b_gate = WriteGate::closed(&b_driver);
+        let mut b = Peer::standby(
+            Executor::new(&b_gate, map(), Vec::new()).unwrap(),
+            Some(&b_gate),
+        );
+        // The backed adoption: the checkpoint's own force receipt
+        // explains the stood-up force — nothing queues.
+        b.apply(&forced).unwrap();
+        assert!(b.drain_pending().adoption_receipts().is_empty());
+
+        // The receipted release: the fresher checkpoint's `unforce`
+        // verdict explains the empty force set — nothing queues.
+        a.submit_command(Command::UnforcePoint { point: POINT });
+        a.scan();
+        b.apply(&a.checkpoint()).unwrap();
+        assert!(b.executor().forces().is_empty());
+        assert!(b.drain_pending().adoption_receipts().is_empty());
+
+        // The unbacked drop: a peer whose covered log still shows the
+        // force standing adopts a checkpoint whose force set drops it
+        // — the change has the adoption as its only cause, so it
+        // journals.
+        let c_driver = StubDriver::new(POINT, Value::Float(1.0));
+        let c_gate = WriteGate::closed(&c_driver);
+        let mut c = Peer::standby(
+            Executor::new(&c_gate, map(), Vec::new()).unwrap(),
+            Some(&c_gate),
+        );
+        c.apply(&forced).unwrap();
+        assert!(c.drain_pending().adoption_receipts().is_empty());
+        let mut dropped = forced.clone();
+        dropped.tick = Tick(2);
+        dropped.forces.clear();
+        c.apply(&dropped).unwrap();
+        assert!(c.executor().forces().is_empty());
+        assert_eq!(
+            c.drain_pending().adoption_receipts(),
+            vec![CommandReceipt {
+                command: Command::UnforcePoint { point: POINT },
+                outcome: CommandOutcome::Applied { tick: Tick(2) },
+                actor: Some("checkpoint@2".to_string()),
+                reason: None,
+                submission: None,
+            }]
+        );
+    }
+
+    /// The peer-level half of QA finding
+    /// `announced-source-verify-adopts-standby-shaped-checkpoint`
+    /// (#850): a run that owned the field — `was_owner` stands from
+    /// `Peer::active` construction — holds the line's audit itself, so
+    /// a pulled checkpoint planting an internal `In` value no settled
+    /// verdict produced is forged, not a continuation: the apply
+    /// refuses `Unaccounted`, nothing of the document lands, and the
+    /// peer reports `degraded` — unpromotable on forged state. A peer
+    /// that never owned proves nothing and applies the same document.
+    #[test]
+    fn an_ex_owner_refuses_a_checkpoint_planting_unaccounted_internal_state() {
+        const HELD: PointId = PointId(30);
+        let map = || {
+            loop_map().with_writable_internal(
+                HELD,
+                Direction::In,
+                ValueKind::Float,
+                Value::Float(0.0),
+            )
+        };
+        let field = StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let mut owner = Peer::active(
+            Executor::new(&field, map(), vec![Box::new(PassThrough)]).unwrap(),
+            None,
+        );
+        // The line's honest commanded state: one receipted write the
+        // owner's own image and log both carry.
+        owner.submit_command(Command::WriteValue {
+            point: HELD,
+            kind: ValueKind::Float,
+            value: Value::Float(2.0),
+        });
+        owner.scan();
+        assert_eq!(
+            owner.executor().sample(HELD).map(|sample| sample.value),
+            Some(Value::Float(2.0))
+        );
+
+        // The reproduction's document: the owner's own checkpoint with
+        // the stamp flipped `false`, the tick bumped ahead, and a
+        // planted internal value no receipt produced.
+        let mut forged = owner.checkpoint();
+        forged.source_owns_field = Some(false);
+        forged.tick = Tick(forged.tick.0 + 5);
+        forged
+            .internal
+            .insert(HELD, Sample::good(Value::Float(9.0), forged.tick));
+
+        // The demoted ex-owner convicts it: the value is none of the
+        // ones its audit produces — not its own held value, not the
+        // document's own pinned force, not a settled verdict in the
+        // pulled receipt window — so the apply refuses before any of
+        // the document lands.
+        owner.demote().unwrap();
+        assert_eq!(
+            owner.apply(&forged),
+            Err(ApplyError::Unaccounted(Box::new(
+                UnaccountedDetail::Internal {
+                    point: HELD,
+                    found: Value::Float(9.0),
+                }
+            )))
+        );
+        assert!(matches!(owner.sync_state(), StandbySync::Degraded { .. }));
+        assert_eq!(
+            owner.executor().sample(HELD).map(|sample| sample.value),
+            Some(Value::Float(2.0)),
+            "the planted value never applied"
+        );
+        assert_eq!(
+            owner.promote(),
+            Err(SwitchError::NotConverged {
+                sync: owner.sync_state().clone()
+            }),
+            "a peer that refused the forged document cannot promote onto it"
+        );
+
+        // The check is the ex-owner's alone: a peer that never owned
+        // has no audit to convict with — the same document is simply
+        // the tracked line's state to it.
+        let tracking =
+            StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let mut standby = Peer::standby(
+            Executor::new(&tracking, map(), vec![Box::new(PassThrough)]).unwrap(),
+            None,
+        );
+        standby.apply(&forged).unwrap();
+        assert_eq!(
+            standby.executor().sample(HELD).map(|sample| sample.value),
+            Some(Value::Float(9.0))
+        );
+    }
+
+    /// The mirror image on the receipt log itself: the pulled window
+    /// cannot name a different command at a submission index the
+    /// ex-owner's own log covers — the line's one submission sequence
+    /// does not fork.
+    #[test]
+    fn an_ex_owner_refuses_a_checkpoint_forking_its_receipt_window() {
+        const HELD: PointId = PointId(30);
+        let map = || {
+            loop_map().with_writable_internal(
+                HELD,
+                Direction::In,
+                ValueKind::Float,
+                Value::Float(0.0),
+            )
+        };
+        let field = StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let mut owner = Peer::active(
+            Executor::new(&field, map(), vec![Box::new(PassThrough)]).unwrap(),
+            None,
+        );
+        let write = Command::WriteValue {
+            point: HELD,
+            kind: ValueKind::Float,
+            value: Value::Float(2.0),
+        };
+        owner.submit_command(write.clone());
+        owner.scan();
+
+        let mut forged = owner.checkpoint();
+        forged.source_owns_field = Some(false);
+        forged.tick = Tick(forged.tick.0 + 5);
+        let substitute = Command::ForcePoint {
+            point: HELD,
+            kind: ValueKind::Float,
+            value: Value::Float(9.0),
+        };
+        forged.receipts[0].command = substitute.clone();
+
+        owner.demote().unwrap();
+        assert_eq!(
+            owner.apply(&forged),
+            Err(ApplyError::Unaccounted(Box::new(
+                UnaccountedDetail::Receipt {
+                    index: 0,
+                    expected: write,
+                    found: substitute,
+                }
+            )))
+        );
+        assert!(matches!(owner.sync_state(), StandbySync::Degraded { .. }));
+    }
+
+    /// The honest continuation the audit must keep accepting: the
+    /// demoted ex-owner tracks a successor whose internal value
+    /// differs from its own — but the pulled receipt window carries
+    /// the settled write that produced it, so the document applies
+    /// and the line reconverges.
+    #[test]
+    fn an_ex_owner_accepts_internal_state_the_pulled_receipts_justify() {
+        const HELD: PointId = PointId(30);
+        let map = || {
+            loop_map().with_writable_internal(
+                HELD,
+                Direction::In,
+                ValueKind::Float,
+                Value::Float(0.0),
+            )
+        };
+        let field = StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let mut owner = Peer::active(
+            Executor::new(&field, map(), vec![Box::new(PassThrough)]).unwrap(),
+            None,
+        );
+        owner.submit_command(Command::WriteValue {
+            point: HELD,
+            kind: ValueKind::Float,
+            value: Value::Float(2.0),
+        });
+        owner.scan();
+        let captured = owner.checkpoint();
+        owner.demote().unwrap();
+
+        // The honest successor: it adopted the line — image and
+        // receipt log — promoted, and took its own command. Its
+        // checkpoint's internal value differs from the demoted peer's,
+        // but its pulled receipt window carries the settled write
+        // that produced it.
+        let successor_field =
+            StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let mut successor = Peer::standby(
+            Executor::new(&successor_field, map(), vec![Box::new(PassThrough)]).unwrap(),
+            None,
+        );
+        successor.apply(&captured).unwrap();
+        successor.promote().unwrap();
+        successor.scan();
+        assert_eq!(successor.role(), Role::Active);
+        successor.submit_command(Command::WriteValue {
+            point: HELD,
+            kind: ValueKind::Float,
+            value: Value::Float(5.0),
+        });
+        successor.scan();
+
+        // The demoted peer audits and adopts: the receipted write —
+        // a submission its own log never saw — is the value's cause.
+        let pulled = successor.checkpoint();
+        assert_eq!(
+            pulled.internal.get(&HELD).map(|sample| sample.value),
+            Some(Value::Float(5.0))
+        );
+        owner.apply(&pulled).unwrap();
+        assert_eq!(
+            owner.executor().sample(HELD).map(|sample| sample.value),
+            Some(Value::Float(5.0))
+        );
+        assert!(matches!(
+            owner.sync_state(),
+            StandbySync::Tracking { .. } | StandbySync::Orphaned { .. }
+        ));
+    }
+
+    /// A standing force is the document's own claimed commanded
+    /// state — the planted internal sample a force on the same point
+    /// already pins is the value the substitute reads produce anyway,
+    /// so provenance has no verdict on the sample; the force claim
+    /// itself answers to the adoption audit. A document whose force
+    /// pins a different value than its internal sample convicts the
+    /// contradiction instead.
+    #[test]
+    fn an_ex_owner_answers_a_forced_internal_sample_to_the_documents_own_force() {
+        const HELD: PointId = PointId(30);
+        let map = || {
+            loop_map().with_writable_internal(
+                HELD,
+                Direction::In,
+                ValueKind::Float,
+                Value::Float(0.0),
+            )
+        };
+        let field = StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let mut owner = Peer::active(
+            Executor::new(&field, map(), vec![Box::new(PassThrough)]).unwrap(),
+            None,
+        );
+        owner.scan();
+
+        // Consistent: the force and the sample agree — what the
+        // document claims the point reads under its own force set.
+        let mut consistent = owner.checkpoint();
+        consistent.source_owns_field = Some(false);
+        consistent.tick = Tick(consistent.tick.0 + 5);
+        consistent.forces.insert(HELD, Value::Float(9.0));
+        consistent
+            .internal
+            .insert(HELD, Sample::good(Value::Float(9.0), consistent.tick));
+        owner.demote().unwrap();
+        owner.apply(&consistent).unwrap();
+        // The unbacked force claim is the adoption audit's to name —
+        // the receiptless change journals naming the source.
+        assert!(
+            !owner.drain_pending().adoption_receipts().is_empty(),
+            "a receiptless force adoption journals its source"
+        );
+        assert_eq!(
+            owner.executor().forces().get(&HELD),
+            Some(&Value::Float(9.0))
+        );
+
+        // Contradictory: the pinned force and the planted sample
+        // disagree — the document's own claims cannot both hold.
+        let mut contradictory = consistent.clone();
+        contradictory.tick = Tick(contradictory.tick.0 + 1);
+        contradictory
+            .internal
+            .insert(HELD, Sample::good(Value::Float(7.0), contradictory.tick));
+        assert_eq!(
+            owner.apply(&contradictory),
+            Err(ApplyError::Unaccounted(Box::new(
+                UnaccountedDetail::Internal {
+                    point: HELD,
+                    found: Value::Float(7.0),
+                }
+            )))
+        );
+    }
+
+    /// QA finding `standby-rejoin-adoption-reverts-receipted-commands-unaudited`
+    /// (#833) — the dead-incumbent half of #805's receipted-command
+    /// contract. Once the incumbent is dead the restarted peer's stale
+    /// line legitimately wins, and the rejoining peer's
+    /// receipted-and-applied `WriteValue` reverts under the adoption:
+    /// the held value must not roll back to a bare `point_changed` —
+    /// the journal gains a `WriteValue` receipt `Applied` at the
+    /// landing tick whose actor names the adopting checkpoint.
+    #[test]
+    fn a_reverted_receipted_write_journals_the_adoption_as_its_cause() {
+        use crate::checkpoint::CommandAdmissionCounts;
+        const POINT: PointId = PointId(10);
+        let map = || {
+            PointMap::new().with_writable_internal(
+                POINT,
+                Direction::In,
+                ValueKind::Bool,
+                Value::Bool(false),
+            )
+        };
+        let write = |value| Command::WriteValue {
+            point: POINT,
+            kind: ValueKind::Bool,
+            value: Value::Bool(value),
+        };
+
+        // The restarted source's line — captured before the write,
+        // legitimately staler once the incumbent is dead. Its receipt
+        // window's high-water never reached the rejoining run's own
+        // receipts, so the merged log will hold no verdict for the
+        // point at all — the finding's served-view shape, the applied
+        // write surviving only in the durable journal.
+        let a_driver = StubDriver::field(&[]);
+        let mut a = Executor::new(&a_driver, map(), Vec::new()).unwrap();
+        a.run(3);
+        let mut stale = a.checkpoint();
+        stale.receipts.clear();
+        stale.command_admission = CommandAdmissionCounts::default();
+
+        // The incumbent's own run receipted and applied the write —
+        // the operator protection command the revert must not drop
+        // silently.
+        let b_driver = StubDriver::field(&[]);
+        let b_gate = WriteGate::closed(&b_driver);
+        let mut b = Peer::active(
+            Executor::new(&b_gate, map(), Vec::new()).unwrap(),
+            Some(&b_gate),
+        );
+        b.activate().unwrap();
+        b.submit_command(write(true));
+        b.scan();
+        assert_eq!(
+            b.executor().sample(POINT).map(|sample| sample.value),
+            Some(Value::Bool(true))
+        );
+        assert!(matches!(
+            b.receipts().last().unwrap().outcome,
+            CommandOutcome::Applied { .. }
+        ));
+        // The receipted line itself, kept for the consistency check
+        // below.
+        let honest = b.checkpoint();
+
+        // The rejoin: demoted off the dead line, the run adopts the
+        // stale checkpoint — the held value reverts to the adopted
+        // image.
+        b.demote().unwrap();
+        b.apply(&stale).unwrap();
+        assert_eq!(
+            b.executor().sample(POINT).map(|sample| sample.value),
+            Some(Value::Bool(false))
+        );
+
+        // The revert is audited: one `WriteValue` receipt applied at
+        // the landing tick, its actor naming the adopting checkpoint
+        // — the durable journal answers "who rolled the command
+        // back" even though the merged log carried no verdict.
+        assert_eq!(
+            b.drain_pending().adoption_receipts(),
+            vec![CommandReceipt {
+                command: write(false),
+                outcome: CommandOutcome::Applied { tick: Tick(3) },
+                actor: Some("checkpoint@3".to_string()),
+                reason: None,
+                submission: None,
+            }]
+        );
+        assert!(b.drain_pending().adoption_receipts().is_empty());
+
+        // The consistent half: adopting the receipted line itself —
+        // whose merged log's newest settled write already produces
+        // the adopted value — moves the held value back with no
+        // adoption receipt at all.
+        b.apply(&honest).unwrap();
+        assert_eq!(
+            b.executor().sample(POINT).map(|sample| sample.value),
+            Some(Value::Bool(true))
+        );
+        assert!(b.drain_pending().adoption_receipts().is_empty());
+    }
+
+    /// The finding's own shape (#865): the rejoining peer never
+    /// submitted the reverted command — an ordinary tracking standby
+    /// adopted the field owner's `applied` settlement through its
+    /// checkpoint pulls. When the restarted run then adopts a staler
+    /// checkpoint the revert is audited exactly as the
+    /// locally-submitted half is: one `WriteValue` receipt applied at
+    /// the landing tick naming the adopting checkpoint.
+    #[test]
+    fn an_adopted_receipted_write_reverted_on_rejoin_journals_the_adoption() {
+        use crate::checkpoint::CommandAdmissionCounts;
+        const POINT: PointId = PointId(10);
+        let map = || {
+            PointMap::new().with_writable_internal(
+                POINT,
+                Direction::In,
+                ValueKind::Bool,
+                Value::Bool(false),
+            )
+        };
+        let write = |value| Command::WriteValue {
+            point: POINT,
+            kind: ValueKind::Bool,
+            value: Value::Bool(value),
+        };
+
+        // The field owner's line: the write receipted and applied —
+        // the honest checkpoint the standby tracks, and the stale
+        // pre-write checkpoint its restart will serve.
+        let a_driver = StubDriver::field(&[]);
+        let a_gate = WriteGate::closed(&a_driver);
+        let mut a = Peer::active(
+            Executor::new(&a_gate, map(), Vec::new()).unwrap(),
+            Some(&a_gate),
+        );
+        a.activate().unwrap();
+        for _ in 0..3 {
+            a.scan();
+        }
+        let mut stale = a.checkpoint();
+        // The staler line's window never reached the standby's adopted
+        // receipts — the finding's served-view shape.
+        stale.receipts.clear();
+        stale.command_admission = CommandAdmissionCounts::default();
+        a.submit_command(write(true));
+        a.scan();
+        let honest = a.checkpoint();
+
+        // The tracking standby: the applied settlement arrives through
+        // adoption, never through a local submission.
+        let b_driver = StubDriver::field(&[]);
+        let b_gate = WriteGate::closed(&b_driver);
+        let mut b = Peer::standby(
+            Executor::new(&b_gate, map(), Vec::new()).unwrap(),
+            Some(&b_gate),
+        );
+        b.apply(&honest).unwrap();
+        assert_eq!(
+            b.executor().sample(POINT).map(|sample| sample.value),
+            Some(Value::Bool(true))
+        );
+        assert!(matches!(
+            b.receipts().last().unwrap().outcome,
+            CommandOutcome::Applied { .. }
+        ));
+
+        // The rejoin: the resumed run adopts the restarted peer's
+        // staler checkpoint and the held value reverts.
+        b.apply(&stale).unwrap();
+        assert_eq!(
+            b.executor().sample(POINT).map(|sample| sample.value),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(
+            b.drain_pending().adoption_receipts(),
+            vec![CommandReceipt {
+                command: write(false),
+                outcome: CommandOutcome::Applied { tick: Tick(4) },
+                actor: Some("checkpoint@3".to_string()),
+                reason: None,
+                submission: None,
+            }]
+        );
+        assert!(b.drain_pending().adoption_receipts().is_empty());
     }
 }
