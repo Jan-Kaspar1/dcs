@@ -74,10 +74,12 @@
 //!    keeps the emitted-event sequence monotonic across the switch.
 //!
 //! Every leg boundary compares the pair view's snapshot, the receipt
-//! log, and the checkpoint digest — model fingerprint normalized, the
-//! pair and reference models differing only in the plant address —
-//! against the no-consumer reference, and every tick asserts all
-//! three snapshots equal and the field carrying the owner's write.
+//! log, and the checkpoint digest — model fingerprint, generation, and
+//! tracking source normalized, the pair and reference models
+//! differing only in the plant address and each run booting on its own
+//! monitor addresses — against the no-consumer reference, and every
+//! tick asserts all three snapshots equal and the field carrying the
+//! owner's write.
 //! The whole run executes twice; the returned outcome must be
 //! identical.
 
@@ -259,16 +261,19 @@ fn settlements_of(client: &MonitorClient, command: &Command) -> Vec<(u64, Comman
         .collect()
 }
 
-/// The checkpoint a client serves with its model fingerprint and
-/// stream generation normalized out: the pair and reference models
-/// differ only in the plant address, and each process mints its own
-/// generation at boot, so the rest of the transferable state — tick,
-/// component states, output and internal images, forces, receipts,
-/// admission counters — must serialize identically.
+/// The checkpoint a client serves with its model fingerprint, stream
+/// generation, and tracking source normalized out: the pair and
+/// reference models differ only in the plant address, each process
+/// mints its own generation at boot, and the pair's owners stamp the
+/// peer's monitor address they would pull from while not owning the
+/// field — per-instance wiring, not transferable run state — so the
+/// rest of it — tick, component states, output and internal images,
+/// forces, receipts, admission counters — must serialize identically.
 fn checkpoint_digest(client: &MonitorClient) -> Vec<u8> {
     let mut checkpoint: Checkpoint = client.checkpoint().unwrap();
     checkpoint.model_fingerprint = None;
     checkpoint.generation = None;
+    checkpoint.tracking_source = None;
     serde_json::to_vec(&checkpoint).unwrap()
 }
 
