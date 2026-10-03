@@ -353,7 +353,9 @@ revision reporting `lockfile-stale`, and one carrying a release crate's
 `[[package]]` block twice — a foreign remote at another precise
 revision, the divergent copy ordered before the tree's own — reporting
 the same diagnostic on either ordering, so the one-source promise
-covers every recorded entry and not only the last — and its git-only
+covers every recorded entry and not only the last, while the same
+duplicate recorded from a checkout instead reports
+`path-dependency-leak` on either ordering too — and its git-only
 lockfile assertion,
 its released-tooling stage against
 locally built binaries — `validate`/`lint`/`--check` acceptance, the
@@ -512,8 +514,8 @@ The checks' failures are named diagnostics:
 | `record-missing` | The substituted `DCS_RECORD_DIR` tree serves no `docs/releases/<tag>/` artifact the schema-drift leg compares against — only reachable when a record-tree substitution is in effect; the contract's own shape fetches the record through the pinned rev and reports `pin-unresolvable` instead. Reported by the reference plant's `ci/check.sh`. |
 | `surface-incompatible` | The release crates resolved but the consumer's use of the supported API fails to compile — an incompatible pin reaching compile time. |
 | `lockfile-stale` | The committed consumer `Cargo.lock` does not record the manifest's declared pin — another remote, another `rev`/`tag` fragment, another precise revision than the declared `rev` or the declared `tag`'s target as the remote serves it, another revision than the release record's filled `Commit` field, a release crate missing, a release crate recorded at more than one source however the file orders its `[[package]]` blocks, or a resolve that had to rewrite the file to proceed. Cargo refuses such a lockfile outright under `--locked`, so a shipped tree carrying one neither resolves reproducibly nor resolves at all; the check names it instead of re-resolving it away. Reported by the reference plant's `ci/check.sh`, before its `resolve` stage can rewrite the committed artifact. |
-| `lockfile-stale-unchecked` | The reference plant's `lockfile` stage did not report its own diagnostic: a doctored lockfile the stage plants — one recorded at another revision, one missing a release crate's `[[package]]` block, one carrying a release crate's block twice with the divergent entry ordered before the tree's own — passed the leg that must refuse it, or was refused under another diagnostic's name. Reported by the reference plant's `ci/check.sh`. |
-| `path-dependency-leak` | The consumer lockfile records a `path` source — or no source at all — for a released crate, where a git pin can only be satisfied from the pinned remote — the no-path-dependency proof itself failed. |
+| `lockfile-stale-unchecked` | The reference plant's `lockfile` stage did not report its own diagnostic: a doctored lockfile the stage plants — one recorded at another revision, one missing a release crate's `[[package]]` block, one carrying a release crate's block twice with the second recording ordered before the tree's own, from a foreign remote or from a path — passed the leg that must refuse it, or was refused under another diagnostic's name. Reported by the reference plant's `ci/check.sh`. |
+| `path-dependency-leak` | The consumer lockfile records a `path` source — or no source at all — for a released crate, where a git pin can only be satisfied from the pinned remote, including through a second `[[package]]` block for the same crate beside the pinned git entry and whatever order the file gives the two — the no-path-dependency proof itself failed. |
 | `emit-nondeterministic` | Two emission runs produced different bytes. |
 | `emit-divergent` | The unchanged consumer source emitted different model bytes under the repinned revision — the same-minor repin was not the drop-in upgrade this policy promises. |
 | `tooling-rejected` | `dcs-model validate`/`lint` or `dcs-controller --check` refused the emitted model. |

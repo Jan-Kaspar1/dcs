@@ -531,9 +531,10 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
     // re-resolve: the committed lockfile records the manifest's own pin
     // at the stand-in's tag target, and each of the leg's doctored
     // copies — the release crates recorded at another revision, a
-    // release crate's package block missing, and a release crate
-    // recorded at two sources — reported `lockfile-stale` instead of
-    // passing.
+    // release crate's package block missing, a release crate recorded
+    // at two git sources, and a release crate recorded from a path
+    // beside its git entry — reported the diagnostic its shape is owed
+    // instead of passing.
     assert!(
         stdout.contains("== lockfile =="),
         "the lockfile stage did not run:\n{stdout}"
@@ -551,6 +552,14 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
             "a lockfile recording a release crate at two sources refused: lockfile-stale"
         ),
         "the lockfile stage's two-source doctored case did not report its named diagnostic:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "a lockfile recording a release crate from a path alongside its git entry \
+             refused: path-dependency-leak"
+        ),
+        "the lockfile stage's path-duplicate doctored case did not report its named \
+         diagnostic:\n{stdout}"
     );
     let lock_line = stdout
         .lines()
@@ -1235,19 +1244,22 @@ fn a_lockfile_missing_a_release_crate_reports_lockfile_stale() {
     );
 }
 
-/// The contract's other `lockfile-stale` case — the reported
+/// The contract's duplicate-`[[package]]` cases — the reported
 /// `qa-lockfile-leg-duplicate-package-last-wins` defect: a lockfile
-/// carrying a release crate's `[[package]]` block *twice*, the extra
-/// entry recorded from a foreign remote at another precise revision, is
-/// stale whichever copy the file orders last. The leg's one-source
-/// promise covers every recorded entry, not only the last one per name,
-/// so both orders are screened here — the order that used to pass the
-/// leg (the divergent entry first) beside the order that always did.
-/// The foreign source is a git one, so the refusal is the stale
-/// diagnostic, never the leak, and `resolve` never gets the chance to
-/// re-resolve the file away.
+/// carrying a release crate's `[[package]]` block *twice* is screened at
+/// both recorded sources, not only the one the file happens to order
+/// last. Two extra copies are doctored in here — one recorded from a
+/// foreign remote at another precise revision, which is the stale
+/// diagnostic, and one carrying no `source` line at all, which is what a
+/// crate satisfied from a path into a checkout looks like and is the
+/// leak diagnostic — each in both orders, because the defect was purely
+/// positional: the first order passed the leg, the second did not. The
+/// verdict may depend on *what* the second recording is, never on where
+/// the file orders it, and the refused run leaves the doctored artifact
+/// exactly as it found it: `resolve` never gets the chance to re-resolve
+/// either file away.
 #[test]
-fn a_lockfile_recording_a_release_crate_at_two_sources_reports_lockfile_stale() {
+fn a_lockfile_recording_a_release_crate_twice_reports_the_named_diagnostic() {
     let copy = Materialized::new();
     let lock = copy.dir.join("Cargo.lock");
     let committed = std::fs::read_to_string(&lock).unwrap();
@@ -1259,99 +1271,119 @@ fn a_lockfile_recording_a_release_crate_at_two_sources_reports_lockfile_stale() 
         .map(|i| start + i + 1)
         .unwrap_or(committed.len());
     let block = &committed[start..end];
+    let retag = |line: &str| {
+        if line.starts_with("version = ") {
+            "version = \"0.8.0\"".to_string()
+        } else {
+            line.to_string()
+        }
+    };
     // The foreign recording: the same package at an earlier version,
     // served from another remote at another precise revision.
     let foreign = format!(
         "git+file:///tmp/attacker.git?tag=v0.9.0#{}1",
         "0".repeat(39)
     );
-    let divergent = block
+    let git_copy = block
         .lines()
         .map(|line| {
-            if line.starts_with("version = ") {
-                "version = \"0.8.0\"".to_string()
-            } else if line.starts_with("source = ") {
+            if line.starts_with("source = ") {
                 format!("source = \"{foreign}\"")
             } else {
-                line.to_string()
+                retag(line)
             }
         })
         .collect::<Vec<String>>()
         .join("\n")
         + "\n";
+    // The path recording: the same package at an earlier version with no
+    // `source` line — the block shape a path-resolved crate takes.
+    let path_copy = block
+        .lines()
+        .filter(|line| !line.starts_with("source = "))
+        .map(retag)
+        .collect::<Vec<String>>()
+        .join("\n")
+        + "\n";
     assert_ne!(
-        divergent, block,
+        git_copy, block,
+        "the doctor left the recorded dcs-core block unchanged"
+    );
+    assert!(
+        !path_copy.contains("source = "),
+        "the path doctor left a source line in the duplicated block"
+    );
+    assert_ne!(
+        path_copy, block,
         "the doctor left the recorded dcs-core block unchanged"
     );
 
-    // Both orderings: the defect was the verdict depending on which copy
-    // the file records last, so neither may pass.
-    for (order, doctored) in [
+    // Each second recording names the diagnostic it is owed, and the one
+    // it must not be reported under.
+    for (label, extra, diagnostic, other) in [
         (
-            "before",
-            format!(
-                "{}{divergent}{block}{}",
-                &committed[..start],
-                &committed[end..]
-            ),
+            "a foreign remote's git entry",
+            &git_copy,
+            "lockfile-stale",
+            "path-dependency-leak",
         ),
         (
-            "after",
-            format!(
-                "{}{block}{divergent}{}",
-                &committed[..start],
-                &committed[end..]
-            ),
+            "a path-resolved entry",
+            &path_copy,
+            "path-dependency-leak",
+            "lockfile-stale",
         ),
     ] {
-        assert_eq!(
-            doctored.matches("name = \"dcs-core\"").count(),
-            2,
-            "the doctored lockfile does not carry two dcs-core package blocks \
-             (divergent entry {order} the real one)"
-        );
-        assert!(
-            doctored.contains(&foreign),
-            "the doctored lockfile records no foreign dcs-core source \
-             (divergent entry {order} the real one)"
-        );
-        std::fs::write(&lock, &doctored).unwrap();
+        for order in ["before", "after"] {
+            let doctored = if order == "before" {
+                format!("{extra}{block}{}{}", &committed[..start], &committed[end..])
+            } else {
+                format!("{block}{extra}{}{}", &committed[..start], &committed[end..])
+            };
+            assert_eq!(
+                doctored.matches("name = \"dcs-core\"").count(),
+                2,
+                "the doctored lockfile does not carry two dcs-core package blocks \
+                 ({label} recorded {order} the tree's own)"
+            );
+            std::fs::write(&lock, &doctored).unwrap();
 
-        let refused = Command::new("bash")
-            .arg("ci/check.sh")
-            .current_dir(&copy.dir)
-            .env("DCS_REMOTE", &copy.remote)
-            .env("DCS_RECORD_DIR", root().join("docs/releases"))
-            .env("CARGO_TARGET_DIR", copy.dir.join("target"))
-            .output()
-            .expect("ci/check.sh runs");
-        let stderr = String::from_utf8_lossy(&refused.stderr);
-        assert!(
-            !refused.status.success(),
-            "a Cargo.lock recording dcs-core at a foreign remote {order} the \
-             tree's own entry passed the check"
-        );
-        assert!(
-            stderr.contains("lockfile-stale"),
-            "a release crate recorded at two sources (divergent entry {order} \
-             the real one) was refused without its named diagnostic:\n{stderr}"
-        );
-        assert!(
-            !stderr.contains("path-dependency-leak"),
-            "a release crate recorded at two git sources reported the leak \
-             diagnostic — neither entry is a path source:\n{stderr}"
-        );
-        assert!(
-            !String::from_utf8_lossy(&refused.stdout).contains("== resolve =="),
-            "the two-source lockfile was caught only after the resolve stage \
-             re-resolved it (divergent entry {order} the real one):\n{stderr}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&lock).unwrap(),
-            doctored,
-            "the refused run repaired the two-source lockfile instead of \
-             reporting it (divergent entry {order} the real one)"
-        );
+            let refused = Command::new("bash")
+                .arg("ci/check.sh")
+                .current_dir(&copy.dir)
+                .env("DCS_REMOTE", &copy.remote)
+                .env("DCS_RECORD_DIR", root().join("docs/releases"))
+                .env("CARGO_TARGET_DIR", copy.dir.join("target"))
+                .output()
+                .expect("ci/check.sh runs");
+            let stderr = String::from_utf8_lossy(&refused.stderr);
+            assert!(
+                !refused.status.success(),
+                "a Cargo.lock recording dcs-core a second time from {label}, \
+                 {order} the tree's own entry, passed the check"
+            );
+            assert!(
+                stderr.contains(diagnostic),
+                "dcs-core recorded a second time from {label}, {order} the \
+                 tree's own entry, was refused without {diagnostic}:\n{stderr}"
+            );
+            assert!(
+                !stderr.contains(other),
+                "dcs-core recorded a second time from {label}, {order} the \
+                 tree's own entry, was refused under {other} instead:\n{stderr}"
+            );
+            assert!(
+                !String::from_utf8_lossy(&refused.stdout).contains("== resolve =="),
+                "the twice-recorded dcs-core was caught only after the resolve \
+                 stage re-resolved it ({label} recorded {order} the tree's own):\n{stderr}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&lock).unwrap(),
+                doctored,
+                "the refused run repaired the twice-recorded lockfile instead of \
+                 reporting it ({label} recorded {order} the tree's own)"
+            );
+        }
     }
 }
 

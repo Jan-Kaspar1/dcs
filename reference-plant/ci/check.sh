@@ -23,8 +23,10 @@
 #                a lockfile recorded at another revision, one
 #                missing a release crate's package block, and one
 #                carrying a release crate's block twice with the
-#                divergent entry ordered before the tree's own — must
-#                each report that diagnostic
+#                divergent entry ordered before the tree's own — a
+#                foreign remote's git entry the stale diagnostic, a
+#                path entry the leak one — must each report that
+#                diagnostic
 #                (lockfile-stale-unchecked).
 #                The stage's digest of the file is what the resolve
 #                stage re-checks, naming a rewrite the fallback fetch
@@ -410,18 +412,23 @@ if url != fetch_remote:
 # nothing is recorded, let alone a path source. A lockfile carries
 # more than one version of a crate legitimately — the resolver keeps
 # several majors, a hand-merged lockfile keeps whatever merged — so
-# every recorded entry is collected per crate and the verdict below
-# ranges over all of them: the promise holds for each entry, not only
+# every recorded entry is collected per crate and the verdicts below
+# range over all of them: each promise holds for each entry, not only
 # for whichever one the file happens to record last.
 recorded = {}
 for name, entry in re.findall(
     r'\[\[package\]\]\nname = "([^"]+)"\nversion = "[^"]+"\nsource = "([^"]+)"', lock
 ):
     recorded.setdefault(name, []).append(entry)
-present = set(re.findall(r'\[\[package\]\]\nname = "([^"]+)"', lock))
-leaked = [name for name in release if name in present and name not in recorded]
+present = re.findall(r'\[\[package\]\]\nname = "([^"]+)"', lock)
+# A crate whose blocks outnumber its recorded sources has a block with
+# no `source` line — a path into some checkout — whichever order the
+# file records its copies in, so the count carries the finding instead
+# of the mere absence of any recorded source.
+leaked = [name for name in release if present.count(name) > len(recorded.get(name, ()))]
 if leaked:
-    leak(f"release crates record no source in {lock_path} — a path into some checkout: {sorted(leaked)}")
+    leak(f"release crates record a package block with no source in {lock_path} — "
+         f"a path into some checkout: {sorted(leaked)}")
 missing = [name for name in release if name not in present]
 if missing:
     sys.exit(f"release crates missing from {lock_path}: {sorted(missing)}")
@@ -597,6 +604,40 @@ case "$out" in
 esac
 echo "  a lockfile recording a release crate at two sources refused: lockfile-stale"
 
+# The same duplicate, recorded from a checkout instead of a foreign
+# remote: the extra block carries no `source` line, which is what a
+# path-resolved crate looks like. Positional screening dropped that copy
+# whenever a git entry for the same crate followed it, so the leak
+# finding now rides on the block count. The path copy is the one ordered
+# *before* the tree's own entry here — the order a screening pass keyed
+# on the last recorded source let through. A git pin is satisfied from
+# the pinned remote only, so this one is `path-dependency-leak`, never
+# the stale diagnostic.
+LEAK_LOCK="$(mktemp)"
+python3 - Cargo.lock "$LEAK_LOCK" <<'PY'
+import re, sys
+lock, leaking = sys.argv[1], sys.argv[2]
+match = re.search(
+    r'\[\[package\]\]\nname = "dcs-core"\nversion = "[^"]+"\nsource = "[^"]+"\n',
+    open(lock).read(),
+)
+if match is None:
+    sys.exit("doctor: the committed lockfile records no dcs-core package block with a source")
+text = open(lock).read()
+doctored = text[:match.start()] + '[[package]]\nname = "dcs-core"\nversion = "0.8.0"\n' + text[match.start():]
+if len(re.findall(r'\[\[package\]\]\nname = "dcs-core"', doctored)) != 2:
+    sys.exit("doctor: the doctored lockfile does not carry two dcs-core package blocks")
+open(leaking, "w").write(doctored)
+PY
+if out="$(lockfile_check "$LEAK_LOCK" 2>&1)"; then
+    fail "lockfile-stale-unchecked: a lockfile recording a release crate from a path alongside its git entry passed the lockfile leg"
+fi
+case "$out" in
+    *"path-dependency-leak:"*) ;;
+    *) fail "lockfile-stale-unchecked: a lockfile recording a release crate from a path alongside its git entry was refused without the path-dependency-leak diagnostic: $out" ;;
+esac
+echo "  a lockfile recording a release crate from a path alongside its git entry refused: path-dependency-leak"
+
 echo "== resolve =="
 # `cargo fetch --locked` is the fast path and, with a committed
 # lockfile that satisfies the manifest, it is what makes every build
@@ -615,7 +656,7 @@ if ! cargo fetch --locked 2>"$LOCKED_ERR"; then
         fail "lockfile-stale: the committed Cargo.lock did not satisfy the declared pin — the resolve stage re-resolved it; regenerate it with \`cargo update\` (README §7)"
     fi
 fi
-rm -f "$LOCKED_ERR" "$STALE_LOCK" "$MISSING_LOCK" "$DUPLICATE_LOCK"
+rm -f "$LOCKED_ERR" "$STALE_LOCK" "$MISSING_LOCK" "$DUPLICATE_LOCK" "$LEAK_LOCK"
 
 echo "== build =="
 cargo build --quiet || {

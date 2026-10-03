@@ -176,10 +176,11 @@ commit that release names — so a fresh clone resolves it under
 name before any fetch can quietly re-resolve it. Every recorded entry
 counts: a lockfile recording a release crate at two sources is
 `lockfile-stale` whichever `[[package]]` block it orders last, so a
-foreign copy inserted ahead of the real one is caught too. A lockfile
-that records another revision is `lockfile-stale`; the documented
-remedy is `cargo update` in this tree (§7), which regenerates it
-against the pin above.
+foreign copy inserted ahead of the real one is caught too, and a copy
+recorded from a checkout instead of the pin is `path-dependency-leak`
+in either order. A lockfile that records another revision is
+`lockfile-stale`; the documented remedy is `cargo update` in this tree
+(§7), which regenerates it against the pin above.
 
 ### 3. Compose and emit
 
@@ -686,8 +687,9 @@ silently: a pin that resolves no release crates is `pin-unresolvable`;
 a committed `Cargo.lock` that records another remote, another
 `rev`/`tag`, another revision than the manifest declares, or one
 release crate at two sources is `lockfile-stale`; a release crate
-recorded from a `path` into a checkout rather than the pinned remote
-is `path-dependency-leak`;
+recorded from a `path` into a checkout rather than the pinned remote —
+including through a second `[[package]]` block beside the pinned git
+entry — is `path-dependency-leak`;
 a pin whose supported API no longer compiles your composition is
 `surface-incompatible`; a model document the release's tooling refuses
 is `tooling-rejected`; a model whose semantic content changed under a
