@@ -2,10 +2,13 @@
 //! `reference-plant/` tree in this repository is a verbatim-publishable
 //! consumer repository. This test materializes it into a scratch
 //! directory *outside* the workspace, rewrites only the dependency
-//! remote to a `file://` stand-in for the published origin — the
-//! recorded release pin untouched, with the stand-in seeded to serve
-//! it — and runs the tree's own `ci/check.sh`
-//! end to end: resolve, build, git-only lockfile sources,
+//! remote to a `file://` stand-in for the published origin — in the
+//! manifest and, with it, in the committed `Cargo.lock`, so the
+//! recorded `rev`/`tag` pin and the revision it resolves to stay
+//! exactly as shipped while the stand-in serves that very revision —
+//! and runs the tree's own `ci/check.sh`
+//! end to end: the committed lockfile's agreement with the declared
+//! pin, `cargo fetch --locked` resolving without a re-resolve,
 //! byte-identical emit against the checked-in artifacts,
 //! released-tooling acceptance — plus the contract's remaining
 //! `dcs-model` surfaces: `schema`, `interface-schema`, and
@@ -182,9 +185,10 @@
 //! two passes producing identical digests — and the `upgrade` stage,
 //! which materializes the tree at the previous release's recorded rev
 //! (seeded into the stand-in beside the tag) and repins it to the
-//! recorded release — the stand-in's tag naming the checkout's `HEAD`,
-//! the commit the release tag will be cut on — re-running the full
-//! pipeline under the repin.
+//! recorded release — the stand-in's tag naming the commit the
+//! committed `Cargo.lock` records for it, the commit the release
+//! record's `Commit` field carries — re-running the full pipeline
+//! under the repin.
 //!
 //! Run alone from a clean checkout:
 //!
@@ -207,7 +211,8 @@
 //! `managed-lifecycle-failed`/`managed-lifecycle-nondeterministic`,
 //! `event-parity-failed`/`event-parity-nondeterministic`,
 //! `commissioning-failed`/`commissioning-nondeterministic`/
-//! `commissioning-unchecked`, and the `surface-mismatch` paths
+//! `commissioning-unchecked`, `lockfile-stale`, and the
+//! `surface-mismatch` paths
 //! a drifting interface registry, a receiptless declared command, or an
 //! unobserved emitted event each produce.
 
@@ -216,7 +221,7 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use common::{CARGO, PIN_UNRESOLVABLE, head_rev, root};
+use common::{CARGO, PIN_UNRESOLVABLE, root};
 
 /// The remote the published tree records — the string the materialized
 /// copy's `Cargo.toml` rewrites to the `file://` stand-in.
@@ -316,94 +321,39 @@ fn git(dir: &Path, args: &[&str]) {
     );
 }
 
-/// The checkout worktree's delta against `HEAD` — content-changed and
-/// deleted tracked paths plus untracked files, each list NUL-split.
-/// The stand-in's tag commit overlays it so the tag names the release
-/// candidate the checkout will become, not just committed `HEAD`.
-fn worktree_delta() -> (Vec<String>, Vec<String>) {
-    let delta = |args: &[&str]| {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(root())
-            .output()
-            .expect("git runs");
-        assert!(
-            output.status.success(),
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout)
-            .unwrap()
-            .split('\0')
-            .filter(|path| !path.is_empty())
-            .map(str::to_owned)
-            .collect::<Vec<_>>()
-    };
-    let mut changed = delta(&["diff", "--name-only", "-z", "--diff-filter=d", "HEAD"]);
-    changed.extend(delta(&["ls-files", "-z", "--others", "--exclude-standard"]));
-    let deleted = delta(&["diff", "--name-only", "-z", "--diff-filter=D", "HEAD"]);
-    (changed, deleted)
-}
-
-/// Builds the release-candidate commit inside the bare remote: `head`'s
-/// tree overlaid with the checkout's uncommitted delta, so a `tag` pin
-/// serves a commit carrying this change's own release record — the
-/// tree `git show FETCH_HEAD:docs/releases/<tag>/…` reads the record
-/// artifacts out of. Objects are hashed straight into the stand-in's
-/// store; the shared checkout's store and index are never written.
-fn seed_release_commit(remote: &Path, head: &str) -> String {
-    let index = remote.join("seed-index");
-    let plumbing = |args: &[&str]| -> String {
-        // The stand-in is bare, but update-index's file forms —
-        // --force-remove for the delta's deleted paths — insist on a
-        // work tree; the checkout's tree is the one the delta was
-        // measured against, so the plumbing names it.
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(remote)
-            .env("GIT_INDEX_FILE", &index)
-            .env("GIT_WORK_TREE", root())
-            .env("GIT_AUTHOR_NAME", "reference-plant-proof")
-            .env("GIT_AUTHOR_EMAIL", "proof@example.invalid")
-            .env("GIT_AUTHOR_DATE", "@0 +0000")
-            .env("GIT_COMMITTER_NAME", "reference-plant-proof")
-            .env("GIT_COMMITTER_EMAIL", "proof@example.invalid")
-            .env("GIT_COMMITTER_DATE", "@0 +0000")
-            .output()
-            .expect("git plumbing runs");
-        assert!(
-            output.status.success(),
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout).unwrap().trim().to_owned()
-    };
-    plumbing(&["read-tree", head]);
-    let (changed, deleted) = worktree_delta();
-    for path in changed {
-        let abs = root().join(&path);
-        let blob = plumbing(&["hash-object", "-w", &abs.display().to_string()]);
-        let executable = std::fs::metadata(&abs)
-            .map(|meta| {
-                use std::os::unix::fs::PermissionsExt;
-                meta.permissions().mode() & 0o111 != 0
-            })
-            .unwrap_or(false);
-        let mode = if executable { "100755" } else { "100644" };
-        plumbing(&[
-            "update-index",
-            "--add",
-            "--cacheinfo",
-            &format!("{mode},{blob},{path}"),
-        ]);
+/// The precise revision the template's committed `Cargo.lock` records
+/// for the release crates — the commit the manifest's pin resolves to,
+/// the one `--locked` fetches, and the one a fresh clone's committed
+/// artifact must already name. Every `dcs-*` git source in the lockfile
+/// must agree on it: the check's `lockfile` stage refuses a lockfile
+/// whose release crates record more than one source.
+fn committed_lock_rev(dir: &Path) -> String {
+    let lock = std::fs::read_to_string(dir.join("Cargo.lock")).unwrap();
+    let mut revisions: Vec<String> = Vec::new();
+    for line in lock.lines() {
+        let Some(source) = line.strip_prefix("source = \"git+") else {
+            continue;
+        };
+        let Some((_, precise)) = source[..source.len() - 1].rsplit_once('#') else {
+            continue;
+        };
+        if !revisions.iter().any(|seen| seen == precise) {
+            revisions.push(precise.to_owned());
+        }
     }
-    for path in deleted {
-        plumbing(&["update-index", "--force-remove", &path]);
-    }
-    let tree = plumbing(&["write-tree"]);
-    plumbing(&["commit-tree", &tree, "-p", head, "-m", "release candidate"])
+    assert_eq!(
+        revisions.len(),
+        1,
+        "the template's Cargo.lock records no single precise revision for the release \
+         crates: {revisions:?}"
+    );
+    let precise = &revisions[0];
+    assert_eq!(
+        precise.len(),
+        40,
+        "the recorded revision is not a commit sha"
+    );
+    precise.clone()
 }
 
 /// A `file://` stand-in for the published origin: a bare repository in
@@ -415,14 +365,21 @@ fn seed_release_commit(remote: &Path, head: &str) -> String {
 /// store: the CI shards run these proofs as concurrent processes, and
 /// two fetches into one repository collide on its lock files.
 ///
-/// A `rev` pin names an existing commit and is fetched verbatim; a
-/// `tag` pin names the release tag — which the published remote does
-/// not serve until the supervisor cuts it — so the stand-in's tag names
-/// a commit synthesized from `HEAD` plus the checkout's uncommitted
-/// delta: the release-candidate commit the tag will be cut on. The
-/// `upgrade` stage's baseline — the previous release's recorded rev the
-/// check's own `DCS_UPGRADE_REV` default names — is seeded beside it so
-/// the crossing resolves.
+/// A `rev` pin names an existing commit and is fetched verbatim. A
+/// `tag` pin names the release tag — which the published remote does not
+/// serve until the supervisor cuts it — and the tag lands on the commit
+/// the template's committed `Cargo.lock` records for it, which is the
+/// release record's recorded `Commit` field. Seeding the tag there
+/// rather than at a commit synthesized from the working tree is what
+/// lets the committed lockfile take part in this proof at all: cargo
+/// fetches the locked precise revision under `--locked`, so a stand-in
+/// serving any other commit would force a re-resolve and the shipped
+/// artifact would go unexercised exactly as it did before this seed
+/// read the lockfile.
+///
+/// The `upgrade` stage's baseline — the previous release's recorded rev
+/// the check's own `DCS_UPGRADE_REV` default names — is seeded beside it
+/// so the crossing resolves.
 fn serve_pinned_rev(scratch: &Path) -> String {
     let pin = pinned_release(scratch);
     let remote = scratch.join("dcs-remote.git");
@@ -450,16 +407,16 @@ fn serve_pinned_rev(scratch: &Path) -> String {
         );
         git(&remote, &["update-ref", "refs/heads/main", &pin]);
     } else {
-        let head = head_rev();
+        let locked = committed_lock_rev(scratch);
         assert!(
-            seed(&head),
-            "{PIN_UNRESOLVABLE}: no remote could serve HEAD {head}"
+            seed(&locked),
+            "{PIN_UNRESOLVABLE}: no remote could serve the revision the committed \
+             Cargo.lock records for {pin} — {locked}"
         );
-        let candidate = seed_release_commit(&remote, &head);
-        git(&remote, &["update-ref", "refs/heads/main", &candidate]);
+        git(&remote, &["update-ref", "refs/heads/main", &locked]);
         git(
             &remote,
-            &["update-ref", &format!("refs/tags/{pin}"), &candidate],
+            &["update-ref", &format!("refs/tags/{pin}"), &locked],
         );
     }
     let upgrade_from = recorded_upgrade_from(scratch);
@@ -497,7 +454,14 @@ struct Materialized {
 
 impl Materialized {
     /// Copies the tree and rewrites only the dependency remote to the
-    /// `file://` stand-in — the release pin stays exactly as recorded.
+    /// `file://` stand-in — in the manifest *and*, with it, in the
+    /// committed `Cargo.lock`. The release pin itself is left exactly as
+    /// recorded: the same `rev`/`tag` fragment and the same resolved
+    /// revision, so `cargo metadata --locked` resolves the copy against
+    /// the stand-in without re-resolving, and the shipped lockfile's
+    /// agreement with the shipped manifest is exercised rather than
+    /// rewritten away. Rewriting only the manifest would make the two
+    /// disagree on the remote, which is itself `lockfile-stale`.
     fn new() -> Self {
         let dir = std::env::temp_dir().join(format!(
             "dcs-reference-plant-{}-{:?}",
@@ -509,13 +473,15 @@ impl Materialized {
         ));
         copy_tree(&root().join("reference-plant"), &dir);
         let remote = serve_pinned_rev(&dir);
-        let manifest = dir.join("Cargo.toml");
-        let source = std::fs::read_to_string(&manifest).unwrap();
-        assert!(
-            source.contains(PUBLISHED_REMOTE),
-            "the template no longer pins the published remote"
-        );
-        std::fs::write(&manifest, source.replace(PUBLISHED_REMOTE, &remote)).unwrap();
+        for name in ["Cargo.toml", "Cargo.lock"] {
+            let manifest = dir.join(name);
+            let source = std::fs::read_to_string(&manifest).unwrap();
+            assert!(
+                source.contains(PUBLISHED_REMOTE),
+                "the template's {name} no longer records the published remote"
+            );
+            std::fs::write(&manifest, source.replace(PUBLISHED_REMOTE, &remote)).unwrap();
+        }
         Self { dir, remote }
     }
 
@@ -545,8 +511,9 @@ impl Drop for Materialized {
 }
 
 /// The full materialization proof: the template's own clean-CI check
-/// passes green outside the workspace — git-only lockfile sources,
-/// byte-stable emit matching the checked-in artifacts, released-tooling
+/// passes green outside the workspace — a committed lockfile recording
+/// the declared pin and resolving under `--locked`, byte-stable emit
+/// matching the checked-in artifacts, released-tooling
 /// acceptance, the manifest fingerprint check, and the deterministic
 /// scripted simulation.
 #[test]
@@ -559,6 +526,27 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         output.status.success(),
         "the template's ci/check.sh failed:\nstdout:\n{stdout}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+    // The `lockfile` stage ran and held, before anything could
+    // re-resolve: the committed lockfile records the manifest's own pin
+    // at the stand-in's tag target, and the leg's doctored copy — the
+    // release crates recorded at another revision — reported
+    // `lockfile-stale` instead of passing.
+    assert!(
+        stdout.contains("== lockfile =="),
+        "the lockfile stage did not run:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("a lockfile recorded at another revision refused: lockfile-stale"),
+        "the lockfile stage's doctored case did not report its named diagnostic:\n{stdout}"
+    );
+    let lock_line = stdout
+        .lines()
+        .find(|line| line.contains("the committed Cargo.lock records"))
+        .unwrap_or_else(|| panic!("the lockfile stage reported no recorded pin:\n{stdout}"));
+    assert!(
+        lock_line.contains(&committed_lock_rev(&root().join("reference-plant"))),
+        "the lockfile stage recorded no revision the committed lockfile carries: {lock_line}"
     );
     // The surface stage ran and held: the served block-interface
     // registry covered every declared component, the kind-declared
@@ -1089,12 +1077,98 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
     }
 }
 
+/// The shipped consumer artifact resolves reproducibly, or the
+/// contract says so by name. `reference-plant/Cargo.lock` is committed
+/// so every build resolves the same sources (README §2), and the pin it
+/// records is the release record's recorded commit — so a fresh clone
+/// must resolve under `--locked` without a resolver repairing the file
+/// first. This materializes the tree with that lockfile intact and the
+/// manifest's own `tag` pin against the `file://` stand-in, which
+/// serves the tag at the very revision the lockfile records, and
+/// asserts `cargo metadata --locked` succeeds on the copy and leaves
+/// the committed lockfile byte-identical.
+///
+/// The structural half of the same gap: a lockfile recorded at another
+/// revision must be named, not absorbed. The check's `lockfile` stage
+/// runs before `resolve`, so the doctored copy is refused at once —
+/// this is the reported defect (`consumer-lockfile-stale-vs-declared-
+/// pin`: a `rev`-recorded lockfile against a `tag` pin, invisible to a
+/// consumer's CI because the resolve fallback rewrote the file before
+/// anything read it).
+#[test]
+fn the_committed_lockfile_satisfies_the_declared_pin() {
+    let copy = Materialized::new();
+    let lock = copy.dir.join("Cargo.lock");
+    let before = std::fs::read(&lock).unwrap();
+
+    let output = Command::new(CARGO)
+        .args(["metadata", "--locked", "--format-version", "1"])
+        .current_dir(&copy.dir)
+        .env("CARGO_TARGET_DIR", copy.dir.join("target"))
+        .output()
+        .expect("cargo metadata runs");
+    assert!(
+        output.status.success(),
+        "the committed Cargo.lock does not satisfy the declared pin: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read(&lock).unwrap(),
+        before,
+        "the locked resolve rewrote the committed Cargo.lock"
+    );
+
+    // The reported defect, put back: the release crates recorded at
+    // another revision's `rev` pin while the manifest declares this
+    // tree's own tag pin.
+    let pin = pinned_release(&copy.dir);
+    let precise = committed_lock_rev(&copy.dir);
+    let baseline = recorded_upgrade_from(&copy.dir);
+    let committed = std::fs::read_to_string(&lock).unwrap();
+    let stale = committed.replace(
+        &format!("?tag={pin}#{precise}"),
+        &format!("?rev={baseline}#{baseline}"),
+    );
+    assert_ne!(
+        stale, committed,
+        "the committed lockfile records no `?tag={pin}#{precise}` source to doctor"
+    );
+    std::fs::write(&lock, &stale).unwrap();
+    let refused = Command::new("bash")
+        .arg("ci/check.sh")
+        .current_dir(&copy.dir)
+        .env("DCS_REMOTE", &copy.remote)
+        .env("DCS_RECORD_DIR", root().join("docs/releases"))
+        .env("CARGO_TARGET_DIR", copy.dir.join("target"))
+        .output()
+        .expect("ci/check.sh runs");
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success(),
+        "a Cargo.lock recorded at another revision passed the check"
+    );
+    assert!(
+        stderr.contains("lockfile-stale"),
+        "a stale committed lockfile was refused without its named diagnostic:\n{stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&refused.stdout).contains("== resolve =="),
+        "the stale lockfile was caught only after the resolve stage re-resolved it:\n{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&lock).unwrap(),
+        stale,
+        "the refused run repaired the doctored lockfile instead of reporting it"
+    );
+}
+
 /// The `upgrade` stage is the executable assertion of the documented
 /// repin upgrade (README §7): under the same `file://`-remote and
 /// binary substitutions as the other stages, the stage materializes
 /// the unchanged tree at the previous release's recorded rev, repins
 /// it to the recorded release — the stand-in's tag resolving to the
-/// checkout's `HEAD` — proves the emitted `model/plant.json` is
+/// revision the committed lockfile records for it — proves the emitted
+/// `model/plant.json` is
 /// byte-identical across the repin (`emit-divergent` stands guard),
 /// re-runs the full pipeline under the repin, and refuses the named
 /// incompatible crossings — the nonexistent tag (`pin-unresolvable`)

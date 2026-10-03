@@ -17,8 +17,8 @@ diverge from the code before the tag is cut.
 
 | Field | Value |
 |---|---|
-| Tag | `v0.9.0` — *pending*: the release tag is placed on the recorded commit when the release is cut |
-| Commit | *pending* — the tagged `main` commit carrying this record, the revision this record's schemas are emitted at |
+| Tag | `v0.9.0` — *pending*: the release tag is placed on the recorded commit below when the release is cut (`git tag v0.9.0 a94a525`; the tag names this release's commit, not whatever `main` carries afterwards) |
+| Commit | `a94a525e4a75a165d4043bd1a1aa81823c16dd6d` — the `main` commit that published this release and repinned the reference plant to it, the revision this record's schemas are emitted at and the revision `reference-plant/Cargo.lock` records for the `tag = "v0.9.0"` pin. Recorded before the cut so the shipped consumer artifact names an immutable revision: the reference plant's `lockfile` stage compares the committed lockfile against this field and reports `lockfile-stale` when the two diverge, which is what a cut on any other commit must be followed by (re-record the field and regenerate the lockfile) |
 | Crate versions | `0.9.0` for every crate in the release set — one workspace version covers `dcs-build`, `dcs-core`, `dcs-model` (and the `dcs-model` / `dcs-controller` binaries built from it), `dcs-monitor` (shipping `dcs-ctl` and `dcs-alarm-report`), `dcs-plant` (`dcs-plant-server`), and `dcs-sim-net` (`dcs-plant-ctl`); the `[workspace.package]` bump lands with the cut |
 | Plant-model JSON Schema | `plant-model.schema.json` beside this record — `dcs-model schema` emitted at the recorded commit, pinned byte-for-byte with its sha256 by the schema drift test in `crates/dcs-model/tests/schema.rs`. Byte-identical to `v0.8.0`'s recorded artifact — the emission last moved with #548's declared-unit metadata, which landed on `main` while the `v0.8.0` tag was still uncut and is therefore already carried by the `v0.8.0` record's artifact set |
 | Plant-model schema sha256 | `07f9f93d1475c7bc783e99e4e7807fe5706a1549302a3701b67212bb3e793301` |
@@ -243,8 +243,11 @@ The determination:
 
 - Crates: `dcs-build = { git = "<repo>", tag = "v0.9.0" }` — or
   `rev = "<commit>"` for the identical immutable commit, the recorded
-  commit above once it is filled; `dcs-core` and `dcs-model` under the
-  same pin.
+  commit above; `dcs-core` and `dcs-model` under the same pin. The
+  reference plant's committed `Cargo.lock` records the same pin
+  resolved — `?tag=v0.9.0#a94a525e4a75a165d4043bd1a1aa81823c16dd6d`,
+  the commit this record names — so a fresh clone resolves under
+  `cargo fetch --locked`.
 - Tooling: `cargo install --git <repo> --tag v0.9.0 dcs-model
   dcs-controller dcs-plant dcs-monitor dcs-sim-net` — `dcs-monitor`
   ships `dcs-ctl` and `dcs-alarm-report`, `dcs-sim-net` ships
@@ -277,23 +280,33 @@ non-registry half:
   materializes the tree there, repins it to `v0.9.0`, and proves the
   named crossing from a baseline this tree's own source still compiles
   against.
+- The reference plant's regenerated `Cargo.lock`: the release crates
+  recorded at `version = "0.9.0"` from
+  `git+<repo>?tag=v0.9.0#a94a525e4a75a165d4043bd1a1aa81823c16dd6d`,
+  the Commit field above, so the shipped consumer artifact satisfies
+  the shipped manifest and `cargo fetch --locked` resolves it without
+  re-resolving. The record's Commit field is filled in the same step
+  for the reason the check's `lockfile` stage requires it: a lockfile
+  cannot name a tag's target before the tag exists, so the commit is
+  recorded first and the tag cut onto it.
 
 The remaining items are the release procedure's mechanical fill the
 tag's own coordinates decide, and the supervisor's publication
 operations — the fields this record still marks *pending*:
 
-- Cut `v0.9.0` on the `main` commit carrying this record once
-  `rust-proofs` is green on that exact commit; fill the Commit field
-  with the tagged sha and clear the Tag field's *pending* marker.
+- Cut `v0.9.0` on the Commit field's recorded sha (`git tag v0.9.0
+  a94a525e4a75a165d4043bd1a1aa81823c16dd6d`) once `rust-proofs` is
+  green on that exact commit, and clear the Tag field's *pending*
+  marker. The tag lands on the recorded commit, not on whatever `main`
+  carries when the cut runs: a tag on any other commit makes the
+  reference plant's committed lockfile stale against it, which the
+  consumer's own `lockfile` stage reports as `lockfile-stale`. Re-point
+  the Commit field and regenerate `reference-plant/Cargo.lock`
+  (`cargo update` in the consumer tree, README §7's documented step)
+  before re-running the check if the cut lands elsewhere.
 - Build and publish the `dcs-controller` and `dcs-plant-server`
   images; fill the two digest fields above and the Images entry under
   Consumer pins.
-- Regenerate `reference-plant/Cargo.lock` against the published tag
-  (`cargo update` in the consumer tree, README §7's documented step)
-  so the committed lockfile records the `tag = "v0.9.0"` source — the
-  lockfile cannot name the tag's target before the tag exists, so the
-  repin commit carries the previous resolution and the check's resolve
-  leg re-resolves on the first post-tag run.
 - Re-run `reference-plant/ci/check.sh` end to end against the
   published artifacts and capture its output as the release's
   consumer evidence; the legs this record's pin unblocks — the
