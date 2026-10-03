@@ -239,18 +239,47 @@ pub(crate) fn build(scratch: &Scratch) -> Result<(), String> {
 
 /// Asserts the consumer's lockfile records the release crates from the
 /// pinned git source — never a `path` source into the checkout.
+///
+/// The package *block* is the unit, not the `source`-bearing line: Cargo
+/// writes a path package with no `source` key at all, so a per-name
+/// lookup over source-bearing lines cannot see a released crate building
+/// through one, and a second record under a name stands beside the
+/// pinned one rather than instead of it. Every record of every release
+/// crate is checked.
 pub(crate) fn assert_git_sourced(scratch: &Scratch) {
     let lock = std::fs::read_to_string(scratch.dir.join("Cargo.lock")).unwrap();
+    let records: Vec<(&str, Option<&str>)> = lock
+        .split("[[package]]")
+        .skip(1)
+        .filter_map(|block| {
+            let name = block
+                .lines()
+                .find_map(|line| line.strip_prefix("name = \"")?.strip_suffix('"'))?;
+            let source = block
+                .lines()
+                .find_map(|line| line.strip_prefix("source = \"")?.strip_suffix('"'));
+            Some((name, source))
+        })
+        .collect();
     for name in ["dcs-build", "dcs-core", "dcs-model"] {
-        let section = lock
-            .split("name = \"")
-            .find(|part| part.starts_with(&format!("{name}\"")))
-            .unwrap_or_else(|| panic!("{name} missing from the consumer lockfile"));
+        let crate_records: Vec<Option<&str>> = records
+            .iter()
+            .filter(|(recorded, _)| *recorded == name)
+            .map(|(_, source)| *source)
+            .collect();
         assert!(
-            section.contains("source = \"git+file://"),
-            "{PATH_LEAK}: {name} did not resolve from the pinned git \
-             source:\n{section}"
+            !crate_records.is_empty(),
+            "{PATH_LEAK}: {name} missing from the consumer lockfile"
         );
+        // Every record under the name, not the last one: a path-sourced
+        // duplicate would otherwise pass behind the pinned record.
+        for source in crate_records {
+            assert!(
+                matches!(source, Some(source) if source.starts_with("git+file://")),
+                "{PATH_LEAK}: {name} is not recorded from the pinned git \
+                 source:\n{lock}"
+            );
+        }
     }
     assert!(
         !lock.contains("source = \"path+"),
