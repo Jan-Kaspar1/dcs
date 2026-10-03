@@ -178,6 +178,13 @@ records another revision is `lockfile-stale`; the documented remedy is
 `cargo update` in this tree (§7), which regenerates it against the pin
 above.
 
+Only the release crates' own recorded sources are read. Sources of your
+own are yours: a dependency of this plant pinned through any git remote
+records its own `?<query>#<sha>` source in `Cargo.lock` beside the three
+release crates, and the `lockfile` stage carries that source through
+unchanged — adding one is a supported consumer action, and none of that
+stage's diagnostics turn on the sources your own dependencies record.
+
 ### 3. Compose and emit
 
 Edit `src/station.rs` — site setpoints, pump count, alarm policy —

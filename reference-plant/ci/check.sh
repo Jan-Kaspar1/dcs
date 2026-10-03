@@ -13,14 +13,21 @@
 #                precise revision across all three — at the revision
 #                the declared pin names: the tag's target read back
 #                off the remote, the declared full-sha rev, or the
-#                release record's filled Commit field. Read before
+#                release record's filled Commit field. Only the three
+#                release crates' own recorded sources are read, so a
+#                consumer's own git dependency — any further
+#                `?<query>#<sha>` source — is carried by the stage
+#                rather than refused by it. Read before
 #                any fetch can rewrite the file, so a committed
 #                lockfile that no longer records the pin is reported
 #                rather than silently re-resolved
 #                (lockfile-stale); the leg's own doctored copies —
 #                a lockfile recorded at another revision and one
 #                missing a release crate's package block — must each
-#                report that diagnostic (lockfile-stale-unchecked).
+#                report that diagnostic, and one carrying a consumer's
+#                own git dependency must still pass the leg while the
+#                stale-lock doctor rewrites the release crates alone
+#                (lockfile-stale-unchecked).
 #                The stage's digest of the file is what the resolve
 #                stage re-checks, naming a rewrite the fallback fetch
 #                performs on the committed artifact.
@@ -491,22 +498,93 @@ if [ -n "$DCS_RECORD_DIR" ]; then
 fi
 lockfile_check Cargo.lock "$LOCK_RECORD"
 
+# Rewrites the release crates' own recorded git sources in $1 into $2 at
+# the baseline revision $3 — the stale-lock doctor. The rewrite is
+# scoped to the three release crates' `[[package]]` blocks: every other
+# source in the file, the consumer's own git dependency included, is
+# copied through byte-identical. The reported
+# `lockfile-doctor-aborts-on-foreign-git-sources` defect counted every
+# `?<query>#<sha>` source in the file while intending the three release
+# crates, so a consumer's own git dependency — a supported consumer
+# action, and the audience this contract's release crates serve —
+# pushed the count to four and the doctor exited nonzero; it ran as a
+# bare command under `set -euo pipefail`, so the whole check aborted
+# mid-stage with no diagnostic named, and resolve, build, tooling and
+# the pair stage never ran. Even another crate off the *same* remote
+# and the same pin stays untouched: the rewrite names the crate whose
+# own source line it replaces, never the source string alone.
+#
+# Reports the crates it doctored and the foreign git sources it left
+# alone, and exits nonzero naming its own failure — the stage turns
+# that into `lockfile-stale-unchecked` rather than letting a bare exit
+# take the rest of the check down.
+stale_lock() {
+    python3 - "$1" "$2" "$3" <<'PY'
+import re, sys
+lock, stale, baseline = sys.argv[1], sys.argv[2], sys.argv[3]
+release = ("dcs-build", "dcs-core", "dcs-model")
+text = open(lock).read()
+
+# One chunk per `[[package]]` block, the header ahead of the first, so
+# a rewrite can name the crate whose own source line it replaces.
+chunks = re.split(r"(?=\[\[package\]\]\n)", text)
+doctored, touched, foreign = [], [], []
+for chunk in chunks:
+    name = re.match(r'\[\[package\]\]\nname = "([^"]+)"\n', chunk)
+    if name is None or name.group(1) not in release:
+        # Not a release crate: carried through byte-identical, and
+        # recorded as evidence when it is a git source at all.
+        found = re.search(r'(?m)^source = "(git\+[^"]*\?[^#"]*#[0-9a-f]{40})"$', chunk)
+        if found is not None:
+            foreign.append(found.group(1))
+        doctored.append(chunk)
+        continue
+    replacement, count = re.subn(
+        r'(?m)^(source = "git\+[^"]*\?)[^#"]*#[0-9a-f]{40}"$',
+        lambda m: f'{m.group(1)}rev={baseline}#{baseline}"',
+        chunk,
+    )
+    if count != 1:
+        sys.exit(f"doctor: {name.group(1)} records no `git+…?<query>#<sha>` "
+                 f"source in {lock} to doctor")
+    touched.append(name.group(1))
+    doctored.append(replacement)
+doctored = "".join(doctored)
+if sorted(touched) != sorted(release):
+    sys.exit(f"doctor: expected the three release crates to doctor, "
+             f"rewrote {touched}")
+
+# Read the result back: the three release crates and nothing else moved.
+def sources(text):
+    return dict(re.findall(
+        r'\[\[package\]\]\nname = "([^"]+)"\nversion = "[^"]+"\nsource = "([^"]+)"', text
+    ))
+recorded, result = sources(text), sources(doctored)
+moved = [name for name, source in result.items()
+         if name not in release and recorded.get(name) != source]
+if moved:
+    sys.exit(f"doctor: rewrote a source outside the release crates: {moved}")
+absent = sorted(name for name in release if name not in result)
+if absent:
+    sys.exit(f"doctor: {absent} record no source in the doctored lockfile")
+print(f"  the stale-lock doctor rewrote {len(touched)} release-crate sources: "
+      + ", ".join(touched))
+print("  the stale-lock doctor left the other git sources untouched: "
+      + (", ".join(foreign) if foreign else "none"))
+open(stale, "w").write(doctored)
+PY
+}
+
 # The leg must report its own diagnostic — a stale lockfile is named,
 # never repaired. The doctored copy is the reported defect put back:
 # the release crates recorded at an earlier revision's `rev` pin while
 # this tree's manifest declares its own pin. It lives under the
 # scratch root, so the committed artifact stays pristine.
 STALE_LOCK="$(mktemp)"
-python3 - Cargo.lock "$STALE_LOCK" "$DCS_UPGRADE_REV" <<'PY'
-import re, sys
-lock, stale, baseline = sys.argv[1], sys.argv[2], sys.argv[3]
-doctored, count = re.subn(
-    r'\?[^#"]*#[0-9a-f]{40}"', lambda _: f'?rev={baseline}#{baseline}"', open(lock).read()
-)
-if count != 3:
-    sys.exit(f"doctor: expected three git sources to doctor, rewrote {count}")
-open(stale, "w").write(doctored)
-PY
+if ! out="$(stale_lock Cargo.lock "$STALE_LOCK" "$DCS_UPGRADE_REV" 2>&1)"; then
+    fail "lockfile-stale-unchecked: the stale-lock doctor could not rewrite the release crates' own recorded sources: $out"
+fi
+echo "$out"
 if out="$(lockfile_leg "$STALE_LOCK" 2>&1)"; then
     fail "lockfile-stale-unchecked: a lockfile recorded at another revision passed the lockfile leg"
 fi
@@ -523,7 +601,7 @@ echo "  a lockfile recorded at another revision refused: lockfile-stale"
 # diagnostic is asserted on the check's own report, not the leg's exit
 # status, so a reversion to the leak path is caught here.
 MISSING_LOCK="$(mktemp)"
-python3 - Cargo.lock "$MISSING_LOCK" <<'PY'
+if ! python3 - Cargo.lock "$MISSING_LOCK" <<'PY'
 import re, sys
 lock, missing = sys.argv[1], sys.argv[2]
 doctored, count = re.subn(
@@ -535,6 +613,9 @@ if count != 1:
     sys.exit(f"doctor: expected one dcs-core package block, rewrote {count}")
 open(missing, "w").write(doctored)
 PY
+then
+    fail "lockfile-stale-unchecked: the missing-crate doctor could not drop dcs-core's package block from Cargo.lock"
+fi
 if out="$(lockfile_check "$MISSING_LOCK" 2>&1)"; then
     fail "lockfile-stale-unchecked: a lockfile missing a release crate passed the lockfile leg"
 fi
@@ -543,6 +624,48 @@ case "$out" in
     *) fail "lockfile-stale-unchecked: a lockfile missing a release crate was refused without the lockfile-stale diagnostic: $out" ;;
 esac
 echo "  a lockfile missing a release crate refused: lockfile-stale"
+
+# A consumer's own git dependency is a supported consumer action, and
+# the lockfile stage must carry it: adding one records another
+# `?<query>#<sha>` source beside the release crates' three, and
+# nothing in this stage is about sources the manifest does not pin to
+# the released remote. The scratch copy carries one — the reported
+# reproduction's `acme-sdk` block, named once here so the stage can
+# assert the doctor hands *this* source back untouched, still carrying
+# its own `?tag=v1.2` fragment and revision rather than the baseline
+# the release crates were moved to — and the leg must accept the copy
+# while the stale-lock doctor still refuses the release crates in it.
+FOREIGN_GIT_SOURCE="git+https://git.acme.example.com/sdk/acme-sdk?tag=v1.2#0123456789abcdef0123456789abcdef01234567"
+FOREIGN_LOCK="$(mktemp)"
+FOREIGN_STALE="$(mktemp)"
+if ! python3 - Cargo.lock "$FOREIGN_LOCK" "$FOREIGN_GIT_SOURCE" <<'PY'
+import sys
+lock, foreign, source = sys.argv[1], sys.argv[2], sys.argv[3]
+open(foreign, "w").write(
+    open(lock).read()
+    + '\n[[package]]\nname = "acme-sdk"\nversion = "0.4.1"\n'
+    + f'source = "{source}"\n'
+)
+PY
+then
+    fail "lockfile-stale-unchecked: the foreign-git-source doctor could not add a consumer git dependency to the lockfile copy"
+fi
+if ! out="$(lockfile_leg "$FOREIGN_LOCK" 2>&1)"; then
+    fail "lockfile-stale-unchecked: a lockfile carrying a consumer's own git dependency was refused: $out"
+fi
+echo "  a lockfile carrying a consumer's own git dependency passed the leg"
+if ! out="$(stale_lock "$FOREIGN_LOCK" "$FOREIGN_STALE" "$DCS_UPGRADE_REV" 2>&1)"; then
+    fail "lockfile-stale-unchecked: the stale-lock doctor could not rewrite the release crates in a lockfile carrying a consumer git dependency: $out"
+fi
+echo "$out"
+case "$out" in
+    *"$FOREIGN_GIT_SOURCE"*) ;;
+    *) fail "lockfile-stale-unchecked: the stale-lock doctor rewrote the consumer's own git source instead of reporting it untouched: $out" ;;
+esac
+if out="$(lockfile_leg "$FOREIGN_STALE" 2>&1)"; then
+    fail "lockfile-stale-unchecked: the doctored release crates in a lockfile carrying a consumer git dependency passed the lockfile leg"
+fi
+echo "  the stale-lock doctor still refused the release crates beside a consumer's own git dependency: lockfile-stale"
 
 echo "== resolve =="
 # `cargo fetch --locked` is the fast path and, with a committed
@@ -562,7 +685,7 @@ if ! cargo fetch --locked 2>"$LOCKED_ERR"; then
         fail "lockfile-stale: the committed Cargo.lock did not satisfy the declared pin — the resolve stage re-resolved it; regenerate it with \`cargo update\` (README §7)"
     fi
 fi
-rm -f "$LOCKED_ERR" "$STALE_LOCK" "$MISSING_LOCK"
+rm -f "$LOCKED_ERR" "$STALE_LOCK" "$MISSING_LOCK" "$FOREIGN_LOCK" "$FOREIGN_STALE"
 
 echo "== build =="
 cargo build --quiet || {

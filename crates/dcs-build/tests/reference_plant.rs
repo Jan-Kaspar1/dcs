@@ -227,6 +227,12 @@ use common::{CARGO, PIN_UNRESOLVABLE, root};
 /// copy's `Cargo.toml` rewrites to the `file://` stand-in.
 const PUBLISHED_REMOTE: &str = "https://github.com/Jan-Kaspar1/dcs.git";
 
+/// A consumer's own git dependency as a consumer's `tag`, `rev` or
+/// `branch` pin records it in the lockfile — a fourth
+/// `?<query>#<sha>` source beside the release crates' three, which the
+/// `lockfile` stage must carry rather than abort on.
+const CONSUMER_GIT_SOURCE: &str = "git+https://git.acme.example.com/sdk/acme-sdk?tag=v1.2#0123456789abcdef0123456789abcdef01234567";
+
 /// The workspace's build target directory, resolved through cargo so a
 /// `CARGO_TARGET_DIR` override is honored.
 fn target_dir() -> PathBuf {
@@ -1224,6 +1230,130 @@ fn a_lockfile_missing_a_release_crate_reports_lockfile_stale() {
         std::fs::read_to_string(&lock).unwrap(),
         doctored,
         "the refused run repaired the doctored lockfile instead of reporting it"
+    );
+}
+
+/// A consumer's own git dependency is a supported consumer action, and
+/// the template's `lockfile` stage must carry one. The reported
+/// `lockfile-doctor-aborts-on-foreign-git-sources` defect: the
+/// stale-lock doctor rewrote git sources over the whole lockfile and
+/// asserted the count was the three release crates, while the count it
+/// took was every `?<query>#<sha>` source in the file — so a consumer
+/// adding a git dependency of their own pushed it to four and the
+/// doctor exited nonzero. It ran as a bare command under the script's
+/// `set -euo pipefail`, so the whole check aborted inside the lockfile
+/// stage with no contract diagnostic named and `resolve`, `build`,
+/// `tooling` and `pair` never ran — the one consumer this contract's
+/// release crates are shipped to could not run the check at all.
+///
+/// The reported reproduction's shape: a fourth `[[package]]` git
+/// source, `acme-sdk` pinned by `?tag=v1.2` at a precise revision,
+/// appended to the materialized lockfile. The leg must accept it — the
+/// positive leg passed, so the lockfile is healthy and the check must
+/// continue — and the stale-lock doctor must still confine its
+/// rewrite to the three release crates, reporting the consumer's own
+/// source untouched, verbatim.
+#[test]
+fn a_consumer_git_dependency_does_not_abort_the_lockfile_stage() {
+    let copy = Materialized::new();
+    let lock = copy.dir.join("Cargo.lock");
+    let committed = std::fs::read_to_string(&lock).unwrap();
+    std::fs::write(
+        &lock,
+        format!(
+            "{committed}\n[[package]]\nname = \"acme-sdk\"\nversion = \"0.4.1\"\n\
+             source = \"{CONSUMER_GIT_SOURCE}\"\n"
+        ),
+    )
+    .unwrap();
+
+    let output = Command::new("bash")
+        .arg("ci/check.sh")
+        .current_dir(&copy.dir)
+        .env("DCS_REMOTE", &copy.remote)
+        .env("DCS_RECORD_DIR", root().join("docs/releases"))
+        .env("CARGO_TARGET_DIR", copy.dir.join("target"))
+        .output()
+        .expect("ci/check.sh runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stdout.contains("== lockfile =="),
+        "the lockfile stage did not run:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    // The leg accepts a consumer's own git source: nothing in the
+    // stage is about sources the manifest does not pin to the released
+    // remote.
+    assert!(
+        stdout.contains("a lockfile carrying a consumer's own git dependency passed the leg"),
+        "the lockfile stage refused a lockfile carrying a consumer's own git \
+         dependency:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    // The reported abort: the doctor's own count came out four and the
+    // bare exit took the script down inside the stage.
+    assert!(
+        !stderr.contains("expected three git sources to doctor"),
+        "the stale-lock doctor aborted on the consumer's own git source:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("doctor:"),
+        "a lockfile doctor aborted the check without a named diagnostic:\n{stderr}"
+    );
+    // The stage ran to its end and the pipeline continued: the resolve
+    // stage is where the check goes next.
+    assert!(
+        stdout.contains("== resolve =="),
+        "the lockfile stage did not complete — the check aborted before the \
+         resolve stage:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    // The doctor rewrote the three release crates and nothing else: the
+    // consumer's own source is reported back verbatim, still carrying
+    // its own `?tag=v1.2` fragment and revision rather than the
+    // baseline the release crates were moved to.
+    let untouched: Vec<&str> = stdout
+        .lines()
+        .filter(|line| line.contains("the stale-lock doctor left the other git sources untouched"))
+        .collect();
+    assert!(
+        !untouched.is_empty(),
+        "the stale-lock doctor reported nothing about the consumer's own git source:\n{stdout}"
+    );
+    for line in untouched {
+        assert!(
+            line.contains(CONSUMER_GIT_SOURCE),
+            "the stale-lock doctor did not report the consumer's own git source \
+             verbatim: {line}"
+        );
+        assert!(
+            !line.contains("?rev="),
+            "the stale-lock doctor rewrote the consumer's own git source: {line}"
+        );
+    }
+    assert!(
+        stdout.contains(
+            "the stale-lock doctor rewrote 3 release-crate sources: \
+             dcs-build, dcs-core, dcs-model"
+        ),
+        "the stale-lock doctor did not rewrite the three release crates alone:\n{stdout}"
+    );
+    // The staged stale lockfile still names the stale pin for the
+    // release crates, beside the consumer's own untouched source — the
+    // leg's own diagnostic is reported, not the stage's doctor error.
+    assert!(
+        stdout.contains(
+            "the stale-lock doctor still refused the release crates beside a \
+             consumer's own git dependency: lockfile-stale"
+        ),
+        "the doctored release crates were not refused beside a consumer's own \
+         git source:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("a lockfile recorded at another revision refused: lockfile-stale")
+            && stdout.contains("a lockfile missing a release crate refused: lockfile-stale"),
+        "the stage's other self-checks did not report their named diagnostics \
+         beside a consumer's own git dependency:\n{stdout}"
     );
 }
 
