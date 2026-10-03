@@ -19,9 +19,13 @@
 #                lockfile that no longer records the pin is reported
 #                rather than silently re-resolved
 #                (lockfile-stale); the leg's own doctored copies —
-#                a lockfile recorded at another revision and one
-#                missing a release crate's package block — must each
-#                report that diagnostic (lockfile-stale-unchecked).
+#                a lockfile recorded at another revision, one missing
+#                a release crate's package block, and ones recording a
+#                release crate twice — a divergent `rev` record ahead
+#                of and behind the pinned block, and a path package's
+#                sourceless twin beside it — must each report their
+#                diagnostic (lockfile-stale-unchecked,
+#                path-dependency-leak-unchecked).
 #                The stage's digest of the file is what the resolve
 #                stage re-checks, naming a rewrite the fallback fetch
 #                performs on the committed artifact.
@@ -474,6 +478,65 @@ case "$out" in
 esac
 echo "  a lockfile missing a release crate refused: lockfile-stale"
 
+# The per-name map's other face: a release crate recorded twice used
+# to be screened only through whichever block sorted last —
+# `dict(re.findall())` collapsed every same-name `[[package]]` record
+# to the last match, so a second `dcs-model` block at a divergent rev
+# pin — a recording a transitive dependency can legitimately
+# introduce — passed whenever the conforming block came later (Cargo's
+# canonical order sorts `?rev=` before `?tag=`, the reported hiding
+# order), and a path package's sourceless record never entered the map
+# at all. The leg keeps every record, so the doctored copies plant the
+# divergent record ahead of and behind the pinned one — the identical
+# content must refuse in both orders — and the sourceless twin the
+# same way, each `path-dependency-leak`.
+DUP_FIRST="$(mktemp)"; DUP_LAST="$(mktemp)"; TWIN_FIRST="$(mktemp)"; TWIN_LAST="$(mktemp)"
+python3 - Cargo.lock "$DUP_FIRST" "$DUP_LAST" "$TWIN_FIRST" "$TWIN_LAST" "$DCS_UPGRADE_REV" <<'PY'
+import re, sys
+lock, first, last, twin_first, twin_last, baseline = sys.argv[1:7]
+text = open(lock).read()
+header, *blocks = re.split(r"(?m)^\[\[package\]\]\n", text)
+pinned = [i for i, block in enumerate(blocks)
+          if re.search(r'(?m)^name = "dcs-model"$', block)]
+if len(pinned) != 1:
+    sys.exit(f"doctor: expected one dcs-model package block, found {len(pinned)}")
+i = pinned[0]
+divergent, count = re.subn(
+    r'\?[^#"]*#[0-9a-f]{40}"', f'?rev={baseline}#{baseline}"', blocks[i]
+)
+if count != 1:
+    sys.exit(f"doctor: expected one git source in the dcs-model block, rewrote {count}")
+sourceless, count = re.subn(r'(?m)^source = "[^"]*"\n', "", blocks[i])
+if count != 1:
+    sys.exit(f"doctor: expected one source line in the dcs-model block, dropped {count}")
+def emit(inserted, at):
+    kept = blocks[:at] + [inserted] + blocks[at:]
+    return header + "".join(f"[[package]]\n{block}" for block in kept)
+open(first, "w").write(emit(divergent, i))
+open(last, "w").write(emit(divergent, i + 1))
+open(twin_first, "w").write(emit(sourceless, i))
+open(twin_last, "w").write(emit(sourceless, i + 1))
+PY
+for dup in "$DUP_FIRST" "$DUP_LAST"; do
+    if out="$(lockfile_leg "$dup" 2>&1)"; then
+        fail "lockfile-stale-unchecked: a lockfile recording a release crate at a second, divergent pin passed the lockfile leg"
+    fi
+    case "$out" in
+        *"different sources"*) ;;
+        *) fail "lockfile-stale-unchecked: the duplicated divergent record was refused without naming the sources: $out" ;;
+    esac
+done
+for twin in "$TWIN_FIRST" "$TWIN_LAST"; do
+    if out="$(lockfile_check "$twin" 2>&1)"; then
+        fail "path-dependency-leak-unchecked: a lockfile recording a release crate through a sourceless package block passed the check"
+    fi
+    case "$out" in
+        *"path-dependency-leak:"*) ;;
+        *) fail "path-dependency-leak-unchecked: the sourceless duplicate was refused without the path-dependency-leak diagnostic: $out" ;;
+    esac
+done
+echo "  a lockfile recording a release crate twice refused"
+
 echo "== resolve =="
 # `cargo fetch --locked` is the fast path and, with a committed
 # lockfile that satisfies the manifest, it is what makes every build
@@ -492,7 +555,7 @@ if ! cargo fetch --locked 2>"$LOCKED_ERR"; then
         fail "lockfile-stale: the committed Cargo.lock did not satisfy the declared pin — the resolve stage re-resolved it; regenerate it with \`cargo update\` (README §7)"
     fi
 fi
-rm -f "$LOCKED_ERR" "$STALE_LOCK" "$MISSING_LOCK"
+rm -f "$LOCKED_ERR" "$STALE_LOCK" "$MISSING_LOCK" "$DUP_FIRST" "$DUP_LAST" "$TWIN_FIRST" "$TWIN_LAST"
 
 echo "== build =="
 cargo build --quiet || {

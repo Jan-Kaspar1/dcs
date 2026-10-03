@@ -588,6 +588,10 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         stdout.contains("a lockfile missing a release crate refused: lockfile-stale"),
         "the lockfile stage's missing-crate doctored case did not report its named diagnostic:\n{stdout}"
     );
+    assert!(
+        stdout.contains("a lockfile recording a release crate twice refused"),
+        "the lockfile stage's duplicate-record doctored cases were not refused:\n{stdout}"
+    );
     let lock_line = stdout
         .lines()
         .find(|line| line.contains("the committed Cargo.lock records"))
@@ -1575,6 +1579,134 @@ fn a_lockfile_missing_a_release_crate_reports_lockfile_stale() {
         doctored,
         "the refused run repaired the doctored lockfile instead of reporting it"
     );
+}
+
+/// Every `[[package]]` record of a release crate is screened — the
+/// leg collects every package block as a name→source multimap, never
+/// a last-wins map.
+///
+/// The reported defect
+/// (`lockfile-leg-validates-only-last-package-block-per-name`): the
+/// leg built `dict(re.findall(...))` over name/source pairs, so every
+/// same-name record collapsed to the last match. A `dcs-model`
+/// recorded a second time at a divergent `rev` pin — a recording a
+/// transitive dependency can legitimately introduce — was refused
+/// only when it happened to sort last: divergent-first passed,
+/// divergent-last refused, identical content yielding opposite
+/// verdicts purely by block order. Cargo's canonical package order
+/// sorts `?rev=` before `?tag=`, so the hiding order is the realistic
+/// one. The doctored lockfiles plant the divergent record ahead of
+/// and behind the pinned one — both must refuse, naming the divergent
+/// sources — plus the sourceless twin (issue 1450's path-package
+/// record, which never reached the regex at all) in both positions,
+/// each on the leak exit status.
+#[test]
+fn every_record_of_a_release_crate_is_screened() {
+    let copy = Materialized::new();
+    let lock = copy.dir.join("Cargo.lock");
+    let committed = std::fs::read_to_string(&lock).unwrap();
+
+    // The leg's own verdict, run directly against each doctored copy.
+    let leg = |doctored: &str| -> Output {
+        std::fs::write(&lock, doctored).unwrap();
+        Command::new("python3")
+            .arg("ci/lockfile.py")
+            .arg("Cargo.lock")
+            .arg(&copy.remote)
+            .arg("")
+            .current_dir(&copy.dir)
+            .output()
+            .expect("python3 runs the lockfile leg")
+    };
+
+    // dcs-model's committed package block — the record a second,
+    // divergent recording duplicates.
+    let start = committed
+        .find("[[package]]\nname = \"dcs-model\"\n")
+        .expect("the committed lockfile records a dcs-model package block");
+    let end = committed[start..]
+        .find("\n[[package]]")
+        .map(|i| start + i + 1)
+        .unwrap_or(committed.len());
+    let block = &committed[start..end];
+    let source_line = block
+        .lines()
+        .find(|line| line.starts_with("source = \""))
+        .expect("dcs-model's package block records a source");
+    // The divergent recording: the same crate at another rev — the
+    // `upgrade` stage's recorded baseline — on the manifest's own
+    // remote, so only the pin disagrees.
+    let baseline = recorded_upgrade_from(&copy.dir);
+    let divergent = block.replacen(
+        source_line,
+        &format!("source = \"git+{}?rev={baseline}#{baseline}\"", copy.remote),
+        1,
+    );
+    assert_ne!(
+        divergent, block,
+        "the divergent record is indistinguishable from the committed block"
+    );
+    for (case, doctored) in [
+        (
+            "the divergent record first",
+            format!(
+                "{}{}{}",
+                &committed[..start],
+                divergent,
+                &committed[start..]
+            ),
+        ),
+        (
+            "the divergent record last",
+            format!("{}{}{}", &committed[..end], divergent, &committed[end..]),
+        ),
+    ] {
+        let output = leg(&doctored);
+        assert!(
+            !output.status.success(),
+            "{case}: a lockfile recording a release crate at a second, divergent pin \
+             passed the leg"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("different sources"),
+            "{case}: the duplicated record was refused without naming the divergent \
+             sources:\n{stderr}"
+        );
+    }
+
+    // The sourceless twin: a path package records no `source` key at
+    // all — the record that never reached the collected map under the
+    // regex. Either position is the same leak finding.
+    let sourceless = block.replacen(&format!("{source_line}\n"), "", 1);
+    assert_ne!(
+        sourceless, block,
+        "the sourceless twin is indistinguishable from the committed block"
+    );
+    for (case, doctored) in [
+        (
+            "the sourceless record first",
+            format!(
+                "{}{}{}",
+                &committed[..start],
+                sourceless,
+                &committed[start..]
+            ),
+        ),
+        (
+            "the sourceless record last",
+            format!("{}{}{}", &committed[..end], sourceless, &committed[end..]),
+        ),
+    ] {
+        let output = leg(&doctored);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{case}: a sourceless duplicate of a release crate is not the leak \
+             finding's exit status:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 /// The lockfile leg reads the manifest through `cargo metadata
