@@ -10,7 +10,9 @@
 #                git sources only, never a path into a checkout
 #                (path-dependency-leak), on the pin's own remote and
 #                the same `tag`/`rev` fragment Cargo.toml spells, one
-#                precise revision across all three — at the revision
+#                precise revision across all three and across every
+#                entry recorded for each, so a crate recorded twice
+#                is screened at both of its sources — at the revision
 #                the declared pin names: the tag's target read back
 #                off the remote, the declared full-sha rev, or the
 #                release record's filled Commit field. Read before
@@ -18,9 +20,12 @@
 #                lockfile that no longer records the pin is reported
 #                rather than silently re-resolved
 #                (lockfile-stale); the leg's own doctored copies —
-#                a lockfile recorded at another revision and one
-#                missing a release crate's package block — must each
-#                report that diagnostic (lockfile-stale-unchecked).
+#                a lockfile recorded at another revision, one
+#                missing a release crate's package block, and one
+#                carrying a release crate's block twice with the
+#                divergent entry ordered before the tree's own — must
+#                each report that diagnostic
+#                (lockfile-stale-unchecked).
 #                The stage's digest of the file is what the resolve
 #                stage re-checks, naming a rewrite the fallback fetch
 #                performs on the committed artifact.
@@ -402,10 +407,17 @@ if url != fetch_remote:
 # whose package block carries no `source` line at all resolves from a
 # path into some checkout — `path-dependency-leak`'s finding — while a
 # crate with no package block is absent entirely, `lockfile-stale`'s:
-# nothing is recorded, let alone a path source.
-recorded = dict(re.findall(
+# nothing is recorded, let alone a path source. A lockfile carries
+# more than one version of a crate legitimately — the resolver keeps
+# several majors, a hand-merged lockfile keeps whatever merged — so
+# every recorded entry is collected per crate and the verdict below
+# ranges over all of them: the promise holds for each entry, not only
+# for whichever one the file happens to record last.
+recorded = {}
+for name, entry in re.findall(
     r'\[\[package\]\]\nname = "([^"]+)"\nversion = "[^"]+"\nsource = "([^"]+)"', lock
-))
+):
+    recorded.setdefault(name, []).append(entry)
 present = set(re.findall(r'\[\[package\]\]\nname = "([^"]+)"', lock))
 leaked = [name for name in release if name in present and name not in recorded]
 if leaked:
@@ -414,11 +426,13 @@ missing = [name for name in release if name not in present]
 if missing:
     sys.exit(f"release crates missing from {lock_path}: {sorted(missing)}")
 for name in release:
-    if not recorded[name].startswith("git+"):
-        leak(f"{name} resolved from {recorded[name]} — only a git source satisfies a git pin")
-sources = {recorded[name] for name in release}
+    for entry in recorded[name]:
+        if not entry.startswith("git+"):
+            leak(f"{name} resolved from {entry} — only a git source satisfies a git pin")
+sources = {entry for name in release for entry in recorded[name]}
 if len(sources) != 1:
-    sys.exit(f"the release crates record different sources: {sorted(sources)}")
+    sys.exit("the release crates record different sources: "
+             + ", ".join(f"{name} records {sorted(set(recorded[name]))}" for name in release))
 source = sources.pop()
 prefix = f"git+{url}?{query}#"
 if not source.startswith(prefix):
@@ -544,6 +558,45 @@ case "$out" in
 esac
 echo "  a lockfile missing a release crate refused: lockfile-stale"
 
+# The one-source promise covers every recorded entry, not only the last:
+# a lockfile carrying a release crate at two sources — a second
+# `[[package]]` entry recorded from a foreign remote at another precise
+# revision — is stale whichever copy the file orders last, and the
+# doctored copy here is the reported reproduction: the divergent entry
+# comes *before* the tree's own, so a screening pass that kept only the
+# last entry per name would let it through. The foreign source is a git
+# one, so the refusal is the stale diagnostic, never the leak.
+DUPLICATE_LOCK="$(mktemp)"
+python3 - Cargo.lock "$DUPLICATE_LOCK" <<'PY'
+import re, sys
+lock, duplicate = sys.argv[1], sys.argv[2]
+foreign = "git+file:///tmp/attacker.git?tag=v0.9.0#" + "0" * 39 + "1"
+match = re.search(
+    r'\[\[package\]\]\nname = "dcs-core"\nversion = "[^"]+"\nsource = "[^"]+"\n((?:dependencies = \[[^\]]*\]\n)?)',
+    open(lock).read(),
+)
+if match is None:
+    sys.exit("doctor: the committed lockfile records no dcs-core package block with a source")
+divergent = f'[[package]]\nname = "dcs-core"\nversion = "0.8.0"\nsource = "{foreign}"\n{match.group(1)}'
+text = open(lock).read()
+doctored = text[:match.start()] + divergent + text[match.start():]
+if len(re.findall(r'\[\[package\]\]\nname = "dcs-core"', doctored)) != 2:
+    sys.exit("doctor: the doctored lockfile does not carry two dcs-core package blocks")
+open(duplicate, "w").write(doctored)
+PY
+if out="$(lockfile_check "$DUPLICATE_LOCK" 2>&1)"; then
+    fail "lockfile-stale-unchecked: a lockfile recording a release crate at two sources passed the lockfile leg"
+fi
+case "$out" in
+    *"lockfile-stale:"*) ;;
+    *) fail "lockfile-stale-unchecked: a lockfile recording a release crate at two sources was refused without the lockfile-stale diagnostic: $out" ;;
+esac
+case "$out" in
+    *"record different sources"*) ;;
+    *) fail "lockfile-stale-unchecked: the two-source lockfile was refused without naming the divergent sources: $out" ;;
+esac
+echo "  a lockfile recording a release crate at two sources refused: lockfile-stale"
+
 echo "== resolve =="
 # `cargo fetch --locked` is the fast path and, with a committed
 # lockfile that satisfies the manifest, it is what makes every build
@@ -562,7 +615,7 @@ if ! cargo fetch --locked 2>"$LOCKED_ERR"; then
         fail "lockfile-stale: the committed Cargo.lock did not satisfy the declared pin — the resolve stage re-resolved it; regenerate it with \`cargo update\` (README §7)"
     fi
 fi
-rm -f "$LOCKED_ERR" "$STALE_LOCK" "$MISSING_LOCK"
+rm -f "$LOCKED_ERR" "$STALE_LOCK" "$MISSING_LOCK" "$DUPLICATE_LOCK"
 
 echo "== build =="
 cargo build --quiet || {
