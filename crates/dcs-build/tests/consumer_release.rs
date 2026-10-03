@@ -23,8 +23,8 @@
 //! - `surface-incompatible` — the release crates resolved but the
 //!   consumer's use of the supported API fails to compile.
 //! - `path-dependency-leak` — the consumer's lockfile records a path
-//!   source for a released crate: the proof of path-free resolution
-//!   failed.
+//!   source, or none at all, for a released crate: the proof of
+//!   path-free resolution failed.
 //! - `emit-nondeterministic` — two emission runs produced different
 //!   bytes.
 //! - `tooling-rejected` — the released tooling refused the emitted
