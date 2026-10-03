@@ -1233,6 +1233,32 @@ fn a_lockfile_missing_a_release_crate_reports_lockfile_stale() {
     );
 }
 
+/// The git source the template's committed `Cargo.lock` records for the
+/// release crates — the remote, the pin fragment and the precise
+/// revision, as one string. The same string a crate off the *release*
+/// remote at the release crates' own pin would record, so a rewrite keyed
+/// on the source rather than on the crate would move it along with them.
+fn committed_release_source(dir: &Path) -> String {
+    let lock = std::fs::read_to_string(dir.join("Cargo.lock")).unwrap();
+    for block in lock.split("[[package]]\n").skip(1) {
+        let Some(name) = block.strip_prefix("name = \"") else {
+            continue;
+        };
+        let Some(name) = name.split('"').next() else {
+            continue;
+        };
+        if name != "dcs-core" {
+            continue;
+        }
+        for line in block.lines() {
+            if let Some(source) = line.strip_prefix("source = \"git+") {
+                return format!("git+{}", &source[..source.len() - 1]);
+            }
+        }
+    }
+    panic!("the template's Cargo.lock records no git source for dcs-core");
+}
+
 /// A consumer's own git dependency is a supported consumer action, and
 /// the template's `lockfile` stage must carry one. The reported
 /// `lockfile-doctor-aborts-on-foreign-git-sources` defect: the
@@ -1248,16 +1274,28 @@ fn a_lockfile_missing_a_release_crate_reports_lockfile_stale() {
 ///
 /// The reported reproduction's shape: a fourth `[[package]]` git
 /// source, `acme-sdk` pinned by `?tag=v1.2` at a precise revision,
-/// appended to the materialized lockfile. The leg must accept it — the
-/// positive leg passed, so the lockfile is healthy and the check must
-/// continue — and the stale-lock doctor must still confine its
-/// rewrite to the three release crates, reporting the consumer's own
-/// source untouched, verbatim.
+/// appended to the committed lockfile, so the positive leg over the
+/// shipped artifact reads it too. The leg must accept it — the positive
+/// leg passed in the reported run, so the lockfile is healthy and the
+/// check must continue — and the stale-lock doctor must confine its
+/// rewrite to the three release crates, reporting both of the stage's
+/// own foreign sources back verbatim: the consumer's own remote, and a
+/// crate off the release remote at the release crates' very own pin.
 #[test]
 fn a_consumer_git_dependency_does_not_abort_the_lockfile_stage() {
     let copy = Materialized::new();
     let lock = copy.dir.join("Cargo.lock");
     let committed = std::fs::read_to_string(&lock).unwrap();
+    // Read off the pristine artifact: the recorded source is what the
+    // stage's own fixture hands a *non-release* crate, and the single
+    // precise revision every `git+` source agrees on stops being single
+    // once the consumer's own source is appended.
+    let release_source = committed_release_source(&copy.dir);
+    let recorded = format!(
+        "the committed Cargo.lock records tag={} at {}",
+        pinned_release(&copy.dir),
+        committed_lock_rev(&copy.dir)
+    );
     std::fs::write(
         &lock,
         format!(
@@ -1282,13 +1320,17 @@ fn a_consumer_git_dependency_does_not_abort_the_lockfile_stage() {
         stdout.contains("== lockfile =="),
         "the lockfile stage did not run:\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    // The leg accepts a consumer's own git source: nothing in the
-    // stage is about sources the manifest does not pin to the released
-    // remote.
+    // The leg accepts a consumer's own git source: nothing in the stage
+    // is about sources the manifest does not pin to the released remote.
     assert!(
         stdout.contains("a lockfile carrying a consumer's own git dependency passed the leg"),
         "the lockfile stage refused a lockfile carrying a consumer's own git \
          dependency:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains(&recorded),
+        "the positive leg over the committed lockfile carrying the consumer's own \
+         git source did not report its own reading of the declared pin:\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     // The reported abort: the doctor's own count came out four and the
     // bare exit took the script down inside the stage.
@@ -1300,27 +1342,29 @@ fn a_consumer_git_dependency_does_not_abort_the_lockfile_stage() {
         !stderr.contains("doctor:"),
         "a lockfile doctor aborted the check without a named diagnostic:\n{stderr}"
     );
-    // The stage ran to its end and the pipeline continued: the resolve
-    // stage is where the check goes next.
+    // The stage ran to its end and the pipeline continued: the reported
+    // run never printed this banner.
     assert!(
         stdout.contains("== resolve =="),
         "the lockfile stage did not complete — the check aborted before the \
          resolve stage:\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 
-    // The doctor rewrote the three release crates and nothing else: the
-    // consumer's own source is reported back verbatim, still carrying
-    // its own `?tag=v1.2` fragment and revision rather than the
-    // baseline the release crates were moved to.
+    // The doctor rewrote the three release crates and nothing else: each
+    // foreign git source is reported back verbatim, still carrying its
+    // own `?<query>` fragment and revision rather than the baseline the
+    // release crates were moved to — the consumer's own remote and a
+    // crate off the release remote at the release crates' own pin alike,
+    // the source string a source-keyed rewrite would have moved.
     let untouched: Vec<&str> = stdout
         .lines()
         .filter(|line| line.contains("the stale-lock doctor left the other git sources untouched"))
         .collect();
     assert!(
         !untouched.is_empty(),
-        "the stale-lock doctor reported nothing about the consumer's own git source:\n{stdout}"
+        "the stale-lock doctor reported nothing about the foreign git sources:\n{stdout}"
     );
-    for line in untouched {
+    for line in &untouched {
         assert!(
             line.contains(CONSUMER_GIT_SOURCE),
             "the stale-lock doctor did not report the consumer's own git source \
@@ -1328,9 +1372,15 @@ fn a_consumer_git_dependency_does_not_abort_the_lockfile_stage() {
         );
         assert!(
             !line.contains("?rev="),
-            "the stale-lock doctor rewrote the consumer's own git source: {line}"
+            "the stale-lock doctor rewrote a foreign git source: {line}"
         );
     }
+    assert!(
+        untouched.iter().any(|line| line.contains(&release_source)),
+        "the stale-lock doctor did not report the crate off the release remote at \
+         the release crates' own pin verbatim, so nothing holds it to the three \
+         release crates alone:\n{stdout}"
+    );
     assert!(
         stdout.contains(
             "the stale-lock doctor rewrote 3 release-crate sources: \
@@ -1339,8 +1389,8 @@ fn a_consumer_git_dependency_does_not_abort_the_lockfile_stage() {
         "the stale-lock doctor did not rewrite the three release crates alone:\n{stdout}"
     );
     // The staged stale lockfile still names the stale pin for the
-    // release crates, beside the consumer's own untouched source — the
-    // leg's own diagnostic is reported, not the stage's doctor error.
+    // release crates, beside the foreign sources — the leg's own
+    // diagnostic is reported, not the stage's doctor error.
     assert!(
         stdout.contains(
             "the stale-lock doctor still refused the release crates beside a \
@@ -1355,6 +1405,27 @@ fn a_consumer_git_dependency_does_not_abort_the_lockfile_stage() {
         "the stage's other self-checks did not report their named diagnostics \
          beside a consumer's own git dependency:\n{stdout}"
     );
+
+    // The fixture's own limit, and the boundary it draws: `acme-sdk` is
+    // appended to the lockfile alone — a real consumer dependency is
+    // declared in `Cargo.toml` too, and no remote stands in for one here
+    // — so the resolve stage's documented re-resolve fallback prunes the
+    // unreferenced entry and reports *its* own named diagnostic
+    // afterwards. That is the resolve stage's finding on a lockfile that
+    // no longer satisfies the manifest; the reported defect was the
+    // lockfile stage aborting before the resolve stage was ever reached,
+    // with nothing named at all.
+    assert!(
+        !stderr.contains("lockfile-stale-unchecked"),
+        "the lockfile stage reported a self-check failure beside the consumer's own \
+         git source:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    if !output.status.success() {
+        assert!(
+            stderr.contains("lockfile-stale:"),
+            "the run failed outside a named contract diagnostic:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
 }
 
 /// The `upgrade` stage is the executable assertion of the documented

@@ -550,6 +550,9 @@ for chunk in chunks:
     touched.append(name.group(1))
     doctored.append(replacement)
 doctored = "".join(doctored)
+# The evidence names every distinct foreign git source once, whatever
+# number of blocks record it.
+foreign = list(dict.fromkeys(foreign))
 if sorted(touched) != sorted(release):
     sys.exit(f"doctor: expected the three release crates to doctor, "
              f"rewrote {touched}")
@@ -629,26 +632,40 @@ echo "  a lockfile missing a release crate refused: lockfile-stale"
 # the lockfile stage must carry it: adding one records another
 # `?<query>#<sha>` source beside the release crates' three, and
 # nothing in this stage is about sources the manifest does not pin to
-# the released remote. The scratch copy carries one — the reported
-# reproduction's `acme-sdk` block, named once here so the stage can
-# assert the doctor hands *this* source back untouched, still carrying
-# its own `?tag=v1.2` fragment and revision rather than the baseline
-# the release crates were moved to — and the leg must accept the copy
-# while the stale-lock doctor still refuses the release crates in it.
+# the released remote. The scratch copy carries two — the reported
+# reproduction's `acme-sdk` block, pinned by `?tag=v1.2` at its own
+# revision on its own remote, and `dcs-lab-kit`, a crate off the
+# *release* remote at the release crates' very own pin, the source
+# string a rewrite keyed on the source rather than on the crate would
+# have moved along with them. Both are named here so the stage can
+# assert the doctor hands *these* sources back verbatim, each still
+# carrying its own `?<query>` fragment and revision rather than the
+# baseline the release crates were moved to, while the leg accepts the
+# copy and the doctor still refuses the release crates in it.
 FOREIGN_GIT_SOURCE="git+https://git.acme.example.com/sdk/acme-sdk?tag=v1.2#0123456789abcdef0123456789abcdef01234567"
 FOREIGN_LOCK="$(mktemp)"
 FOREIGN_STALE="$(mktemp)"
-if ! python3 - Cargo.lock "$FOREIGN_LOCK" "$FOREIGN_GIT_SOURCE" <<'PY'
-import sys
+SAME_PIN_SOURCE=""
+if ! SAME_PIN_SOURCE="$(python3 - Cargo.lock "$FOREIGN_LOCK" "$FOREIGN_GIT_SOURCE" <<'PY'
+import re, sys
 lock, foreign, source = sys.argv[1], sys.argv[2], sys.argv[3]
+text = open(lock).read()
+# The release crates' own recorded source, copied for a crate that is
+# not one of them: the same remote, the same pin, the same string.
+pinned = re.search(
+    r'\[\[package\]\]\nname = "dcs-core"\nversion = "[^"]+"\nsource = "(git\+[^"]+)"', text
+).group(1)
 open(foreign, "w").write(
-    open(lock).read()
+    text
     + '\n[[package]]\nname = "acme-sdk"\nversion = "0.4.1"\n'
     + f'source = "{source}"\n'
+    + '\n[[package]]\nname = "dcs-lab-kit"\nversion = "0.1.0"\n'
+    + f'source = "{pinned}"\n'
 )
+print(pinned)
 PY
-then
-    fail "lockfile-stale-unchecked: the foreign-git-source doctor could not add a consumer git dependency to the lockfile copy"
+)"; then
+    fail "lockfile-stale-unchecked: the foreign-git-source doctor could not add the consumer's own git sources to the lockfile copy"
 fi
 if ! out="$(lockfile_leg "$FOREIGN_LOCK" 2>&1)"; then
     fail "lockfile-stale-unchecked: a lockfile carrying a consumer's own git dependency was refused: $out"
@@ -661,6 +678,10 @@ echo "$out"
 case "$out" in
     *"$FOREIGN_GIT_SOURCE"*) ;;
     *) fail "lockfile-stale-unchecked: the stale-lock doctor rewrote the consumer's own git source instead of reporting it untouched: $out" ;;
+esac
+case "$out" in
+    *"$SAME_PIN_SOURCE"*) ;;
+    *) fail "lockfile-stale-unchecked: the stale-lock doctor rewrote a crate off the release remote at the release crates' own pin instead of reporting it untouched: $out" ;;
 esac
 if out="$(lockfile_leg "$FOREIGN_STALE" 2>&1)"; then
     fail "lockfile-stale-unchecked: the doctored release crates in a lockfile carrying a consumer git dependency passed the lockfile leg"
