@@ -1195,7 +1195,7 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
         Quality::Good
     );
     assert!(
-        trace[schedule::REMOTE_LAST_UPDATE as usize + 3..schedule::REMOTE_RECOVERY as usize - 1]
+        trace[schedule::REMOTE_FIRST_STALE as usize - 1..schedule::REMOTE_RECOVERY as usize - 1]
             .iter()
             .all(
                 |row| serde_json::from_value::<Quality>(row["remote_quality"].clone()).unwrap()
@@ -1215,7 +1215,7 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
     // before the primary ever fails — and its alarm latches until the
     // scan-28 ack.
     assert!(
-        trace[schedule::REMOTE_LAST_UPDATE as usize + 3..schedule::REMOTE_RECOVERY as usize - 1]
+        trace[schedule::REMOTE_FIRST_STALE as usize - 1..schedule::REMOTE_RECOVERY as usize - 1]
             .iter()
             .all(|row| bool_of(row, "backup_unhealthy")),
         "the standby leg must annunciate while the repeater's own sample is untrusted"
