@@ -19,9 +19,13 @@
 #                lockfile that no longer records the pin is reported
 #                rather than silently re-resolved
 #                (lockfile-stale); the leg's own doctored copies —
-#                a lockfile recorded at another revision and one
-#                missing a release crate's package block — must each
-#                report that diagnostic (lockfile-stale-unchecked).
+#                a lockfile whose release crates are recorded at another
+#                revision and one missing a release crate's package
+#                block — must each report that diagnostic
+#                (lockfile-stale-unchecked). Both are doctored over the
+#                release crates' own package blocks, so a consumer tree
+#                that adds git-sourced packages of its own still runs
+#                this stage green.
 #                The stage's digest of the file is what the resolve
 #                stage re-checks, naming a rewrite the fallback fetch
 #                performs on the committed artifact.
@@ -515,16 +519,49 @@ lockfile_check Cargo.lock "$LOCK_RECORD"
 # the release crates recorded at an earlier revision's `rev` pin while
 # this tree's manifest declares its own pin. It lives under the
 # scratch root, so the committed artifact stays pristine.
+#
+# The doctor rewrites the release crates' own `[[package]]` blocks and
+# nothing else: which git-sourced packages a consumer's tree carries
+# beside them — a library of its own, another DCS crate, a transitive
+# git dependency, none, one, four — is the consumer's business, and the
+# recorded pin this self-check needs to move is the release crates' one.
+# Counting the file's git sources instead (the shape this template
+# happens to ship) made any such tree abort the whole check under
+# `set -e` before the stage could report anything named. Each release
+# crate's block is normalized onto the one stale source — the remote
+# exactly as recorded, the query fragment replaced by the baseline `rev`
+# — so a lockfile recording a release crate in a shape this doctor's
+# former `?…#…` pattern could not match (a bare `git+url#rev`) is
+# doctored like any other, and the leg's own agreement check on the
+# release crates' sources still sees one source to refuse.
 STALE_LOCK="$(mktemp)"
 python3 - Cargo.lock "$STALE_LOCK" "$DCS_UPGRADE_REV" <<'PY'
 import re, sys
 lock, stale, baseline = sys.argv[1], sys.argv[2], sys.argv[3]
-doctored, count = re.subn(
-    r'\?[^#"]*#[0-9a-f]{40}"', lambda _: f'?rev={baseline}#{baseline}"', open(lock).read()
-)
-if count != 3:
-    sys.exit(f"doctor: expected three git sources to doctor, rewrote {count}")
-open(stale, "w").write(doctored)
+release = ("dcs-build", "dcs-core", "dcs-model")
+blocks = open(lock).read().split("[[package]]")
+doctored = [blocks[0]]
+seen = set()
+for block in blocks[1:]:
+    name = re.search(r'^name = "([^"]+)"', block, re.M)
+    source = re.search(r'^source = "(git\+[^"]+)"', block, re.M)
+    if name is not None and source is not None and name.group(1) in release:
+        # Whatever the recorded source's query fragment or bare `#`
+        # carries, the block's remote is what the leg compares against.
+        url = re.sub(r"[?#].*$", "", source.group(1)[len("git+"):])
+        replacement = f'source = "git+{url}?rev={baseline}#{baseline}"'
+        block = block[:source.start()] + replacement + block[source.end():]
+        seen.add(name.group(1))
+    doctored.append(block)
+undiagnosed = [name for name in release if name not in seen]
+if undiagnosed:
+    sys.exit(f"doctor: no git source to doctor for {undiagnosed} in {lock} — "
+             "the leg above already named why")
+text = "[[package]]".join(doctored)
+if text == open(lock).read():
+    sys.exit(f"doctor: {baseline} records the pin Cargo.toml declares — "
+             "the baseline must be another revision for the doctored copy to be stale")
+open(stale, "w").write(text)
 PY
 if out="$(lockfile_leg "$STALE_LOCK" 2>&1)"; then
     fail "lockfile-stale-unchecked: a lockfile recorded at another revision passed the lockfile leg"

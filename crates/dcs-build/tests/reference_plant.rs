@@ -10,8 +10,9 @@
 //! end to end: the committed lockfile's agreement with the declared
 //! pin — every `dcs-*` record of a released crate carried by a git
 //! source, a path package's sourceless record named
-//! `path-dependency-leak` — `cargo fetch --locked` resolving without a
-//! re-resolve,
+//! `path-dependency-leak`, a consumer tree adding git-sourced packages
+//! of its own completing the stage over the same declared pin —
+//! `cargo fetch --locked` resolving without a re-resolve,
 //! byte-identical emit against the checked-in artifacts,
 //! released-tooling acceptance — plus the contract's remaining
 //! `dcs-model` surfaces: `schema`, `interface-schema`, and
@@ -310,8 +311,9 @@ fn recorded_upgrade_from(dir: &Path) -> String {
     panic!("the template's ci/check.sh records no DCS_UPGRADE_REV default");
 }
 
-/// Runs `git args` in `dir`, asserting success.
-fn git(dir: &Path, args: &[&str]) {
+/// Runs `git args` in `dir`, asserting success and returning the
+/// command's trimmed standard output.
+fn git(dir: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .args(args)
         .current_dir(dir)
@@ -323,6 +325,60 @@ fn git(dir: &Path, args: &[&str]) {
         args.join(" "),
         String::from_utf8_lossy(&output.stderr)
     );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// A consumer's own git-sourced library, published to a `file://`
+/// remote of its own in the scratch tree — the stand-in for the
+/// library a real consumer pins by git, independent of the DCS remote.
+/// The returned pair is the remote and the one commit it serves, which
+/// is what the consumer's `Cargo.toml` declares as `git = …, rev = …`.
+fn serve_consumer_library(scratch: &Path, name: &str) -> (String, String) {
+    let library = scratch.join(name);
+    std::fs::create_dir_all(library.join("src")).unwrap();
+    std::fs::write(
+        library.join("Cargo.toml"),
+        format!(
+            "\
+[package]
+name = \"{name}\"
+version = \"0.1.0\"
+edition = \"2021\"
+"
+        ),
+    )
+    .unwrap();
+    std::fs::write(library.join("src/lib.rs"), "pub fn lib() {}\n").unwrap();
+    git(&library, &["init", "--quiet"]);
+    git(&library, &["add", "-A"]);
+    // The identity is passed per command: a CI runner's global config
+    // need not carry one for the commit to be made.
+    git(
+        &library,
+        &[
+            "-c",
+            "user.email=dcs@example.invalid",
+            "-c",
+            "user.name=dcs",
+            "commit",
+            "--quiet",
+            "-m",
+            "the consumer's own library",
+        ],
+    );
+    let published = scratch.join(format!("{name}.git"));
+    git(
+        scratch,
+        &[
+            "clone",
+            "--quiet",
+            "--bare",
+            name,
+            published.to_str().unwrap(),
+        ],
+    );
+    let rev = git(&library, &["rev-parse", "HEAD"]);
+    (format!("file://{}", published.display()), rev)
 }
 
 /// The precise revision the template's committed `Cargo.lock` records
@@ -503,6 +559,28 @@ impl Materialized {
     /// must fail before its `tooling` stage resolves any binary.
     fn check_without_tooling(&self) -> Output {
         self.run(None)
+    }
+
+    /// Runs the tree's own check through its `lockfile` stage: the
+    /// materialized script is cut at the `resolve` stage's header, so
+    /// the run ends where that stage would begin — the lockfile stage's
+    /// own report is the whole assertion. The stages after it are the
+    /// pipeline's expensive half, which
+    /// `the_template_passes_its_own_clean_ci_outside_the_workspace`
+    /// proves end to end on the unmodified template.
+    fn check_through_the_lockfile_stage(&self) -> Output {
+        let check = self.dir.join("ci/check.sh");
+        let script = std::fs::read_to_string(&check).unwrap();
+        let stage = "echo \"== resolve ==\"";
+        let (head, tail) = script.split_once(stage).unwrap_or_else(|| {
+            panic!("the template's ci/check.sh records no resolve stage after the lockfile stage")
+        });
+        assert!(
+            !tail.is_empty(),
+            "the resolve stage is the last thing the template's ci/check.sh runs"
+        );
+        std::fs::write(&check, format!("{head}{stage}\n")).unwrap();
+        self.check_without_tooling()
     }
 
     fn run(&self, tools: Option<&Path>) -> Output {
@@ -1444,6 +1522,130 @@ fn a_lockfile_missing_a_release_crate_reports_lockfile_stale() {
         std::fs::read_to_string(&lock).unwrap(),
         doctored,
         "the refused run repaired the doctored lockfile instead of reporting it"
+    );
+}
+
+/// A consumer tree that adds git-sourced packages of its own still
+/// completes the `lockfile` stage.
+///
+/// The reported defect (`lockfile-doctor-aborts-on-extra-git-dep`): the
+/// stage proved its own `lockfile-stale` diagnostic by doctoring a copy
+/// of the committed lockfile through a file-wide count of `?query#sha`
+/// git sources — the template's own shape, exactly three of them. A
+/// consumer whose tree adds a fourth git-sourced package (its own
+/// library, another DCS crate, a transitive git dependency) can then
+/// never run the shipped check green: the leg holds, and the doctor
+/// aborts with `expected three git sources to doctor, rewrote 4` — an
+/// unnamed error that `set -e` turns into the whole check's failure,
+/// while the committed lockfile records the declared pin exactly as the
+/// template's own does. The same count also fired for a release crate
+/// recorded in a shape its `?…#…` pattern could not match, a bare
+/// `git+url#rev`.
+///
+/// The doctor now moves the release crates' own recorded pin and
+/// nothing else, so which git-sourced packages a consumer carries
+/// beside them is the consumer's business. This materializes the
+/// reported reproduction: a consumer library of its own, served from a
+/// remote of its own at a `rev` pin, re-resolved so the committed
+/// lockfile records it beside the three release crates, and
+/// `cargo fetch --locked` asserted to accept that file — the state a
+/// consumer's own CI reaches — before the stage is run.
+#[test]
+fn an_extra_git_sourced_package_still_completes_the_lockfile_stage() {
+    let copy = Materialized::new();
+    let lock = copy.dir.join("Cargo.lock");
+    // The pin the committed lockfile records for the release crates,
+    // read before this tree's own dependency is resolved into it.
+    let pin = pinned_release(&copy.dir);
+    let precise = committed_lock_rev(&copy.dir);
+
+    let (library_remote, library_rev) = serve_consumer_library(&copy.dir, "my-git-lib");
+    let manifest = copy.dir.join("Cargo.toml");
+    let source = std::fs::read_to_string(&manifest).unwrap();
+    let anchor = "serde_json = \"1\"\n";
+    assert!(
+        source.contains(anchor),
+        "the template's dependency anchor moved: {source}"
+    );
+    std::fs::write(
+        &manifest,
+        source.replace(
+            anchor,
+            &format!(
+                "{anchor}my-git-lib = {{ git = \"{library_remote}\", rev = \"{library_rev}\" }}\n"
+            ),
+        ),
+    )
+    .unwrap();
+
+    // Re-resolve, so the record under test exists: the consumer's own
+    // package block beside the pinned release crates.
+    let fetched = cargo_in(&copy.dir, &["fetch"]);
+    assert!(
+        fetched.status.success(),
+        "the consumer's own git dependency did not resolve: {}",
+        String::from_utf8_lossy(&fetched.stderr)
+    );
+    let recorded = std::fs::read_to_string(&lock).unwrap();
+    assert!(
+        recorded.contains(&format!(
+            "\nname = \"my-git-lib\"\nversion = \"0.1.0\"\nsource = \"git+{library_remote}?rev={library_rev}#{library_rev}\"\n"
+        )),
+        "the re-resolved lockfile records no git-sourced my-git-lib package block:\n{recorded}"
+    );
+    let git_sources = recorded
+        .lines()
+        .filter(|line| line.starts_with("source = \"git+"))
+        .count();
+    assert_eq!(
+        git_sources, 4,
+        "the reproduction records no fourth git source beside the release crates:\n{recorded}"
+    );
+    // The release crates' own records must stand: a lockfile that moved
+    // them would be `lockfile-stale` for a reason of its own.
+    assert!(
+        recorded.contains(&format!("?tag={pin}#{precise}")),
+        "the re-resolve moved the release crates off their recorded pin:\n{recorded}"
+    );
+    // The resolve stage's fast path accepts the file: the added pin is
+    // recorded, so nothing has to rewrite the committed artifact.
+    let locked = cargo_in(&copy.dir, &["fetch", "--locked"]);
+    assert!(
+        locked.status.success(),
+        "cargo fetch --locked refused a lockfile recording a consumer git dependency: {}",
+        String::from_utf8_lossy(&locked.stderr)
+    );
+
+    let completed = copy.check_through_the_lockfile_stage();
+    let stdout = String::from_utf8_lossy(&completed.stdout);
+    let stderr = String::from_utf8_lossy(&completed.stderr);
+    assert!(
+        completed.status.success(),
+        "the lockfile stage failed for a tree that adds its own git-sourced package:\n\
+         stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    for expected in [
+        "== lockfile ==",
+        "a lockfile recorded at another revision refused: lockfile-stale",
+        "a lockfile missing a release crate refused: lockfile-stale",
+        // The stage completed and the run continued: the doctor's
+        // unnamed abort is what stopped it before.
+        "== resolve ==",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "the lockfile stage reported no `{expected}` for a tree that adds its own \
+             git-sourced package:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
+    assert!(
+        !stderr.contains("doctor:"),
+        "the lockfile stage's doctor aborted on the consumer's own git sources:\n{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&lock).unwrap(),
+        recorded,
+        "the run rewrote the lockfile it accepted"
     );
 }
 

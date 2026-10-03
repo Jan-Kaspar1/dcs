@@ -353,7 +353,13 @@ tag lands on and the release record's filled `Commit` field, with
 rewriting the committed lockfile, a lockfile recorded at another
 revision — or missing a release crate's `[[package]]` block entirely,
 nothing recorded at all, which is stale rather than a leak — reporting
-`lockfile-stale`, and the reported defect put back:
+`lockfile-stale`. The stage's own doctored copies move the release
+crates' recorded pin over those crates' `[[package]]` blocks and
+nothing else, so which git-sourced packages a consumer tree carries
+beside them — its own libraries, another pinned crate, a transitive git
+dependency — is the consumer's business: such a tree, its committed
+lockfile recording the declared pin as the template's own does, still
+completes the stage green. The reported defect put back:
 a consumer crate of its own reaching a released crate through a
 `path` dependency — which the re-resolved lockfile records beside the
 pinned one, sourceless, and which `cargo fetch --locked` accepts over
