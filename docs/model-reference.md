@@ -275,19 +275,19 @@ there, and none after its first two publications.
 A budget of `0` asks for a changed report every scan — the strictest
 declaration, for sources expected to refresh every scan. The floor is a
 floor: the demonstrated period widens `0` like any other budget, so a
-declaration of zero bounds the cold start rather than overriding what
-the field has already shown. The sim bank,
-the remote plant, and the sim-bus register bank all stamp their writes
-with a device tick the driver protocols carry, so field devices
-integrated through them supply freshness evidence without protocol
-changes. A driver whose samples carry no usable freshness signal — one
-that returns a changed report every read, or one whose report never
-varies — simply makes the declaration inert or always-stale; declare
-the field only where the source distinguishes fresh samples from held
-ones, and size the budget to the reader's scan period rather than to
-the field's own step period — the arrival period covers the difference
-on a reader that paces itself, but a budget far below the demonstrated
-period is a declaration the runtime cannot honour.
+declaration of zero judges the cold start alone and defers to what the
+field has already shown from then on. The sim bank, the remote plant,
+and the sim-bus register bank all stamp their writes with a device tick
+the driver protocols carry, so field devices integrated through them
+supply freshness evidence without protocol changes. A driver whose
+samples carry no usable freshness signal — one that returns a changed
+report every read, or one whose report never varies — simply makes the
+declaration inert or always-stale; declare the field only where the
+source distinguishes fresh samples from held ones, and size the budget
+to the reader's scan period rather than to the field's own step period —
+the arrival period covers the difference on a reader that paces itself,
+but a budget far below the demonstrated period is a declaration the
+runtime cannot honour.
 
 A channel-bound `in` point that declares no budget is lint
 `field_input_without_freshness_budget`: the stale-data honesty rule

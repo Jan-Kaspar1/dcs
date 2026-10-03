@@ -453,9 +453,11 @@ struct Freshness {
 struct Arrival {
     /// The run tick of the most recent observed report change: the
     /// origin the next gap is measured from. Seeded with the run's
-    /// first observation of the point, so the very first gap spans from
-    /// there — a window that covers at least one publication period,
-    /// however the reader's start lands inside the owner's step cycle.
+    /// first observation of the point, so the first gap opens from
+    /// wherever the reader joined — short when it joined just ahead of
+    /// a publication. The gap after it runs between two consecutive
+    /// publications and is a whole period wherever the reader joined,
+    /// which is what the two-deep window beneath buys.
     last: Tick,
     /// The two most recent gaps between observed report changes, older
     /// first — the demonstrated period is the longer of the two. Two
