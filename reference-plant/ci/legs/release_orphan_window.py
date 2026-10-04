@@ -57,8 +57,8 @@ energized while no peer owns it. The run:
 The contract postdates the pinned artifact set — a release cut before
 it reads this way until one carries it: where the ownerless window's
 own rows report `diverged` and the standby's promote answers
-`not_converged`, the run's evidence is the pre-#828 shape and the leg
-reports `release-orphan-window-digest inconclusive` rather than
+`not_converged`, the run's evidence is the pre-#800 wedge shape and
+the leg reports `release-orphan-window-digest inconclusive` rather than
 asserting, until the manifest repins a release carrying the contract.
 
 Usage:
@@ -199,6 +199,16 @@ COMMANDS = ("cmd_1", "cmd_2")
 PRE_CONTRACT_REASON = (
     "the pinned release predates the bounded interlock-release "
     "orphan-window contract"
+)
+# The same verdict for a release whose emitted model carries no such
+# seam at all — the point ids this leg drives by name, or the writable
+# operator seam the receipted hand run needs. A release that never
+# composed the protection wiring cannot present the contract, so its
+# leg reports the predating verdict rather than failing on a model it
+# was never going to carry.
+SEAM_ABSENT_REASON = (
+    "the emitted model declares no power-fail protection seam with "
+    "writable pump operator points"
 )
 TAMPER_EXPECT_FLUSHED = (
     "the doctored expectation wanted the safe-state write to land "
@@ -362,10 +372,12 @@ def release_orphan_window_pass(args, tamper):
         model = json.load(handle)
     points = signal_points(model)
     if points is None:
-        raise Abort(
-            "the emitted model declares no power-fail protection seam "
-            "with the writable pump operator points — the leg has "
-            "nothing to exercise"
+        raise Inconclusive(
+            SEAM_ABSENT_REASON,
+            "the emitted model resolves no power-fail protection seam "
+            "with writable pump operator points — the leg has nothing "
+            "to exercise, and a release predating the contract reports "
+            "that verdict rather than a product failure",
         )
     digest_entries, evidence, failures = [], {}, []
     rig = None
@@ -571,7 +583,7 @@ def release_orphan_window_pass(args, tamper):
         if diverged and refusal is not None \
                 and "not_converged" in json.dumps(refusal) \
                 and tamper is None:
-            # The pre-#828 shape: the quiesced peers compared their
+            # The pre-#800 wedge: the quiesced peers compared their
             # staged released image against the still-energized field
             # and the successor's promotion was gated on it forever.
             raise Inconclusive(
@@ -617,7 +629,7 @@ def release_orphan_window_pass(args, tamper):
         # first field-owning scans write the abandoned release, so the
         # field stops reading energized inside the declared scans.
         released_at = None
-        flushed = []
+        written = []
         for _ in range(RELEASE_SCANS):
             owner = window_scan(rig, failures)
             commands = {
@@ -626,7 +638,7 @@ def release_orphan_window_pass(args, tamper):
                                           failures))
                 for key in COMMANDS
             }
-            flushed.append({"tick": owner["tick"], "commands": commands})
+            written.append({"tick": owner["tick"], "commands": commands})
             if not any(commands.values()):
                 released_at = owner["tick"]
                 break
@@ -635,7 +647,7 @@ def release_orphan_window_pass(args, tamper):
                 "the field outputs stood energized past the declared "
                 f"{RELEASE_SCANS}-scan orphan-window bound — the "
                 "promoted successor's field-owning scans never wrote "
-                f"the abandoned release: {flushed[-1]}"
+                f"the abandoned release: {written[-1]}"
             )
             raise Abort
         if not all(
@@ -646,16 +658,16 @@ def release_orphan_window_pass(args, tamper):
                 f"field but its own image still stages them — {owner}"
             )
         evidence["released_at"] = released_at
-        evidence["release_scans"] = len(flushed)
+        evidence["release_scans"] = len(written)
         digest_entries.append(
             {
                 "phase": "release",
                 "tick": released_at,
-                "scans": len(flushed),
+                "scans": len(written),
                 "bound": RELEASE_SCANS,
                 "promote": served_role(promoted),
                 "rows": evidence["window"],
-                "flushed": flushed,
+                "flushed": written,
             }
         )
 

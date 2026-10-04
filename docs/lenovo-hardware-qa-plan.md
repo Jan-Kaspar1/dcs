@@ -1753,8 +1753,10 @@ Implementation order: second, after [daily architecture review](daily-architectu
   that release abandons the in-flight write. The recorded finding left
   both pumps hand-running and energized ~1 s through the demote with
   both peers `standby`/`orphaned`, healing only when an operator promote
-  converged and wrote the safe command; #828 closed the wedge behind that
-  window, and this leg pins the bound itself.
+  converged and wrote the safe command; #800's diverged-supersede
+  amendment closed the wedge behind that window, and #828 fixes the
+  bound itself — the window must not outlive it — which this leg pins
+  per revision.
 - Each pass settles the pair on its launch layout, joins the field's
   standing writer claim under the owner's pinned `--owner-token`, hand-runs
   both pumps through the bounded receipted operator path (the four
@@ -1765,7 +1767,11 @@ Implementation order: second, after [daily architecture review](daily-architectu
   through the plant protocol's own field reads and both peers' serving
   monitors across the declared bound (`ROW_BOUND` seconds of served
   observation, polled one cadence short so an out-of-bound reading is a
-  real observation and never a measurement artefact): no peer may report
+  real observation and never a measurement artefact — twelve seconds is
+  the rig's own armed recovery budget, the tracking member's declared
+  `--auto-promote 120` heartbeat pulls at its 100 ms cadence, so the
+  leg's own promote is provably no slower than what the runtime would
+  have done unattended): no peer may report
   the promote-blocking `diverged`, the peer whose pull lands the
   ownerless line must journal `field_orphaned`, `POST /promote` must be
   answered `promoting` — never the `not_converged` refusal — and the

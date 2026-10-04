@@ -394,7 +394,7 @@ class ReleaseOrphanWindowTests(unittest.TestCase):
     driven power-fail contact raced against the demote, the sibling's
     promote flushing the abandoned release inside the declared bound,
     and the rig restored — while each doctored defect reports the named
-    diagnostic, the pre-#828 build reports inconclusive, and the
+    diagnostic, the pre-wedge build reports inconclusive, and the
     unreachable, seam-less, or unwired rig is inconclusive."""
 
     def setUp(self):
@@ -480,8 +480,9 @@ class ReleaseOrphanWindowTests(unittest.TestCase):
         self.assertEqual(200, stage['demote']['status'])
         self.assertEqual(200, stage['promote']['status'])
         self.assertIsNotNone(stage['released'])
-        self.assertIsNone(stage['restored_owner']) \
-            if stage['restored_owner'] is None else None
+        # …and the rig came back the way the leg found it: the launch
+        # owner owns the field again.
+        self.assertEqual('active', stage['restored_owner'])
 
     def test_energized_past_the_bound_reports_failed(self):
         # The issue's named doctored negative: the field outputs stay
@@ -498,7 +499,7 @@ class ReleaseOrphanWindowTests(unittest.TestCase):
     def test_wedged_promote_reports_failed(self):
         # The divergence gate refusing the successor: no `diverged` ever
         # reported, so the wedge is the contract's own failure rather
-        # than the pre-#828 build's shape.
+        # than the pre-wedge build's shape.
         self.feed.promote_wedged = True
         record = self.run_scenario()
         report.validate_scenario(record)
@@ -575,7 +576,7 @@ class ReleaseOrphanWindowTests(unittest.TestCase):
         self.assertIn('demote', record['detail'].lower())
 
     def test_pre_contract_build_reports_inconclusive(self):
-        # The pre-#828 shape: the ownerless window's rows report the
+        # The pre-contract shape: the ownerless window's rows report the
         # staged-versus-field divergence and the sibling's promote
         # answers not_converged forever.
         self.feed.diverged_rows = True

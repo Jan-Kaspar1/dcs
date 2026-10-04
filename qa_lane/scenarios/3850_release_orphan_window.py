@@ -34,19 +34,22 @@ RUNS_BEFORE = frozenset({'scenario_power_fail_trip'})
 # abandons the in-flight write: the field keeps the last energized
 # outputs while no peer owns them.
 #
-# The QA finding identities stay as recorded: #828's
-# `demote-during-interlock-release-leaves-field-energized-and-wedges-pair`
-# and its residual `demote-during-release-orphan-window`. The residual
-# had both pumps hand-running with the power-fail contact asserted stay
-# energized ~1s through the demote, both peers left
-# `standby`/`orphaned`, the pair healing only when an operator promote
-# converged and wrote the safe command. #828's fix closes the wedge
-# behind that window — the demoted owner's checkpoints stamp
-# `source_owns_field: false`, so every tracking pull lands the named
-# `orphaned` verdict (promotable on the same convergence proof
-# `tracking` stands on) instead of the staged-versus-field divergence
-# that answered `409 not_converged` forever. This leg pins the bound
-# itself: the field must never read energized past it.
+# The QA finding identities stay as recorded, each on its own ticket:
+# #800's `demote-during-interlock-release-leaves-field-energized-and-
+# wedges-pair` and, on the revision that fixed it, #828's residual
+# `demote-during-release-orphan-window`. The wedge is what #800 closed —
+# the demoted owner's checkpoints stamp `source_owns_field: false` and
+# an orphaned apply supersedes a standing divergence, so every tracking
+# pull lands the named `orphaned` verdict (promotable on the same
+# convergence proof `tracking` stands on) instead of the
+# staged-versus-field divergence that answered `409 not_converged`
+# forever. The residual the later finding recorded is the window
+# itself: both pumps hand-running with the power-fail contact asserted
+# stayed energized ~1s through the demote, both peers left
+# `standby`/`orphaned`, and the pair healed only when an operator
+# promote converged and wrote the safe command. #828 fixes that half as
+# a **bound** on the window rather than its absence — and this leg pins
+# the bound: the field must never read energized past it.
 #
 # The leg stages the finding's own sequence against the deployed rig,
 # on the pair's own field and through the pair's own control plane:
@@ -114,7 +117,7 @@ RUNS_BEFORE = frozenset({'scenario_power_fail_trip'})
 # so the promote answers `not_converged` forever and the pair stands
 # with no active able to write the release. That shape is behavioural
 # and mutually exclusive with the contract (which cannot report
-# `diverged` at all), so the leg reads it as the pre-#828 signature
+# `diverged` at all), so the leg reads it as the pre-#800 wedge
 # rather than as a failure of a rule the build never carried.
 #
 # The unchecked-diagnostic self-check replays the judge over planted
@@ -124,7 +127,15 @@ RUNS_BEFORE = frozenset({'scenario_power_fail_trip'})
 
 ROW_SETTLE = 45      # bound on the pair settling to its launch layout
 ROW_HAND = 60        # bound on both pumps' hand-run reaching the field
-ROW_BOUND = 12.0     # the declared orphan-window bound, in seconds
+# The declared orphan-window bound, in seconds of served observation.
+# Twelve seconds is this rig's own armed recovery budget — the tracking
+# member's declared `--auto-promote 120` heartbeat pulls at its 100 ms
+# cadence (the runner's `failover_misses`), every orphaned apply
+# counting one — so the leg's own promote is provably no slower than
+# the takeover the runtime would have made unattended: the bound a
+# stand-by standby clears is the window's true budget, not a number
+# this leg picked to be comfortable.
+ROW_BOUND = 12.0
 ROW_ROUNDS = 3       # answered energized rows the window spans
 ROW_POLL = 0.4       # cadence polling the field and both monitors
 ROW_RESTORE = 60     # bound on the field-state and launch-role restore
@@ -1371,8 +1382,9 @@ def scenario_release_orphan_window(ctx):
 
 
 def _row_pre_contract(record):
-    """The pre-#828 signature, read off one pass's record: the
-    ownerless window's own rows show the quiesced peers reporting
+    """The pre-contract signature, read off one pass's record — the
+    wedge #800 closed, which a build carrying the bound never presents:
+    the ownerless window's own rows show the quiesced peers reporting
     `diverged` — their staged released image against the still
     energized field — and the sibling's promote answered the
     `not_converged` refusal that verdict gates, so no controller could
@@ -1397,6 +1409,6 @@ def _row_pre_contract(record):
         return None
     return ('the ownerless window left both peers reporting the '
             'staged-versus-field divergence and the sibling\'s '
-            'promote answered not_converged — the wedge #828 closed: '
+            'promote answered not_converged — the wedge #800 closed: '
             'a staged revision predating the bounded '
             'interlock-release orphan-window contract')

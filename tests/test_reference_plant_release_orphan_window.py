@@ -17,12 +17,15 @@ predating digest line carries only the stable reason both passes share
 while a doctored case still fails, and the leg names no platform
 checkout path.
 """
+import argparse
 import contextlib
 import importlib.util
 import io
 import json
 import sys
+import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -143,6 +146,28 @@ class Declaration(unittest.TestCase):
     def test_the_predating_reason_is_one_stable_string(self):
         self.assertTrue(leg.PRE_CONTRACT_REASON.startswith(
             "the pinned release predates"))
+
+    def test_a_model_without_the_seam_reports_the_predating_verdict(self):
+        # A release whose emitted model never composed the protection
+        # wiring cannot present the contract: the leg must read that as
+        # the predating verdict, not as the product failure the
+        # contract's own diagnostic names.
+        scratch = self.enterContext(tempfile.TemporaryDirectory())
+        emitted = Path(scratch) / "plant.json"
+        emitted.write_text(json.dumps(dict(
+            _MODEL,
+            signals=[signal for signal in _MODEL["signals"]
+                     if signal["name"] != "power-fail"])))
+        args = argparse.Namespace(
+            manifest=str(_CI_DIR.parent / "deploy" / "manifest.json"),
+            model=str(emitted))
+        with unittest.mock.patch.object(
+                leg, "signal_points", return_value=None):
+            with self.assertRaises(leg.Inconclusive) as raised:
+                leg.release_orphan_window_pass(args, None)
+        self.assertEqual(leg.SEAM_ABSENT_REASON, raised.exception.args[0])
+        self.assertTrue(leg.SEAM_ABSENT_REASON.startswith(
+            "the emitted model"))
 
     def test_the_actor_is_the_leg_own_attribution(self):
         self.assertTrue(leg.ACTOR.startswith("ci-"))
