@@ -1796,5 +1796,4 @@ def variant_of(sync):
     return None
 
 
-
 __all__ = [name for name in globals() if not name.startswith('__')]
