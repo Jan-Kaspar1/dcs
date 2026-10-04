@@ -788,6 +788,19 @@ perturbed output, the promote not answering `not_converged` or handing
 the field off, the active disturbed, or the write-free control window
 not reconverging and promoting — is `divergence-missed`; two
 divergence-leg passes diverging is `divergence-nondeterministic`;
+a diverged-field wedge failing to recover — the interposer's
+preempting `claim_writer`, one field `Out` write off the staged value
+and `release_writer` not fencing the field owner in place with its
+`field_claim_lost` journaled, the survivor not serving the staged-
+versus-field verdict naming the skewed point with both sides' values,
+a promote answering anything other than the named `not_converged`, the
+released field not reporting `unclaimed` with the pair view naming the
+unclaimed-field fault, the standing un-commanded value healing behind
+the leg's back, the relaunched field owner not taking the free field
+through its conditional startup grant, its declared image not
+overwriting the un-commanded values, or the survivor not reconverging
+to `tracking` in place — is `wedge-recovery-failed`; two
+wedge-recovery passes diverging is `wedge-recovery-nondeterministic`;
 a tracking standby failing its declared-files restart — the resume
 unreported or at the wrong tick, the rejoin claiming the field, the
 reconvergence out of window, the durable boundary unordered, the
