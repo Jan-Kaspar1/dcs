@@ -169,7 +169,7 @@ _PHASE_KEYS = {
                  'landed', 'census2'),
     'restored': ('point', 'baseline', 'undriven', 'restored', 'final'),
     'pair': ('point', 'baseline', 'undriven', 'active', 'tracking',
-             'roles1', 'snaps0', 'grown', 'image'),
+             'roles1', 'snaps0', 'grown'),
 }
 
 
@@ -188,8 +188,11 @@ def _step_bound_violation(record, phase):
     (`read`/`census` after the refusals, `landed`/`census2` after the
     finite step, `restored`/`final` after the restore), and the pair's
     own posture (`active`, `tracking`, `roles1`, `snaps0`, `grown`,
-    `image`). A missing key means the phase has not reached it, which is
-    why the live clauses guard on the value being there at all."""
+    `image` — the last one judged only where it is owed: an undriven
+    driven point's image must come back, and an unanswered snapshot is
+    no image at all). A missing key means the phase has not reached it,
+    which is why the live clauses guard on the value being there at
+    all."""
     for key in _PHASE_KEYS.get(phase, ()):
         if record.get(key) is None:
             return None
@@ -321,10 +324,10 @@ def _step_bound_self_check():
     census, a driven point that moved despite the refusal, a refused
     finite step, a static follow-up tick, a poisoned post-step census, a
     refused restore, a restored point that did not return, a moved role,
-    a stalled scan, a counted refusal, and an unrestored field image —
-    and require each to trip the diagnostic its class names, while the
-    clean record trips nothing. Returns the planted case names the audit
-    let through or wrongly named."""
+    a stalled scan, a counted refusal, and an unrestored or unanswered
+    field image — and require each to trip the diagnostic its class names,
+    while the clean record trips nothing. Returns the planted case names
+    the audit let through or wrongly named."""
     baseline = {'float': 0.0}
 
     def record(**over):
@@ -422,6 +425,8 @@ def _step_bound_self_check():
          'step-bound-failed'),
         ('image-moved', 'pair', record(image={
             'points': moved(), 'io_health': {}}), 'step-bound-failed'),
+        ('image-missing', 'pair', record(image=None),
+         'step-bound-failed'),
     )
     slipped = []
     for name, phase, held, expect in plants:

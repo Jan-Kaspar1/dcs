@@ -41,7 +41,7 @@
 //!   `{"result":"stepped","tick":7}`. A negative, non-finite, or
 //!   over-bound `dt` is refused as `invalid_request` with the bound
 //!   named, never a panic. The bound is
-//!   [`dcs_sim::MAX_STEP_DT`](dcs_sim::MAX_STEP_DT) — 10<sup>6</sup>
+//!   [`dcs_sim::MAX_STEP_DT`](dcs_sim::MAX_STEP_DT) — 10^6
 //!   time units per plant tick, five orders of magnitude above any scan
 //!   period a control run paces itself at. A *finite* huge `dt` is
 //!   protocol-legal JSON the request boundary cannot reject as

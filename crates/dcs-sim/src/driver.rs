@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 
 /// The largest simulated-time advance one plant tick may request:
-/// 10<sup>6</sup> time units per [`SimDriver::step`] — about 11.6 days.
+/// 10^6 time units per [`SimDriver::step`] — about 11.6 days.
 ///
 /// A step's `dt` is one scan period: the controller's `--scan-ms`
 /// (milliseconds) or its `--dt` (seconds of simulated process time

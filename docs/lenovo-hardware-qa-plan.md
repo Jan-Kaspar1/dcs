@@ -1715,8 +1715,9 @@ Implementation order: second, after [daily architecture review](daily-architectu
   answered off-contract rather than the named bound refusal, a refused
   step that moved the driven point or the census, a `{"float":null}`
   frame on the driven point or anywhere in the census, a finite step
-  refused after the refusals, a baseline that never restored, a moved
-  role, or a stalled scan) and `step-bound-nondeterministic` (a
+  refused after the refusals, a baseline that never restored — or no
+  served image of it at all — a moved role, or a stalled scan) and
+  `step-bound-nondeterministic` (a
   refusal whose stored value moved, or a finite step whose tick never
   advanced past the pre-probe canary), with the self-check's
   `step-bound-unchecked` covering every planted negative — the

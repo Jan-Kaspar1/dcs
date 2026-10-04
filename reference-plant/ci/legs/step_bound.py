@@ -9,7 +9,7 @@ step-bound scenario leg covering the #683 fix's contract.
 The pair leg (`ci/legs/pair.py`) proves the manifest-declared pair runs
 and switches; this leg proves the plant's step-bound contract on the
 same declared deployment. A step's `dt` is one scan period, and the
-field bounds it at `MAX_STEP_DT` (10<sup>6</sup> time units per plant
+field bounds it at `MAX_STEP_DT` (10^6 time units per plant
 tick). The QA finding's reproduction is the shape no request boundary
 could refuse on its own: `1e308` is a finite `f64`, so strict JSON
 carries it and the decoder reads it — only the *bound* names it. Before
