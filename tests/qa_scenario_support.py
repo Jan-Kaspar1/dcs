@@ -1460,10 +1460,14 @@ class DivergencePair:
     record, `promote_admits` admits the refused promotion, `no_fenced`
     never demotes the preempted owner, `orphan_immediately` serves the
     orphan verdict from the first read, `no_resolution` journals no
-    divergence_resolved, `no_unclaimed` never lets the field report
-    unclaimed, `never_heals` leaves the relaunched owner unable to
-    take the field, and `lie` serves a report with no fault where the
-    leg asserts one.
+    divergence_resolved, `hide_resolutions` serves the resolution
+    records nowhere, `duplicate_resolutions` journals the resolution
+    twice — a flap — and `bad_resolution_evidence` records one whose
+    compared rows name no matching pair of values,
+    `no_unclaimed` never lets the field report unclaimed,
+    `never_heals` leaves the relaunched owner unable to take the
+    field, and `lie` serves a report with no fault where the leg
+    asserts one.
     """
 
     POINT = 200
@@ -1499,6 +1503,8 @@ class DivergencePair:
         self.always_tracking = False
         self.no_resolution = False
         self.hide_resolutions = False
+        self.duplicate_resolutions = False
+        self.bad_resolution_evidence = False
         self.clears_on_fault = False
         self.no_unclaimed = False
         self.never_heals = False
@@ -1591,10 +1597,23 @@ class DivergencePair:
         elif variant != 'diverged' and self.was_diverged:
             self.was_diverged = False
             if not self.no_journal and not self.no_resolution:
+                compared = [{'point': self.POINT,
+                             'staged': self.STAGED,
+                             'field': self.STAGED}]
+                if self.bad_resolution_evidence:
+                    # A resolution whose compared evidence names no
+                    # matching pair of values — the audit trail that
+                    # cannot say what the comparison saw.
+                    compared = [{'point': self.POINT,
+                                 'staged': self.STAGED,
+                                 'field': {'bool': not self.STAGED['bool']}}]
                 self._record(name, 'divergence_resolved',
-                             {'compared': [{'point': self.POINT,
-                                            'staged': self.STAGED,
-                                            'field': self.STAGED}]})
+                             {'compared': compared})
+                if self.duplicate_resolutions:
+                    # A flap: the same resolution journaled again, the
+                    # record no leg may leave behind.
+                    self._record(name, 'divergence_resolved',
+                                 {'compared': compared})
 
     # -- the served reports ----------------------------------------
     def report(self, name):

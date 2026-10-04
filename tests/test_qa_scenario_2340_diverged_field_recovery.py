@@ -37,6 +37,11 @@ EXPECTED_CASES = frozenset({
     'DivergedFieldRecoveryTests.test_lost_uncommanded_value_reports_failed',
     'DivergedFieldRecoveryTests.test_never_healed_reports_failed',
     'DivergedFieldRecoveryTests.test_unreconverged_peer_reports_failed',
+    'DivergedFieldRecoveryTests.test_the_diverged_verdict_journals_one_'
+    'resolution',
+    'DivergedFieldRecoveryTests.test_flapped_resolution_reports_failed',
+    'DivergedFieldRecoveryTests.test_unmatched_resolution_evidence_'
+    'reports_failed',
     'DivergedFieldRecoveryTests.test_refused_claim_reports_inconclusive',
     'DivergedFieldRecoveryTests.test_missing_lifecycle_seam_reports_inconclusive',
 })
@@ -76,7 +81,7 @@ class WedgeHarness(unittest.TestCase):
         self.addCleanup(clock.stop)
         defaults = {'WEDGE_SETTLE': 2, 'WEDGE_DEADLINE': 2,
                     'WEDGE_POLL': 0.001, 'WEDGE_RECOVER': 2,
-                    'WEDGE_HEAL': 2, 'WEDGE_RESTORE': 2}
+                    'WEDGE_HEAL': 2}
         for key, value in defaults.items():
             seamer = patch.object(scenarios, key, value)
             seamer.start()
@@ -325,6 +330,48 @@ class DivergedFieldRecoveryTests(WedgeHarness):
         record = self._run()
         self.assertEqual(record['outcome'], 'failed')
         self.assertIn('never reconverged', record['detail'])
+
+    def test_the_diverged_verdict_journals_one_resolution(self):
+        # The finding's audit clause: a survivor that stood `diverged`
+        # resolves through exactly one journaled divergence_resolved
+        # carrying the compared point with both sides' values. The
+        # clean run above covers the other branch of the rule — the
+        # `orphaned` verdict superseding the divergence, where no
+        # resolution record is owed.
+        self.pair.diverge_survivor = True
+        record = self._run()
+        self.assertEqual(record['outcome'], 'passed',
+                         json.dumps(record.get('detail'))[:400])
+        payload = json.loads(self._path(
+            'evidence/wedge-recovery-reconverged.json').read_text())
+        self.assertEqual(len(payload['detections']), 1, payload)
+        self.assertEqual(len(payload['resolutions']), 1, payload)
+        self.assertEqual(
+            payload['resolutions'][0][1]['compared'],
+            [{'point': DivergencePair.POINT,
+              'staged': DivergencePair.STAGED,
+              'field': DivergencePair.STAGED}])
+
+    def test_flapped_resolution_reports_failed(self):
+        # A `diverged` survivor — the comparison convicting the skew
+        # before the demoted source's stamp supersedes it — resolves
+        # through exactly one journaled record: the same resolution
+        # journaled twice is a flap the recovery must not leave behind.
+        self.pair.diverge_survivor = True
+        self.pair.duplicate_resolutions = True
+        record = self._run()
+        self.assertEqual(record['outcome'], 'failed')
+        self.assertIn('resolves the wedge at most once', record['detail'])
+
+    def test_unmatched_resolution_evidence_reports_failed(self):
+        # A divergence_resolved record whose compared rows name no
+        # matching pair of values cannot say what the comparison saw —
+        # the reconvergence it claims left no usable evidence.
+        self.pair.diverge_survivor = True
+        self.pair.bad_resolution_evidence = True
+        record = self._run()
+        self.assertEqual(record['outcome'], 'failed')
+        self.assertIn('compared evidence', record['detail'])
 
     def test_refused_claim_reports_inconclusive(self):
         self.plant.rogue_token = scenarios.WEDGE_FOREIGN

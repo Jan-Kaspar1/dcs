@@ -1676,8 +1676,18 @@ Implementation order: second, after [daily architecture review](daily-architectu
   is its second: a fresh active whose conditional startup grant takes
   the free field, whose declared image overwrites the un-commanded
   actuation, and after which the survivor's next same-tick comparison
-  clears it to `tracking` in place with a journaled
-  `divergence_resolved`. The pair's launch roles restore either way.
+  clears it to `tracking` in place. Both legs then audit the record
+  that reconvergence owes: the transition into the served un-converged
+  verdict journals once — exactly once in the consumer leg, whose scan
+  order puts the comparison convicting it inside the one window where
+  it is reachable, and at most once in the rig leg, which grades
+  whichever named verdict the contract serves — and a standing
+  `Diverged` verdict resolves exactly once, carrying every compared
+  field `Out` point with both sides' values. Zero resolutions is the
+  honest count where the demoted source's stamp superseded the
+  divergence and the survivor reconverged through the ordinary pull,
+  and a flap is refused either way. The pair's launch roles restore
+  either way.
   The gate is graded on *every* peer while the interposer's claim
   still stands — the reproduction's "every promote refused" clause:
   the convergence gate answers a `diverged` peer with

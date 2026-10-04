@@ -574,13 +574,14 @@ def wedge_recovery_run(args, declared, point, tamper, failures):
         survivor_name = rig.standby_decl["name"]
         refusals = refuse_promotes({owner_name: duty_url}, failures)
         gate = refuse_promotes({survivor_name: standby_url}, failures)
-        for _name, (_status, refused, verdict) in sorted(gate.items()):
+        for _name, (_status, _refused, verdict) in sorted(gate.items()):
+            carried = refusal_sync(gate[_name][1])
             if verdict == "not_converged" \
                     and divergence.diverged_mismatches(
-                        {"sync": refusal_sync(refused)}) != want:
+                        {"sync": carried}) != want:
                 failures.append(
                     f"the surviving peer's refusal carries "
-                    f"{refusal_sync(refused)} — a not_converged answer "
+                    f"{carried} — a not_converged answer "
                     f"must carry the diverged report naming point "
                     f"{point}"
                 )
@@ -594,8 +595,11 @@ def wedge_recovery_run(args, declared, point, tamper, failures):
                 "mismatches": divergence.diverged_mismatches(report),
                 "detections": len(detections),
                 "refusals": {
-                    url: [status, verdict]
-                    for url, (status, _refused, verdict) in
+                    # The manifest's peer names, never the served URLs:
+                    # those carry ephemeral loopback ports and would
+                    # churn the digest between two passes.
+                    name: [status, verdict]
+                    for name, (status, _refused, verdict) in
                     sorted({**refusals, **gate}.items())
                 },
             }

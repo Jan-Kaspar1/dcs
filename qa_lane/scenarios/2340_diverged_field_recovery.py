@@ -52,6 +52,14 @@ RUNS_BEFORE = frozenset({'scenario_claim_reclaim'})
 #   the role, so the leg reads the skewed point off the plant's own
 #   census before and after and requires the declared image to
 #   overwrite it.
+# - the audit the recovery owes. The transition into the served
+#   un-converged verdict journals once, and a standing `Diverged`
+#   verdict resolves once, carrying every compared field `Out` point
+#   with both sides' values. Where the demoted source's stamp
+#   superseded the divergence with the promotable `orphaned` verdict
+#   the peer reconverged through the ordinary pull and no resolution
+#   record is owed, so the leg reads zero as the honest count there
+#   and one as the audited one, and refuses a flap either way.
 #
 # The gate is graded on *every* peer while the interposer's claim
 # still stands, the reproduction's "every promote refused" clause: the
@@ -80,7 +88,6 @@ WEDGE_DEADLINE = 60  # bound on the wedge's served verdicts landing
 WEDGE_POLL = 0.5     # cadence watching the wedge's served surface
 WEDGE_RECOVER = 60   # bound on the relaunched owner settling active
 WEDGE_HEAL = 90      # bound on the survivor's reconvergence
-WEDGE_RESTORE = 60   # bound on the launch-role restore
 # The interposer's claim token — a different owner than either peer
 # pins, so the unconditional `claim_writer` preempts the field
 # owner's standing claim the finding's reproduction recorded.
@@ -228,35 +235,6 @@ def _await(ctx, names, match, bound, interval=WEDGE_POLL):
     return wait_for(hit, time.monotonic() + bound, interval=interval)
 
 
-def _tracking(ctx, name):
-    """The endpoint's report while it is a tracking standby, else
-    None."""
-    report = _try_role(ctx, ctx[name])
-    if report is not None and report.get('role') == 'standby' \
-            and _sync_kind(report) == 'tracking':
-        return report
-    return None
-
-
-def _restore_roles(ctx, from_name, to_name):
-    """The documented demote/promote order putting the pre-scenario
-    role assignment back."""
-    deadline = time.monotonic() + WEDGE_RESTORE
-    while time.monotonic() < deadline:
-        try:
-            if _pair_active(ctx) == to_name \
-                    and _tracking(ctx, from_name) is not None:
-                return True
-            if _pair_active(ctx) == from_name:
-                _settle_call(ctx[from_name] + '/demote')
-            elif _tracking(ctx, to_name) is not None:
-                _settle_call(ctx[to_name] + '/promote')
-        except Exception:
-            pass
-        time.sleep(WEDGE_POLL)
-    return False
-
-
 def scenario_diverged_field_recovery(ctx):
     """Wedge the field unclaimed and un-commanded, read the served
     surface it leaves, and prove the recorded restart-as-active
@@ -283,8 +261,9 @@ def scenario_diverged_field_recovery(ctx):
                 'whose conditional startup grant takes the free field, '
                 'its declared image overwrites the un-commanded value, '
                 'exactly one peer reports active, and the survivor '
-                'reconverges to tracking in place before the launch '
-                'roles restore')
+                'reconverges to tracking in place with its transition '
+                'into the wedge journed once and the resolution '
+                'audited before the launch roles restore')
     stream = None
     restore_point = None
     restore_value = None
@@ -621,6 +600,48 @@ def scenario_diverged_field_recovery(ctx):
                 'recovery must heal the pair in place')
         resolutions = _journal_events(ctx[survivor], 'divergence_resolved')
         detections = _journal_events(ctx[survivor], 'divergence_detected')
+        # The audit the recovery owes: the transition into the served
+        # un-converged verdict journals once, and a standing `Diverged`
+        # verdict resolves exactly once, carrying every compared field
+        # `Out` point with both sides' values. Where the demoted source's
+        # stamp superseded the divergence with decision 87's promotable
+        # `orphaned` verdict, the peer reconverged through the ordinary
+        # pull and no resolution record is owed — so zero is the honest
+        # count there and one is the audited one, and more than one is a
+        # flap the recovery must not leave behind either way.
+        if detections is None or resolutions is None:
+            return case.finish(
+                'inconclusive',
+                'the survivor\'s served journal could not be read after '
+                'the recovery — its divergence records have no surface to '
+                'grade')
+        if len(detections) > 1:
+            return case.finish(
+                'failed',
+                'wedge-recovery-failed: the survivor\'s journal carries '
+                + str(len(detections)) + ' divergence_detected records '
+                + json.dumps(detections)[:300] + ' — the transition into '
+                  'the verdict journals once')
+        if len(resolutions) > 1:
+            return case.finish(
+                'failed',
+                'wedge-recovery-failed: the survivor\'s journal carries '
+                + str(len(resolutions)) + ' divergence_resolved records '
+                + json.dumps(resolutions)[:300] + ' — the recovery '
+                  'resolves the wedge at most once')
+        compared = (resolutions[0][1] or {}).get('compared') if resolutions \
+            else None
+        if resolutions and (not compared
+                            or not all(isinstance(row.get('point'), int)
+                                       and row.get('staged')
+                                       == row.get('field')
+                                       for row in compared)):
+            return case.finish(
+                'failed',
+                'wedge-recovery-failed: the divergence_resolved record\'s '
+                'compared evidence ' + json.dumps(compared)[:400] + ' — it '
+                'must carry every compared field point with both sides\' '
+                'values equal')
         # The wedge's evidence: how long the field stood unclaimed and
         # un-commanded, and the actuation value it held across it.
         wedge_seconds = round(time.monotonic() - wedged_at, 3)
