@@ -209,7 +209,7 @@ class Registration(unittest.TestCase):
         }
         record = discovered["cause_alarm_quality.py"]
         self.assertEqual(record["stem"], "cause-alarm-quality")
-        self.assertEqual(record["order"], 840)
+        self.assertEqual(record["order"], 860)
         self.assertEqual(record["title"],
                          "the quality-aware cause-alarm leg")
         self.assertEqual(record["passes"], "cause-alarm-quality")
