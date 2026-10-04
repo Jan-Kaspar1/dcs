@@ -10,7 +10,10 @@
 //! end to end: the committed lockfile's agreement with the declared
 //! pin — every `dcs-*` record of a released crate carried by a git
 //! source, a path package's sourceless record named
-//! `path-dependency-leak` — `cargo fetch --locked` resolving without a
+//! `path-dependency-leak`, and a tag re-pointed after the cut with
+//! the lockfile regenerated to follow it named `lockfile-stale`
+//! against the release record's `Commit` field — `cargo fetch
+//! --locked` resolving without a
 //! re-resolve,
 //! byte-identical emit against the checked-in artifacts,
 //! released-tooling acceptance — plus the contract's remaining
@@ -294,6 +297,19 @@ fn pinned_release(dir: &Path) -> String {
     panic!("the template's Cargo.toml records no release pin");
 }
 
+/// The release the template's deployment manifest declares — the
+/// `docs/releases/<tag>/` record directory the check fetches its
+/// record artifacts from.
+fn declared_release(dir: &Path) -> String {
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("deploy/manifest.json")).unwrap())
+            .expect("deploy/manifest.json is JSON");
+    manifest["dcs_release"]
+        .as_str()
+        .expect("deploy/manifest.json records no dcs_release")
+        .to_owned()
+}
+
 /// The `DCS_UPGRADE_REV` default the tree's own `ci/check.sh` records —
 /// the previous release's recorded rev the `upgrade` stage materializes
 /// its baseline at.
@@ -496,23 +512,33 @@ impl Materialized {
     /// rev — so the stage proves the real named crossing onto the pin's
     /// release; the stand-in serves both ends of it.
     fn check(&self, tools: &Path) -> Output {
-        self.run(Some(tools))
+        self.run(Some(tools), true)
     }
 
     /// The same run without the tooling substitution, for a check that
     /// must fail before its `tooling` stage resolves any binary.
     fn check_without_tooling(&self) -> Output {
-        self.run(None)
+        self.run(None, true)
     }
 
-    fn run(&self, tools: Option<&Path>) -> Output {
+    /// The shipped configuration: the remote substitution a consumer's
+    /// own CI makes and nothing else — never the workspace proof's
+    /// `DCS_RECORD_DIR` record tree, so the release record the check
+    /// reads is the one it fetches itself at the pinned rev.
+    fn check_shipped(&self) -> Output {
+        self.run(None, false)
+    }
+
+    fn run(&self, tools: Option<&Path>, record_dir: bool) -> Output {
         let mut check = Command::new("bash");
         check
             .arg("ci/check.sh")
             .current_dir(&self.dir)
             .env("DCS_REMOTE", &self.remote)
-            .env("DCS_RECORD_DIR", root().join("docs/releases"))
             .env("CARGO_TARGET_DIR", self.dir.join("target"));
+        if record_dir {
+            check.env("DCS_RECORD_DIR", root().join("docs/releases"));
+        }
         if let Some(tools) = tools {
             check.env("DCS_TOOLS", tools);
         }
@@ -1211,6 +1237,150 @@ fn the_committed_lockfile_satisfies_the_declared_pin() {
         std::fs::read_to_string(&lock).unwrap(),
         stale,
         "the refused run repaired the doctored lockfile instead of reporting it"
+    );
+}
+
+/// A release tag re-pointed after the cut is the tamper the record's
+/// `Commit` field exists to detect: a lockfile regenerated to follow
+/// the moved tag satisfies every leg the tag's own target answers —
+/// the manifest's `tag` query still matches, and the remote's served
+/// target still equals the recorded revision — so only the record
+/// still naming the commit the release was cut on calls the
+/// divergence out. The reported defect
+/// (`lockfile-record-commit-check-unreachable-in-consumer-path`):
+/// that comparison was wired only into the workspace proof's
+/// `DCS_RECORD_DIR` substitution, which a consumer running the
+/// template's own CI never makes — the shipped check fetched the
+/// record tree for its schema artifacts and never fed `record.md` to
+/// the leg.
+///
+/// The reproduction is the reported one: the stand-in's tag is
+/// re-pointed at a commit whose release record still names the tag's
+/// original target in its `Commit` field — the record as a post-cut
+/// descendant carries it — the committed lockfile is rewritten to
+/// record the new target exactly as `cargo update` would have, and
+/// the shipped configuration — `DCS_REMOTE` and nothing else — must
+/// report `lockfile-stale` naming the record's commit.
+#[test]
+fn a_repointed_release_tag_reports_lockfile_stale() {
+    let copy = Materialized::new();
+    let pin = pinned_release(&copy.dir);
+    let precise = committed_lock_rev(&copy.dir);
+
+    // The moved tag's target: a child of the tag's original target
+    // whose only change fills the release record's `Commit` field with
+    // that original sha — so the crate trees the lockfile resolves
+    // stay the original commit's, and every leg but the record's
+    // Commit-field comparison still answers green.
+    git(
+        &copy.dir,
+        &[
+            "clone",
+            "--quiet",
+            "--branch",
+            "main",
+            &copy.remote,
+            "moved-tag",
+        ],
+    );
+    let work = copy.dir.join("moved-tag");
+    let record_path = work
+        .join("docs/releases")
+        .join(declared_release(&copy.dir))
+        .join("record.md");
+    let contents = std::fs::read_to_string(&record_path).unwrap();
+    let filled = if contents.contains(&format!("| Commit | `{precise}`")) {
+        contents
+    } else {
+        let edited = contents.replacen(
+            "| Commit | *pending*",
+            &format!("| Commit | `{precise}`"),
+            1,
+        );
+        assert_ne!(
+            edited, contents,
+            "the record's Commit field is neither `{precise}` nor a pending \
+             field this test can fill"
+        );
+        edited
+    };
+    std::fs::write(&record_path, &filled).unwrap();
+    git(&work, &["add", "-A"]);
+    git(
+        &work,
+        &[
+            "-c",
+            "user.name=dcs-ci",
+            "-c",
+            "user.email=dcs-ci@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "re-point the release record",
+        ],
+    );
+    let moved = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&work)
+            .output()
+            .expect("git rev-parse runs")
+            .stdout,
+    )
+    .expect("git rev-parse answers utf8")
+    .trim()
+    .to_owned();
+    git(
+        &work,
+        &[
+            "push",
+            "--quiet",
+            "--force",
+            "origin",
+            &format!("HEAD:refs/tags/{pin}"),
+        ],
+    );
+
+    // The lockfile regenerated to follow the moved tag: every release
+    // crate's record now names the tag's new target, exactly what
+    // `cargo update` against the re-pointed ref would write.
+    let lock = copy.dir.join("Cargo.lock");
+    let committed = std::fs::read_to_string(&lock).unwrap();
+    let regenerated = committed.replace(
+        &format!("?tag={pin}#{precise}"),
+        &format!("?tag={pin}#{moved}"),
+    );
+    assert_ne!(
+        regenerated, committed,
+        "the committed lockfile records no `?tag={pin}#{precise}` source to regenerate"
+    );
+    std::fs::write(&lock, &regenerated).unwrap();
+
+    let refused = copy.check_shipped();
+    let stdout = String::from_utf8_lossy(&refused.stdout);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success(),
+        "a Cargo.lock regenerated to a re-pointed release tag passed the \
+         shipped check:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("lockfile-stale"),
+        "the re-pointed tag was refused without its named diagnostic:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("records commit {precise}")),
+        "the refusal did not name the release record's Commit field as the \
+         divergence:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("== resolve =="),
+        "the record-commit divergence was caught only after the resolve stage:\n{stdout}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&lock).unwrap(),
+        regenerated,
+        "the refused run repaired the regenerated lockfile instead of reporting it"
     );
 }
 

@@ -586,13 +586,20 @@ class LagStagingTests(unittest.TestCase):
         self.assertEqual(
             order.index(scenarios.scenario_peer_announce) + 1,
             order.index(scenarios.scenario_demote_forged_standby_source))
+        # The announced-source-verify leg shares the forged-standby
+        # leg's announced-only window: the same unconfigured field
+        # owner, the same stopped tracking peer, the same restored
+        # launch roles.
+        self.assertEqual(
+            order.index(scenarios.scenario_demote_forged_standby_source)
+            + 1,
+            order.index(scenarios.scenario_announced_source_verify))
         # The stale-island leg's driven third controller shares the
         # same restored window and still clears before the tune case's
         # a->b switch — the journal-boundary flood and suspended-alias
         # legs run between them in the same launch-layout window.
         self.assertEqual(
-            order.index(scenarios.scenario_demote_forged_standby_source)
-            + 1,
+            order.index(scenarios.scenario_announced_source_verify) + 1,
             order.index(scenarios.scenario_stale_island_resolution))
         self.assertEqual(
             order.index(scenarios.scenario_stale_island_resolution)

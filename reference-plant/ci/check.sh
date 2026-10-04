@@ -14,10 +14,12 @@
 #                precise revision across all three — at the revision
 #                the declared pin names: the tag's target read back
 #                off the remote, the declared full-sha rev, or the
-#                release record's filled Commit field. Read before
-#                any fetch can rewrite the file, so a committed
-#                lockfile that no longer records the pin is reported
-#                rather than silently re-resolved
+#                release record's filled Commit field — the record
+#                fetched at the pinned rev through the same remote, or
+#                the substituted tree under DCS_RECORD_DIR. Read
+#                before any resolve can rewrite the file, so a
+#                committed lockfile that no longer records the pin is
+#                reported rather than silently re-resolved
 #                (lockfile-stale); the leg's own doctored copies —
 #                a lockfile recorded at another revision, one missing
 #                a release crate's package block, and ones recording a
@@ -254,8 +256,9 @@
 #                mechanism — into a scratch root.
 #   DCS_RECORD_DIR
 #                a directory holding the release record tree
-#                (`docs/releases/<tag>/…`) the schema-drift leg
-#                compares the tooling's emissions against. When unset
+#                (`docs/releases/<tag>/…`) the lockfile stage's
+#                Commit-field leg and the tooling stage's schema-drift
+#                legs compare against. When unset
 #                — the contract's own shape — the record is fetched
 #                from $DCS_REMOTE at $DCS_REV. The workspace-side
 #                proof substitutes the checkout's own docs/releases:
@@ -372,8 +375,10 @@ PY
 # a leaked path source.
 # $1 is the lockfile to read: `Cargo.lock` itself in the positive
 # leg, a doctored scratch copy in the self-check below; $2 is the
-# release record's `record.md` when one was substituted, else the
-# empty string. Exit status 2 is a release crate recorded from a
+# release record's `record.md` — the fetched record in the contract's
+# own shape, the substituted one under DCS_RECORD_DIR, or the empty
+# string in the doctored legs that prove the other diagnostics. Exit
+# status 2 is a release crate recorded from a
 # non-git source or from no source at all — a `path` package into some
 # checkout carries neither, and is `path-dependency-leak`'s finding —
 # and 1 every other disagreement, `lockfile-stale`'s.
@@ -402,11 +407,32 @@ echo "== lockfile =="
 # byte-identical, so the documented re-resolve fallback cannot absorb
 # a stale artifact.
 LOCK_DIGEST="$(sha256sum Cargo.lock | cut -d' ' -f1)"
-LOCK_RECORD=""
-if [ -n "$DCS_RECORD_DIR" ]; then
-    DCS_RELEASE="$(python3 -c 'import json; print(json.load(open("deploy/manifest.json"))["dcs_release"])')"
-    [ -f "$DCS_RECORD_DIR/$DCS_RELEASE/record.md" ] \
-        && LOCK_RECORD="$DCS_RECORD_DIR/$DCS_RELEASE/record.md"
+# The release record's `record.md` — the Commit-field comparison's
+# comparator. A tag re-pointed after the cut with the committed
+# lockfile regenerated to follow it answers every other leg: the
+# manifest's `tag` query still matches and the remote's served target
+# still equals the recorded revision — only the record still names
+# the commit the release was cut on. The record lives on the same
+# remote the pins resolve from, fetched once here at the pinned rev
+# through the contract's own mechanism — a consumer's own CI runs
+# exactly this path, never the workspace-side proof's DCS_RECORD_DIR
+# substitution — so the comparison holds in the shipped check. The
+# tooling stage reuses this fetch's FETCH_HEAD for the schema
+# artifacts it pins the tooling's emissions against.
+SCRATCH="$(mktemp -d)"
+DCS_RELEASE="$(python3 -c 'import json; print(json.load(open("deploy/manifest.json"))["dcs_release"])')"
+git -C "$SCRATCH" init -q -b main
+git -C "$SCRATCH" fetch --depth 1 --quiet "$DCS_REMOTE" "$DCS_REV" \
+    || fail "pin-unresolvable: the pinned rev $DCS_REV could not be fetched for the release record"
+LOCK_RECORD="$SCRATCH/record.md"
+git -C "$SCRATCH" show "FETCH_HEAD:docs/releases/$DCS_RELEASE/record.md" \
+    > "$LOCK_RECORD" \
+    || fail "pin-unresolvable: the pinned rev serves no docs/releases/$DCS_RELEASE/record.md"
+if [ -n "$DCS_RECORD_DIR" ] && [ -f "$DCS_RECORD_DIR/$DCS_RELEASE/record.md" ]; then
+    # The workspace-side proof's substitution stands in for the
+    # fetched record; the fetch above still proved the record stays
+    # reachable at the pinned rev through the consumer mechanism.
+    LOCK_RECORD="$DCS_RECORD_DIR/$DCS_RELEASE/record.md"
 fi
 lockfile_check Cargo.lock "$LOCK_RECORD"
 
@@ -605,15 +631,11 @@ fi
 echo "  validate, lint, --check, and --check-dynamics accept the checked-in documents"
 
 # The release record's schema artifacts: `docs/releases/<tag>/` lives
-# in the same repository the crate and tooling pins resolve from, so
-# the record is fetched through the same mechanism — the pinned
-# revision's git remote. The manifest's `dcs_release` names the record
-# directory; the files are read out of the fetched commit's tree.
-SCRATCH="$(mktemp -d)"
-DCS_RELEASE="$(python3 -c 'import json; print(json.load(open("deploy/manifest.json"))["dcs_release"])')"
-git -C "$SCRATCH" init -q -b main
-git -C "$SCRATCH" fetch --depth 1 --quiet "$DCS_REMOTE" "$DCS_REV" \
-    || fail "pin-unresolvable: the pinned rev $DCS_REV could not be fetched for the release record"
+# in the same repository the crate and tooling pins resolve from, and
+# the lockfile stage already fetched the record tree at the pinned
+# rev — FETCH_HEAD still names it — so the files are read out of the
+# fetched commit's tree. The manifest's `dcs_release` names the record
+# directory.
 RECORD="$SCRATCH/record"
 mkdir -p "$RECORD"
 RECORD_ARTIFACTS="block-interfaces.schema.json plant-model.schema.json deploy-manifest.schema.json dynamics.schema.json"
@@ -625,8 +647,8 @@ done
 if [ -n "$DCS_RECORD_DIR" ]; then
     # The workspace-side proof's tooling stand-ins emit the checkout's
     # schemas, so the checkout's own record tree is the comparator;
-    # the fetch above still proves the record stays fetchable at the
-    # pinned rev through the consumer mechanism.
+    # the lockfile stage's fetch still proves the record stays
+    # fetchable at the pinned rev through the consumer mechanism.
     for artifact in $RECORD_ARTIFACTS; do
         cp "$DCS_RECORD_DIR/$DCS_RELEASE/$artifact" "$RECORD/$artifact" \
             || fail "record-missing: $DCS_RECORD_DIR serves no $DCS_RELEASE/$artifact"
