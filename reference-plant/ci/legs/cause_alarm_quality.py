@@ -94,7 +94,7 @@ import simulate
 # standing through the trip — each must surface the named diagnostic
 # rather than passing silently.
 LEG = {
-    "order": 860,
+    "order": 870,
     "title": "the quality-aware cause-alarm leg",
     "passes": "cause-alarm-quality",
     "tampers": [
