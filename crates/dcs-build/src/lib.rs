@@ -156,6 +156,7 @@ pub mod dosing;
 pub mod dynamics;
 mod endpoint;
 pub mod ethercat;
+pub mod filter_bank;
 pub mod ijmuiden;
 mod spec;
 pub mod specs;

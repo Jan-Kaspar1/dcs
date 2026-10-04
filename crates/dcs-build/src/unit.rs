@@ -47,6 +47,18 @@ pub const G: &str = "g";
 pub const MG_PER_L: &str = "mg/L";
 /// Metres — a level or length.
 pub const M: &str = "m";
+/// Nephelometric turbidity units — the effluent-turbidity scale the
+/// declared 0.3 NTU per-filter and 1 NTU shutdown tiers are expressed
+/// in.
+pub const NTU: &str = "NTU";
+/// Kilopascals — the aeration discharge-header pressure the
+/// `header-coordinator`'s set-point and bounds are expressed in.
+pub const KPA: &str = "kPa";
+/// Standard-state cubic metres per hour — the aeration train's airflow
+/// demand, measurement, and totalization unit.
+pub const SM3_PER_H: &str = "sm3/h";
+/// Standard-state cubic metres — a totalized airflow.
+pub const SM3: &str = "sm3";
 /// Metres per second — a velocity.
 pub const M_PER_S: &str = "m/s";
 /// Milliamps — an analog raw-range unit, as a 4–20 mA loop.
