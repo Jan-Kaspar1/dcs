@@ -9493,6 +9493,98 @@ mod tests {
         assert_eq!(Clocked::count(&standby.checkpoint()), Value::Int(7));
     }
 
+    /// QA finding `divergent-settled-receipts-oscillate-flooding-journal`
+    /// — the arbitration half, on two `Peer`s: the pair's fence window
+    /// left the *same admission* settled at one submission index to two
+    /// different terminal verdicts, one per line, and adoption answered
+    /// last-pull-wins. Two peers then tracking each other handed the
+    /// index back and forth on every adoption — the served receipt log
+    /// flapping and each flip another `command_settled` line in the
+    /// durable journal, unbounded until a promotion ended it.
+    ///
+    /// The contract the fix establishes: a settled receipt's adoption is
+    /// idempotent or arbitrated. Alternating mutual adoption converges
+    /// both lines on one verdict in a single round, the converged index
+    /// never moves again, and the admission count never grows — so the
+    /// journal has one settle transition per admission to record, not
+    /// one per adoption.
+    #[test]
+    fn divergent_settled_receipts_converge_instead_of_ping_ponging() {
+        let owner_driver = StubDriver::field(&[]);
+        let owner_gate = WriteGate::closed(&owner_driver);
+        let mut owner = Peer::active(Clocked::executor(&owner_gate), Some(&owner_gate));
+        owner.activate().unwrap();
+        owner.scan();
+
+        // The sibling follows the owner and holds the admission still
+        // pending when the promotion boundary pulls it.
+        let sibling_driver = StubDriver::field(&[]);
+        let sibling_gate = WriteGate::closed(&sibling_driver);
+        let mut sibling = Peer::standby(Clocked::executor(&sibling_gate), Some(&sibling_gate));
+        sibling.apply(&owner.checkpoint()).unwrap();
+
+        // The finding's reproduction, post-quiesced-apply: the
+        // boundary pull carries the still-`Accepted` admission onto the
+        // successor, and the fenced owner then settles the same
+        // admission at its own boundary. The successor's run clock has
+        // run ahead — a quiesced standby's scans tick its own clock —
+        // so the boundary pull meets a checkpoint stale by that clock
+        // and carries the admission rather than adopting it, and the
+        // two lines settle the one submission at their own ticks.
+        sibling.scan();
+        sibling.scan();
+        owner.submit_command(Clocked::bump(3));
+        sibling.final_sync(|| Ok(owner.checkpoint()));
+        assert!(matches!(
+            sibling.receipts()[0].outcome,
+            CommandOutcome::Accepted { .. }
+        ));
+        sibling.promote().unwrap();
+        sibling.scan();
+        owner.scan();
+        assert_eq!(
+            sibling.receipts()[0].outcome,
+            CommandOutcome::Applied { tick: Tick(4) },
+            "the promoted peer settles the carried copy at its own",
+        );
+        assert_eq!(
+            owner.receipts()[0].outcome,
+            CommandOutcome::Applied { tick: Tick(2) },
+            "the fenced owner settles at its own boundary",
+        );
+        assert_ne!(owner.receipts(), sibling.receipts(), "the pair contradicts");
+
+        // Dual-standby: the demote left both lines tracking, so each
+        // adoption window hands the peer's log to the other.
+        owner.demote().unwrap();
+        sibling.demote().unwrap();
+        for round in 0..4 {
+            owner.apply(&sibling.checkpoint()).unwrap();
+            sibling.apply(&owner.checkpoint()).unwrap();
+            assert_eq!(
+                owner.receipts(),
+                sibling.receipts(),
+                "the pair must converge in round {round}",
+            );
+            assert_eq!(
+                owner.receipts().len(),
+                1,
+                "convergence mints no second receipt — round {round}",
+            );
+        }
+        // The earlier settlement is the pair's arbitrated verdict, and
+        // the count of admissions never moved: the audit the peer
+        // serves is one receipt per submission, whatever the pair did.
+        assert_eq!(
+            owner.receipts()[0].outcome,
+            CommandOutcome::Applied { tick: Tick(2) }
+        );
+        assert_eq!(owner.receipt_base(), 0);
+        assert_eq!(sibling.receipt_base(), 0);
+        assert_eq!(owner.checkpoint().command_admission.attempts, 1);
+        assert_eq!(sibling.checkpoint().command_admission.attempts, 1);
+    }
+
     #[test]
     fn a_promoted_peers_emitted_events_continue_the_sequence() {
         // Identical per-peer streams, then the promoted run's own
