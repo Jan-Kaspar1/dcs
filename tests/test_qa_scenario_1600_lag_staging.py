@@ -564,7 +564,9 @@ class LagStagingTests(unittest.TestCase):
         # repromote-suspended-settle legs share the same restored
         # window and still run ahead of the tune case's a->b switch —
         # the quiesced-standby settle leg runs between standby-loss
-        # and demote-settle in that same launch-layout window.
+        # and demote-settle, and the settled-receipt-arbitration leg
+        # between repromote-suspended-settle and peer-announce, in
+        # that same launch-layout window.
         self.assertEqual(
             order.index(scenarios.scenario_standby_loss) + 1,
             order.index(scenarios.scenario_quiesced_standby_settle))
@@ -581,6 +583,10 @@ class LagStagingTests(unittest.TestCase):
             order.index(scenarios.scenario_repromote_suspended_settle))
         self.assertEqual(
             order.index(scenarios.scenario_repromote_suspended_settle)
+            + 1,
+            order.index(scenarios.scenario_settled_receipt_arbitration))
+        self.assertEqual(
+            order.index(scenarios.scenario_settled_receipt_arbitration)
             + 1,
             order.index(scenarios.scenario_peer_announce))
         self.assertEqual(

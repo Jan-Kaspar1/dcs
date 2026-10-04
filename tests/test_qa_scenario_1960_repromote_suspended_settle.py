@@ -301,7 +301,8 @@ class RepromoteSuspendedSettleTests(unittest.TestCase):
 
     def test_registered(self):
         order = list(scenarios.SCENARIOS)
-        # The same restored window as the demote-carry leg, ahead
+        # The same restored window as the demote-carry leg — the
+        # settled-receipt-arbitration leg runs in it too — ahead
         # of the peer-announce case and the tune case's a->b
         # switch.
         self.assertEqual(
@@ -310,7 +311,8 @@ class RepromoteSuspendedSettleTests(unittest.TestCase):
         self.assertEqual(
             order.index(
                 scenarios.scenario_repromote_suspended_settle) + 1,
-            order.index(scenarios.scenario_peer_announce))
+            order.index(
+                scenarios.scenario_settled_receipt_arbitration))
         self.assertIs(
             verify.case_function('repromote-suspended-settle'),
             scenarios.scenario_repromote_suspended_settle)
