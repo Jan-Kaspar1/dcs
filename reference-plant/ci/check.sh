@@ -13,8 +13,10 @@
 #                the same `tag`/`rev` fragment Cargo.toml spells, one
 #                precise revision across all three — at the revision
 #                the declared pin names: the tag's target read back
-#                off the remote, the declared full-sha rev, or the
-#                release record's filled Commit field — the record
+#                off the remote — a query the remote cannot answer
+#                refused as unverifiable, never read as an absent tag
+#                (pin-unresolvable) — the declared full-sha rev, or
+#                the release record's filled Commit field — the record
 #                fetched at the pinned rev through the same remote, or
 #                the substituted tree under DCS_RECORD_DIR. Read
 #                before any resolve can rewrite the file, so a
@@ -22,11 +24,12 @@
 #                reported rather than silently re-resolved
 #                (lockfile-stale); the leg's own doctored copies —
 #                a lockfile recorded at another revision, one missing
-#                a release crate's package block, and ones recording a
-#                release crate twice — a divergent `rev` record ahead
-#                of and behind the pinned block, and a path package's
-#                sourceless twin beside it — must each report their
-#                diagnostic (lockfile-stale-unchecked,
+#                a release crate's package block, one recording the
+#                pin at a commit the pin does not name, and ones
+#                recording a release crate twice — a divergent `rev`
+#                record ahead of and behind the pinned block, and a
+#                path package's sourceless twin beside it — must each
+#                report their diagnostic (lockfile-stale-unchecked,
 #                path-dependency-leak-unchecked).
 #                The stage's digest of the file is what the resolve
 #                stage re-checks, naming a rewrite the fallback fetch
@@ -381,22 +384,27 @@ PY
 # status 2 is a release crate recorded from a
 # non-git source or from no source at all — a `path` package into some
 # checkout carries neither, and is `path-dependency-leak`'s finding —
-# and 1 every other disagreement, `lockfile-stale`'s.
+# 3 a tag query the remote could not answer — `pin-unresolvable`'s
+# finding, the served target unverifiable rather than absent — and 1
+# every other disagreement, `lockfile-stale`'s.
 lockfile_leg() {
     python3 ci/lockfile.py "${1:-Cargo.lock}" "$DCS_REMOTE" "${2:-}"
 }
 
 # The leg's exit status named: a release crate recorded from a path
 # into some checkout — or with no source at all, as a path package is
-# written — is `path-dependency-leak`; every other
-# disagreement between the committed lockfile and this repository's
-# declared pin is `lockfile-stale`.
+# written — is `path-dependency-leak`; a tag query the remote could
+# not answer is `pin-unresolvable` — the served target unverifiable,
+# never the absent-tag skip — and every other disagreement between
+# the committed lockfile and this repository's declared pin is
+# `lockfile-stale`.
 lockfile_check() {
     local status=0
     lockfile_leg "${1:-Cargo.lock}" "${2:-}" || status=$?
     case "$status" in
         0) return 0 ;;
         2) fail "path-dependency-leak: a release crate is recorded from a non-git source — or from no source at all — in ${1:-Cargo.lock}" ;;
+        3) fail "pin-unresolvable: the remote could not be queried for the declared tag's target — ${1:-Cargo.lock}'s recorded revision is unverifiable" ;;
         *) fail "lockfile-stale: ${1:-Cargo.lock} does not record this repository's declared pin" ;;
     esac
 }
@@ -573,6 +581,69 @@ for twin in "$TWIN_FIRST" "$TWIN_LAST"; do
 done
 echo "  a lockfile recording a release crate twice refused"
 
+# The remote-side half of the same leg: a lockfile recording the
+# declared pin at a commit the pin does not name — the tag's served
+# target or the declared full-sha rev diverging from the recorded
+# revision — is `lockfile-stale`, and only the leg names it: `cargo
+# fetch --locked` resolves any commit the remote serves under a
+# matching query without re-checking the pin's target. The doctored
+# copy keeps the recorded query and records the release crates at the
+# upgrade baseline — a commit the remote serves that the declared pin
+# does not land on — exercising the target comparison the
+# recorded-revision self-checks cannot reach; the doctor reports the
+# refusal marker the recorded pin's shape must produce. A `rev` pin
+# naming a branch or tag rather than a full sha declares no
+# immutable target the leg can hold the record to — the upgrade
+# stage's repinned pipeline is one — so the planted case stands down
+# on that shape.
+WRONG_SHA_LOCK="$(mktemp)"
+EXPECT_WRONG="$(python3 - Cargo.lock "$WRONG_SHA_LOCK" "$DCS_UPGRADE_REV" <<'PY'
+import re, sys
+lock, wrong, baseline = sys.argv[1], sys.argv[2], sys.argv[3]
+release = ("dcs-build", "dcs-core", "dcs-model")
+original = open(lock).read()
+block = (r'\[\[package\]\]\nname = "(?:' + "|".join(release)
+         + r')"\nversion = "[^"]+"\nsource = "[^?"]*')
+records = re.findall(block + r'\?([^#"]*)#([0-9a-f]{40})"', original)
+if len(records) < len(release):
+    sys.exit(f"doctor: expected at least {len(release)} release-crate records to doctor, found {len(records)}")
+# The planted revision must differ from the recorded one — the
+# upgrade baseline when it does, another sha when a tree pinned at
+# that baseline would otherwise doctor the file to itself.
+wrong_sha = next(sha for sha in (baseline, "1" * 40) if sha != records[0][1])
+doctored = re.sub(
+    r'(' + block + r'\?[^#"]*#)[0-9a-f]{40}"',
+    lambda m: m.group(1) + wrong_sha + '"',
+    original,
+)
+kinds = {query.partition("=")[0] for query, _ in records}
+values = {query.partition("=")[2] for query, _ in records}
+if kinds == {"tag"}:
+    marker = "lands on"
+elif kinds == {"rev"} and all(re.fullmatch(r"[0-9a-f]{40}", value) for value in values):
+    marker = "for rev"
+elif kinds == {"rev"}:
+    marker = ""
+else:
+    sys.exit(f"doctor: release crates record unexpected pin kinds: {sorted(kinds)}")
+if marker:
+    open(wrong, "w").write(doctored)
+print(marker)
+PY
+)"
+if [ -n "$EXPECT_WRONG" ]; then
+    if out="$(lockfile_leg "$WRONG_SHA_LOCK" 2>&1)"; then
+        fail "lockfile-stale-unchecked: a lockfile recording the pin at a commit the pin does not name passed the lockfile leg"
+    fi
+    case "$out" in
+        *"$EXPECT_WRONG"*) ;;
+        *) fail "lockfile-stale-unchecked: the wrong-target lockfile was refused without naming the pin's target: $out" ;;
+    esac
+    echo "  a lockfile recording a commit the declared pin does not name refused: lockfile-stale"
+else
+    echo "  the declared rev pin names no immutable target — no served-target comparison to exercise"
+fi
+
 echo "== resolve =="
 # `cargo fetch --locked` is the fast path and, with a committed
 # lockfile that satisfies the manifest, it is what makes every build
@@ -591,7 +662,7 @@ if ! cargo fetch --locked 2>"$LOCKED_ERR"; then
         fail "lockfile-stale: the committed Cargo.lock did not satisfy the declared pin — the resolve stage re-resolved it; regenerate it with \`cargo update\` (README §7)"
     fi
 fi
-rm -f "$LOCKED_ERR" "$STALE_LOCK" "$MISSING_LOCK" "$DUP_FIRST" "$DUP_LAST" "$TWIN_FIRST" "$TWIN_LAST"
+rm -f "$LOCKED_ERR" "$STALE_LOCK" "$MISSING_LOCK" "$DUP_FIRST" "$DUP_LAST" "$TWIN_FIRST" "$TWIN_LAST" "$WRONG_SHA_LOCK"
 
 echo "== build =="
 cargo build --quiet || {

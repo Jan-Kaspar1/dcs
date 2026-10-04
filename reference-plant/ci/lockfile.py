@@ -35,8 +35,10 @@ workspace-side proofs substitute — and `RECORD` the release record's
 contract's own shape, the substituted one under `DCS_RECORD_DIR`, or
 the empty string for the stage's doctored legs. Exit
 status 2 is a release crate recorded from a non-git source —
-`path-dependency-leak`'s finding — and 1 every other disagreement,
-`lockfile-stale`'s.
+`path-dependency-leak`'s finding — 3 a tag query the remote could
+not answer at all — the served target unverifiable rather than
+absent, `pin-unresolvable`'s finding — and 1 every other
+disagreement, `lockfile-stale`'s.
 """
 
 import json
@@ -171,16 +173,34 @@ if not re.fullmatch(r"[0-9a-f]{40}", precise):
     sys.exit(f"{lock_path} records no precise revision for {url} at {query}: {source}")
 
 # The recorded revision must be the one the declared pin names. A tag
-# the remote does not serve yet is not this leg's finding: an
-# unresolvable pin is `pin-unresolvable`'s, and a remote that cannot
-# be reached at all leaves the query comparison above holding.
+# the remote answers without serving — the ref genuinely absent — is
+# not this leg's finding: an unresolvable pin is `pin-unresolvable`'s.
+# A query the remote cannot answer is a different shape: a transport
+# failure, an auth refusal, a safe.directory rejection, or a corrupt
+# repository all exit nonzero, which stdout alone cannot tell from
+# "not published" — yet the tag's target is then unverifiable, never
+# absent. The leg refuses on that path (status 3) because nothing
+# downstream rescues it: `cargo fetch --locked` resolves the recorded
+# sha through libgit2 and cargo's git cache without re-checking the
+# tag's target, so a lockfile recording a commit the tag does not
+# land on would otherwise pass green on the ambient CLI's health.
 if kind == "tag":
-    refs = subprocess.run(
-        ["git", "ls-remote", url, f"refs/tags/{value}", f"refs/tags/{value}^{{}}"],
-        capture_output=True, text=True, check=False,
-    ).stdout
+    try:
+        refs = subprocess.run(
+            ["git", "ls-remote", url,
+             f"refs/tags/{value}", f"refs/tags/{value}^{{}}"],
+            capture_output=True, text=True, check=False,
+        )
+    except OSError as error:
+        print(f"git ls-remote could not run: {error}", file=sys.stderr)
+        sys.exit(3)
+    if refs.returncode != 0:
+        print(f"{url} could not be queried for {value}: git ls-remote "
+              f"exited {refs.returncode}: {refs.stderr.strip()}",
+              file=sys.stderr)
+        sys.exit(3)
     served = {}
-    for line in refs.splitlines():
+    for line in refs.stdout.splitlines():
         sha, _, ref = line.partition("\t")
         served[ref] = sha
     target = served.get(f"refs/tags/{value}^{{}}") or served.get(f"refs/tags/{value}")
