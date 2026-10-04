@@ -114,9 +114,9 @@ import stranded_rejoin
 # named diagnostic on the honest control arm's stale presentation
 # rather than passing an unexercised contract.
 LEG = {
-    # The next free slot in the stage's recorded order (840 is the
+    # The next free slot in the stage's recorded order (860 is the
     # orphan-episode-bound leg); no two legs may share one.
-    "order": 850,
+    "order": 870,
     "title": "the stale-budget-cadence leg",
     "passes": "stale-budget-cadence-leg",
     "tampers": [

@@ -114,9 +114,9 @@ import stranded_rejoin
 # named diagnostic on the honest single-entry journal rather than
 # passing an unexercised contract.
 LEG = {
-    # The next free slot in the stage's recorded order (830 is the
-    # incumbent-consultation leg); no two legs may share one.
-    "order": 840,
+    # The next free slot in the stage's recorded order (850 is the
+    # cutoff leg); no two legs may share one.
+    "order": 860,
     "title": "the orphan-episode-bound leg",
     "passes": "orphan-episode-bound-leg",
     "tampers": [

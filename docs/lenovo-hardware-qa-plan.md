@@ -1736,6 +1736,60 @@ Implementation order: second, after [daily architecture review](daily-architectu
   run carrying no born staging lever, no per-seat journal file, or no
   settled pair reports inconclusive.
 
+### Landed 2026-10-03 (settled-receipt arbitration leg, #1479)
+
+- The contradictory-settled-receipt arbitration contract — the
+  `divergent-settled-receipts-oscillate-flooding-journal` finding
+  (defect; severity high; confidence high), reported by run
+  `qax-20260919-003` against revision `2937abf` on rig `lenovo`,
+  module `dcs-runtime` — is exercised on the deployed rig by scenario
+  leg `1970_settled_receipt_arbitration`. The receipt log is the
+  pair's one command audit, so adoption of a *settled* receipt must be
+  idempotent or arbitrated, never last-pull-wins between
+  contradictory terminal verdicts, and a settlement must journal once
+  per admission. The finding had two peers holding one admission
+  settled at one submission index to two different terminal verdicts
+  hand the index back and forth on every mutual adoption at ~5-8 Hz:
+  ~990 phantom `command_settled` lines appended to each durable
+  `journal.jsonl` within minutes, both served rings wrapping their
+  1024 cap and evicting the earlier real audit, and a flapping
+  consumer-facing `/receipts` that a single `POST /promote` ended.
+- The staging is the reproduction's surviving trigger after the
+  quiesced-apply fix: the leg races a receipted batch of writable-point
+  submissions against the tracking peer's promotion, whose boundary
+  `final_sync` pull lands inside the field owner's pending window and
+  *carries* the still-`Accepted` admission onto the successor. The
+  promoted peer settles the carried admission at its own boundary and
+  the field-owner's next scan settles the same admission at its own —
+  two lines, one submission index, two different apply ticks — after
+  which the field's own arbitration fences the incumbent in place and
+  the demote that leaves both lines following each other opens the
+  adoption window the ping-pong ran in. The audit reads both peers'
+  serving monitors across that window and both durable journals:
+  the same admission must appear with two different journaled verdicts
+  (the contradiction really was staged — each line can only journal
+  what it observed), the two served receipt logs must converge on one
+  arbitrated verdict that never moves under the poll, each peer's
+  durable journal must record at most one `command_settled` for the
+  admission, and the reconciled holder's promotion must return the
+  pair to one active plus one tracking standby on its launch roles.
+- Named diagnostics are `settled-arbitration-failed` and
+  `settled-arbitration-nondeterministic`, with the self-check's
+  `settled-arbitration-unchecked` covering every planted negative — the
+  served verdict moving under the poll, the peers still disagreeing
+  after the window, a durable journal that recorded the admission
+  twice, and evidence carrying no verdict at all; two consecutive
+  passes produce identical digests; a run whose served surfaces
+  predate the receipt-attribution and checkpoint-window contract,
+  whose ctx declares no durable journal for one peer, whose pair never
+  settles tracking, or whose staging never lands a promotion pull
+  inside a pending window reports inconclusive; the pair leaves on its
+  launch roles. The consumer-boundary mirror of the same contract is
+  `reference-plant/ci/legs/settled_receipt_arbitration.py`, whose
+  declared pair is driven and therefore stages the contradiction with
+  no freeze and no timing race.
+
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,

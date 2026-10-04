@@ -91,7 +91,7 @@ class Registration(unittest.TestCase):
         }
         record = discovered["stale_budget_cadence.py"]
         self.assertEqual(record["stem"], "stale-budget-cadence")
-        self.assertEqual(record["order"], 850)
+        self.assertEqual(record["order"], 870)
         orders = [
             item["order"]
             for item in legs.discover(str(_CI_DIR / "legs"))

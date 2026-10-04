@@ -8,15 +8,15 @@
 //! writer, `seq` numbering continuing across the run boundary.
 
 use dcs_core::{
-    Command, Direction, IoDriver, IoError, JournalEntry, JournalEvent, PointHistory, PointId,
-    Sample, Tick, Value, ValueKind,
+    Command, CommandOutcome, Direction, IoDriver, IoError, JournalEntry, JournalEvent,
+    PointHistory, PointId, Sample, Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{Monitor, MonitorClient, MonitorConfig, read_journal_file};
 use dcs_runtime::{Executor, Peer, PointMap};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -728,5 +728,216 @@ fn the_journal_sink_health_reports_the_drain_and_the_flush_attests_it() {
     // And the file holds exactly the record the drain accounted.
     let data = read_journal_file(&path).unwrap();
     assert_eq!(data.entries.len() as u64, health.drained);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #690's contract through both peers' durable journals: the pair's
+/// fence window left one admission settled at one submission index to
+/// two *different* terminal verdicts, one per line. A pair then
+/// tracking each other across an adoption window must converge on one
+/// arbitrated verdict — the served receipts agree and stop moving — and
+/// each peer's durable journal records exactly one `command_settled`
+/// for that admission, rather than one per adoption: the reproduction
+/// ping-ponged the index at scan cadence and appended ~990 phantom
+/// settle lines to each journal within minutes, wrapping the served
+/// ring and evicting the earlier real audit.
+#[test]
+fn a_dual_standby_arbitrates_contradictory_settles_without_flooding_the_journal() {
+    let dir = scratch("settled-arbitration");
+    let owner_journal = dir.join("owner.jsonl");
+    let follower_journal = dir.join("follower.jsonl");
+    // Leaked `'static` so each monitor outlives any borrow — the same
+    // shape the pair-view rig uses for a served peer.
+    let owner_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[(
+        PointId(10),
+        Value::Float(0.0),
+    )])));
+    let follower_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[(
+        PointId(10),
+        Value::Float(0.0),
+    )])));
+    let map = || PointMap::new().with_writable_point(PointId(10), Direction::In, ValueKind::Float);
+    let config = |path: PathBuf| MonitorConfig {
+        journal_file: Some(path),
+        ..MonitorConfig::default()
+    };
+
+    // The field owner, launched active, and its tracking sibling. Both
+    // run driven — a tick advances only on `POST /scan` — which is what
+    // leaves the window in which the promotion boundary can carry a
+    // still-pending admission while the owner still owes its own
+    // boundary.
+    let owner = Arc::new(
+        Monitor::bind_peer_with(
+            "127.0.0.1:0",
+            Peer::active(
+                Executor::new(owner_driver, map(), Vec::new()).unwrap(),
+                None,
+            ),
+            signal_index(),
+            config(owner_journal.clone()),
+        )
+        .unwrap()
+        // The pair's shared key — the shape a deployed pair launches
+        // with, and what lets the owner's demotion follow the hint its
+        // follower's announced pulls recorded.
+        .with_pair_key(0x5eed),
+    );
+    let follower = Arc::new(
+        Monitor::bind_peer_with(
+            "127.0.0.1:0",
+            Peer::standby(
+                Executor::new(follower_driver, map(), Vec::new()).unwrap(),
+                None,
+            ),
+            signal_index(),
+            config(follower_journal.clone()),
+        )
+        .unwrap()
+        .with_standby_source(owner.local_addr())
+        .with_pair_key(0x5eed),
+    );
+    let serving = (
+        thread::spawn({
+            let monitor = Arc::clone(&owner);
+            move || monitor.serve()
+        }),
+        thread::spawn({
+            let monitor = Arc::clone(&follower);
+            move || monitor.serve()
+        }),
+    );
+    let owner_client = MonitorClient::new(owner.local_addr());
+    let follower_client = MonitorClient::new(follower.local_addr());
+
+    // `(settles, entries)` in one peer's durable file, read after its
+    // own drain caught up — the audit the ping-pong grew without bound.
+    let journal_counts = |monitor: &Monitor<'_>, path: &PathBuf| {
+        monitor.flush_journal_sink(Duration::from_secs(10));
+        let data = read_journal_file(path).unwrap();
+        let settles = data
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry.event, JournalEvent::CommandSettled { .. }))
+            .count();
+        (settles, data.entries.len())
+    };
+
+    // The sibling's run clock runs ahead of the owner's — its tracking
+    // pull holds the run clock while its own scans tick it — so the
+    // promotion boundary below meets a document stale by that clock and
+    // carries the admission instead of adopting it. That is the
+    // reproduction's staging, and it is what leaves the two lines
+    // holding one admission settled at one index to two verdicts.
+    owner_client.advance(1).unwrap();
+    follower_client.advance(2).unwrap();
+
+    let admission = owner_client
+        .command(&Command::WriteValue {
+            point: PointId(10),
+            kind: ValueKind::Float,
+            value: Value::Float(2.5),
+        })
+        .unwrap();
+    assert!(
+        matches!(admission.outcome, CommandOutcome::Accepted { .. }),
+        "the admission must still be pending at the promotion boundary: \
+         {admission:?}",
+    );
+
+    follower_client.promote().unwrap();
+    follower_client.advance(1).unwrap();
+    owner_client.advance(1).unwrap();
+
+    let owner_receipts = owner_client.receipts().unwrap();
+    let follower_receipts = follower_client.receipts().unwrap();
+    assert_eq!(owner_receipts.len(), 1, "{owner_receipts:?}");
+    assert_eq!(follower_receipts.len(), 1, "{follower_receipts:?}");
+    assert_eq!(owner_receipts[0].command, follower_receipts[0].command);
+    assert_ne!(
+        owner_receipts[0].outcome, follower_receipts[0].outcome,
+        "the staged pair must contradict: {:?} against {:?}",
+        owner_receipts[0].outcome, follower_receipts[0].outcome,
+    );
+    let owner_admission_outcome = owner_receipts[0].outcome.clone();
+
+    // The demotes leave both lines tracking — the follower its
+    // configured source, the owner the hint its follower's pulls
+    // announced — the dual-standby the finding recorded.
+    follower_client.demote().unwrap();
+    owner_client.demote().unwrap();
+
+    // The adoption window: each line adopts the document the other had
+    // served *before* that line's own adoption, which is the
+    // interleaved pull shape the ping-pong ran in — two peers handing
+    // the same index back and forth round after round. A settled
+    // receipt's adoption must be idempotent or arbitrated, so the pair
+    // converges on one verdict, the served audit stops moving, and
+    // neither journal grows.
+    let mut first_counts = None;
+    let mut served = None;
+    for round in 0..8 {
+        let owner_document = owner.checkpoint();
+        let follower_document = follower.checkpoint();
+        owner.apply_checkpoint(&follower_document).unwrap();
+        follower.apply_checkpoint(&owner_document).unwrap();
+        owner.paced_scan();
+        follower.paced_scan();
+        let receipts = (
+            owner_client.receipts().unwrap(),
+            follower_client.receipts().unwrap(),
+        );
+        match &served {
+            None => served = Some(receipts.clone()),
+            Some(first) => assert_eq!(
+                &receipts, first,
+                "the served receipts must not flap again — round {round}",
+            ),
+        }
+        let counts = (
+            journal_counts(&owner, &owner_journal),
+            journal_counts(&follower, &follower_journal),
+        );
+        match first_counts {
+            None => first_counts = Some(counts),
+            Some(first) => assert_eq!(
+                counts, first,
+                "the adoption window must not grow either journal — round \
+                 {round}",
+            ),
+        }
+    }
+
+    // One admission, one settle transition per peer journal — the
+    // bound the reproduction broke at ~5 lines/s.
+    let (owner_counts, follower_counts) = first_counts.expect("the window ran");
+    assert_eq!(
+        (owner_counts.0, follower_counts.0),
+        (1, 1),
+        "each peer journals exactly one settle for the admission",
+    );
+
+    // The pair converged on one arbitrated verdict, and it is the
+    // earlier settlement: the pair's first record of the admission.
+    let (owner_receipts, follower_receipts) = served.expect("the window ran");
+    assert_eq!(owner_receipts, follower_receipts);
+    assert_eq!(
+        owner_receipts[0].outcome, owner_admission_outcome,
+        "the pair keeps the first settlement"
+    );
+
+    // Reading the served audit again, and running the real scan-pull
+    // cycle over it, changes nothing: the adoption is idempotent.
+    owner_client.advance(1).unwrap();
+    follower_client.advance(1).unwrap();
+    assert_eq!(owner_client.receipts().unwrap(), owner_receipts);
+    assert_eq!(follower_client.receipts().unwrap(), owner_receipts);
+
+    for monitor in [Arc::clone(&owner), Arc::clone(&follower)] {
+        monitor.shutdown();
+    }
+    for thread in [serving.0, serving.1] {
+        let _ = thread.join();
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
