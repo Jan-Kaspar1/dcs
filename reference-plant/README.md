@@ -740,7 +740,19 @@ selection's declared signals unreported, the guards ungated, the
 managed alarm unannunciated, the restore not returning the pump to
 group control, or the journal missing an attributed transition — is
 `takeover-failed`; two takeover-leg passes diverging is
-`takeover-nondeterministic`; a standing force dropped or silently
+`takeover-nondeterministic`; a level at or below the declared
+`cutoff` not asserting `below_cutoff`, not releasing `demand` with
+every pump call off, or the managed `lal` alarm not annunciating
+and latching — or the receipted `ack` not clearing the latch while
+the alarm stands, or the hysteresis return not resuming `demand`
+at `start` — is `cutoff-failed`; two cutoff-leg passes diverging
+is `cutoff-nondeterministic`; consecutive demand cycles not
+alternating `duty` per the declared `rotation` policy — or a
+mid-cycle promotion not carrying the duty designation, the
+rotation cursor, and the accumulated run-hours, or the restored
+pair not resuming the alternation — is `rotation-failed`; two
+rotation-leg passes diverging is `rotation-nondeterministic`;
+a standing force dropped or silently
 re-substituted by a promotion — the `forces` entry missing from the
 promoted peer's snapshot or the sample no longer the forced value at
 substituted quality — or a release leaving the set non-empty is
