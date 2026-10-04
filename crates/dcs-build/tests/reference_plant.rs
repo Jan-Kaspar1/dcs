@@ -10,9 +10,14 @@
 //! end to end: the committed lockfile's agreement with the declared
 //! pin — every `dcs-*` record of a released crate carried by a git
 //! source, a path package's sourceless record named
-//! `path-dependency-leak`, and a tag re-pointed after the cut with
+//! `path-dependency-leak`, a manifest declaring only `dcs-build`
+//! directly — the contract's optional direct `dcs-core`, `dcs-model`
+//! declarations omitted — passing on the lockfile recording all three
+//! release crates at that pin, and a tag re-pointed after the cut with
 //! the lockfile regenerated to follow it named `lockfile-stale`
-//! against the release record's `Commit` field — `cargo fetch
+//! against the release record's `Commit` field — a tag query the
+//! remote cannot answer refused rather than read as the tag's
+//! absence — `cargo fetch
 //! --locked` resolving without a
 //! re-resolve,
 //! byte-identical emit against the checked-in artifacts,
@@ -1384,6 +1389,220 @@ fn a_repointed_release_tag_reports_lockfile_stale() {
     );
 }
 
+/// A tag query the remote cannot answer is unverifiable, never the
+/// absent-tag skip — the reported defect
+/// (`lockfile-leg-tag-check-skipped-on-ls-remote-failure`): the leg
+/// parsed `git ls-remote`'s stdout only, so any transport failure —
+/// a safe.directory refusal, an auth rejection, a corrupt repository —
+/// produced an empty ref map indistinguishable from "tag not
+/// published yet", and a lockfile recording a commit the tag does not
+/// land on passed the leg while `cargo fetch --locked` stayed green
+/// through libgit2 and cargo's git cache. The leg's verdict hung on
+/// ambient git-CLI health rather than the artifact.
+///
+/// The reproduction: the stand-in serves the doctored record's sha —
+/// a child of the tag's target advertised on its own branch, so the
+/// tag still lands where the committed revision names it — while a
+/// `git` shim on `PATH` refuses only `ls-remote`, the same
+/// libgit2-vs-CLI divergence the rig's safe.directory refusal
+/// produced. `cargo fetch --locked` still resolves the doctored
+/// tree, but the leg refuses the unanswerable query, the shipped
+/// check names `pin-unresolvable` before its resolve stage, and the
+/// same artifact under a healthy CLI reports `lockfile-stale` naming
+/// the tag's real target — the served-target comparison the
+/// stand-in's tag seeding at the recorded commit leaves dead.
+#[test]
+fn an_unanswerable_tag_query_is_unverifiable_not_absent() {
+    let copy = Materialized::new();
+    let pin = pinned_release(&copy.dir);
+    let precise = committed_lock_rev(&copy.dir);
+
+    // A commit the remote serves that the tag does not land on: a
+    // child of the tag's own target, so the crate trees the lockfile
+    // resolves carry the recorded versions and `cargo fetch --locked`
+    // answers green on the wrong sha exactly as the rig's did.
+    git(
+        &copy.dir,
+        &[
+            "clone",
+            "--quiet",
+            "--branch",
+            "main",
+            &copy.remote,
+            "wrong-target",
+        ],
+    );
+    let work = copy.dir.join("wrong-target");
+    std::fs::write(work.join("wrong-target"), "not the tag's target\n").unwrap();
+    git(&work, &["add", "-A"]);
+    git(
+        &work,
+        &[
+            "-c",
+            "user.name=dcs-ci",
+            "-c",
+            "user.email=dcs-ci@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "a commit the tag does not land on",
+        ],
+    );
+    let wrong = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&work)
+            .output()
+            .expect("git rev-parse runs")
+            .stdout,
+    )
+    .expect("git rev-parse answers utf8")
+    .trim()
+    .to_owned();
+    git(
+        &work,
+        &["push", "--quiet", "origin", "HEAD:refs/heads/wrong-target"],
+    );
+
+    // The lockfile regenerated to record the wrong commit under the
+    // tag's own query — the served target still the committed
+    // revision, so only the leg's ls-remote comparison can name it.
+    let lock = copy.dir.join("Cargo.lock");
+    let committed = std::fs::read_to_string(&lock).unwrap();
+    let doctored = committed.replace(
+        &format!("?tag={pin}#{precise}"),
+        &format!("?tag={pin}#{wrong}"),
+    );
+    assert_ne!(
+        doctored, committed,
+        "the committed lockfile records no `?tag={pin}#{precise}` source to doctor"
+    );
+    std::fs::write(&lock, &doctored).unwrap();
+
+    // A `git` on PATH that refuses only `ls-remote` — the reported
+    // reproduction's safe.directory divergence: the CLI cannot read
+    // the remote while cargo's libgit2 still resolves it. Every
+    // other verb delegates to the real binary resolved before the
+    // shim enters PATH.
+    let real_git = String::from_utf8(
+        Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .expect("sh runs")
+            .stdout,
+    )
+    .expect("command -v git answers utf8")
+    .trim()
+    .to_owned();
+    let shim_dir = copy.dir.join("shim-bin");
+    std::fs::create_dir(&shim_dir).unwrap();
+    let shim = shim_dir.join("git");
+    std::fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = ls-remote ]; then\n\
+             echo 'fatal: detected dubious ownership in repository' >&2\n\
+             exit 128\n\
+             fi\n\
+             exec {real_git} \"$@\"\n"
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = format!(
+        "{}:{}",
+        shim_dir.display(),
+        std::env::var("PATH").expect("PATH is set")
+    );
+
+    // The green half of the reported reproduction: `cargo fetch
+    // --locked` resolves the recorded sha without re-checking the
+    // tag's target — only the leg could name this artifact.
+    let fetched = Command::new(CARGO)
+        .args(["fetch", "--locked"])
+        .current_dir(&copy.dir)
+        .env("CARGO_TARGET_DIR", copy.dir.join("target"))
+        .env("PATH", &path)
+        .output()
+        .expect("cargo fetch runs");
+    assert!(
+        fetched.status.success(),
+        "cargo fetch --locked did not resolve the wrong-sha lockfile — the \
+         reproduction needs the fetch green while the leg refuses:\n{}",
+        String::from_utf8_lossy(&fetched.stderr)
+    );
+
+    // Under the refusing CLI the leg must not pass: the tag's target
+    // is unverifiable, which is not the absent-tag skip.
+    let leg = Command::new("python3")
+        .args(["ci/lockfile.py", "Cargo.lock", &copy.remote])
+        .current_dir(&copy.dir)
+        .env("PATH", &path)
+        .output()
+        .expect("the lockfile leg runs");
+    assert!(
+        !leg.status.success(),
+        "the leg passed a tag query the remote could not answer"
+    );
+    let stderr = String::from_utf8_lossy(&leg.stderr);
+    assert!(
+        stderr.contains("ls-remote"),
+        "the unanswerable query was refused without naming the failed query:\n{stderr}"
+    );
+
+    // Through the shipped check the same state names its diagnostic
+    // before the resolve stage can rewrite the artifact.
+    let refused = Command::new("bash")
+        .arg("ci/check.sh")
+        .current_dir(&copy.dir)
+        .env("DCS_REMOTE", &copy.remote)
+        .env("CARGO_TARGET_DIR", copy.dir.join("target"))
+        .env("PATH", &path)
+        .output()
+        .expect("ci/check.sh runs");
+    let stdout = String::from_utf8_lossy(&refused.stdout);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success(),
+        "an unverifiable tag target passed the shipped check:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("pin-unresolvable"),
+        "the unanswerable query was refused without its named diagnostic:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("== resolve =="),
+        "the unverifiable remote was caught only after the resolve stage:\n{stdout}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&lock).unwrap(),
+        doctored,
+        "the refused run repaired the doctored lockfile instead of reporting it"
+    );
+
+    // The same artifact under a healthy CLI: the leg reaches the
+    // served-target comparison and names the tag's real target.
+    let leg = Command::new("python3")
+        .args(["ci/lockfile.py", "Cargo.lock", &copy.remote])
+        .current_dir(&copy.dir)
+        .output()
+        .expect("the lockfile leg runs");
+    assert!(
+        !leg.status.success(),
+        "the leg passed a lockfile recording a commit the tag does not land on"
+    );
+    let stderr = String::from_utf8_lossy(&leg.stderr);
+    assert!(
+        stderr.contains(&format!("but {pin} lands on {precise}")),
+        "the wrong-target record was refused without naming the tag's target:\n{stderr}"
+    );
+}
+
 /// A consumer lockfile that legitimately carries a further git-pinned
 /// package must still pass the `lockfile` stage end to end: the
 /// positive leg judges only the release crates' records, and the
@@ -2072,6 +2291,164 @@ fn toml_equivalent_respellings_pass_the_lockfile_leg() {
         !String::from_utf8_lossy(&refused.stdout).contains("== resolve =="),
         "the leaked path source was caught only after the resolve stage:\n{stderr}"
     );
+}
+
+/// The release contract's `dcs-core`, `dcs-model` direct declarations
+/// are optional — `docs/release-contract.md`: "a consumer may also
+/// declare them directly — e.g. to assert
+/// `dcs_model::MODEL_VERSION` — under the same pin". A manifest
+/// naming neither resolves both through `dcs-build` at that one pin,
+/// and the committed lockfile's record of all three release crates is
+/// what the lockfile leg holds to it.
+///
+/// The reported defect (`lockfile-leg-misdiagnoses-omitted-direct-
+/// dep`): the leg's manifest census required both `dcs-build` *and*
+/// `dcs-model` as direct dependencies, turning this template's own
+/// declaration shape into a correctness gate — a consumer that dropped
+/// the direct `dcs-model` line was reported `lockfile-stale` (exit 1,
+/// "dcs-model declares no `git = ..., tag|rev = ...` pin in
+/// Cargo.toml") over a lockfile recording all three crates correctly
+/// at the declared pin. The reproduction is the reported one: the
+/// direct `dcs-model` dependency line deleted from the materialized
+/// manifest, the committed lockfile untouched. The leg must record the
+/// pin — on that committed artifact and on the lockfile `cargo update`
+/// writes for the doctored manifest alike.
+#[test]
+fn an_omitted_optional_direct_release_dep_passes_the_lockfile_leg() {
+    let copy = Materialized::new();
+    let manifest = copy.dir.join("Cargo.toml");
+    let lock = copy.dir.join("Cargo.lock");
+    let committed_manifest = std::fs::read_to_string(&manifest).unwrap();
+    let committed_lock = std::fs::read_to_string(&lock).unwrap();
+
+    let declared = committed_manifest
+        .lines()
+        .find(|line| line.starts_with("dcs-model = {"))
+        .unwrap_or_else(|| {
+            panic!("the materialized manifest declares no direct dcs-model dependency")
+        })
+        .to_owned();
+    let omitted = committed_manifest.replace(&format!("{declared}\n"), "");
+    assert_ne!(
+        omitted, committed_manifest,
+        "the doctor left the direct dcs-model dependency in place"
+    );
+    assert!(
+        !omitted.contains("dcs-model = {"),
+        "the doctored manifest still declares dcs-model directly"
+    );
+    // The lockfile the omitted declaration must still satisfy: all
+    // three release crates recorded, each from the manifest's own pin —
+    // the condition the leg holds to, and the one `cargo fetch
+    // --locked` later re-checks.
+    let pin = pinned_release(&copy.dir);
+    let precise = committed_lock_rev(&copy.dir);
+    for name in ["dcs-build", "dcs-core", "dcs-model"] {
+        assert!(
+            committed_lock.contains(&format!("[[package]]\nname = \"{name}\"\n")),
+            "the committed lockfile records no {name} package block"
+        );
+    }
+    assert_eq!(
+        committed_lock
+            .matches(&format!("?tag={pin}#{precise}"))
+            .count()
+            + committed_lock
+                .matches(&format!("?rev={pin}#{precise}"))
+                .count(),
+        3,
+        "the committed lockfile does not record all three release crates at {pin}#{precise}"
+    );
+    std::fs::write(&manifest, &omitted).unwrap();
+
+    // The leg's own verdict: exit status 0 records the declared pin.
+    let passes_the_leg = |case: &str| {
+        let output = Command::new("python3")
+            .arg("ci/lockfile.py")
+            .arg("Cargo.lock")
+            .arg(&copy.remote)
+            .arg("")
+            .current_dir(&copy.dir)
+            .output()
+            .expect("python3 runs the lockfile leg");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "{case}: a manifest omitting the contract-optional direct dcs-model \
+             declaration was refused on a lockfile recording all three release \
+             crates at the declared pin:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("declares no"),
+            "{case}: the omitted optional declaration was diagnosed as a missing pin:\n{stderr}"
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains(&precise),
+            "{case}: the leg recorded no revision the lockfile carries: {stdout}"
+        );
+    };
+    // The reported reproduction, verbatim: the committed lockfile
+    // untouched.
+    passes_the_leg("the committed lockfile, untouched");
+
+    // The same lockfile still satisfies that manifest once the file is
+    // the one `cargo update` writes for it: Cargo records the consumer
+    // package's own dependency list, so a consumer that drops the line
+    // regenerates the file — that one entry drops, every `[[package]]`
+    // record stays — and no re-resolve is needed afterwards, because the
+    // omitted declaration removes no resolved package. What the leg
+    // refused was therefore a shape, not a disagreement.
+    let root_start = committed_lock
+        .find("[[package]]\nname = \"pump-station\"\n")
+        .expect("the committed lockfile records the consumer package");
+    let root_end = committed_lock[root_start..]
+        .find("\n[[package]]")
+        .map(|at| root_start + at)
+        .unwrap_or(committed_lock.len());
+    let regenerated = format!(
+        "{}{}{}",
+        &committed_lock[..root_start],
+        committed_lock[root_start..root_end].replacen(" \"dcs-model\",\n", "", 1),
+        &committed_lock[root_end..],
+    );
+    assert_ne!(
+        regenerated, committed_lock,
+        "the doctor left the consumer package's own dcs-model dependency entry in place"
+    );
+    std::fs::write(&lock, &regenerated).unwrap();
+    passes_the_leg("the regenerated lockfile");
+    let before = std::fs::read(&lock).unwrap();
+    let metadata = Command::new(CARGO)
+        .args(["metadata", "--locked", "--format-version", "1"])
+        .current_dir(&copy.dir)
+        .env("CARGO_TARGET_DIR", copy.dir.join("target"))
+        .output()
+        .expect("cargo metadata runs");
+    assert!(
+        metadata.status.success(),
+        "the regenerated Cargo.lock does not satisfy a manifest without the direct \
+         dcs-model declaration: {}",
+        String::from_utf8_lossy(&metadata.stderr)
+    );
+    assert_eq!(
+        std::fs::read(&lock).unwrap(),
+        before,
+        "the locked resolve rewrote the regenerated Cargo.lock"
+    );
+    let graph = String::from_utf8_lossy(&metadata.stdout);
+    for name in ["dcs-build", "dcs-core", "dcs-model"] {
+        assert!(
+            graph.contains(&format!("\"name\":\"{name}\"")),
+            "{name} is absent from the resolved graph of a manifest declaring only \
+             dcs-build directly"
+        );
+    }
+    assert!(
+        graph.contains(&format!("git+{}?", copy.remote)),
+        "the resolved graph carries no release crate from the pinned remote"
+    );
+    std::fs::write(&manifest, &committed_manifest).unwrap();
 }
 
 /// The `upgrade` stage is the executable assertion of the documented

@@ -169,6 +169,16 @@ dcs-build = { git = "https://github.com/Jan-Kaspar1/dcs.git", tag = "v0.10.0" }
 dcs-model = { git = "https://github.com/Jan-Kaspar1/dcs.git", tag = "v0.10.0" }
 ```
 
+Only the `dcs-build` line carries the pin every stage holds to:
+`dcs-core` and `dcs-model` resolve with it at the same tag or `rev`, and
+the second line above is this tree's optional direct declaration — the
+release contract lets a consumer name them directly, e.g. to assert
+`dcs_model::MODEL_VERSION` in `src/main.rs`. Dropping it resolves no
+crate differently, and the `lockfile` stage records the pin from the
+`dcs-build` declaration alone while holding the committed `Cargo.lock`'s
+record of all three release crates to it. Whichever of the three you do
+declare must name the identical tag or `rev`.
+
 `rev = "<commit>"` names the identical immutable commit — the recorded
 commit `docs/releases/v0.10.0/record.md` carries — and is always
 supported. `Cargo.lock` is committed so every build resolves the same
@@ -688,7 +698,9 @@ crossing it proves is always "this source, unchanged, across the
 repin".
 
 An **incompatible** crossing fails with named diagnostics, never
-silently: a pin that resolves no release crates is `pin-unresolvable`;
+silently: a pin that resolves no release crates — or a remote the
+`lockfile` stage cannot query for the declared tag's target, which is
+unverifiable rather than absent — is `pin-unresolvable`;
 a committed `Cargo.lock` that records another remote, another
 `rev`/`tag`, or another revision than the manifest declares is
 `lockfile-stale`; a release crate recorded from a `path` into a
@@ -730,7 +742,19 @@ selection's declared signals unreported, the guards ungated, the
 managed alarm unannunciated, the restore not returning the pump to
 group control, or the journal missing an attributed transition — is
 `takeover-failed`; two takeover-leg passes diverging is
-`takeover-nondeterministic`; a standing force dropped or silently
+`takeover-nondeterministic`; a level at or below the declared
+`cutoff` not asserting `below_cutoff`, not releasing `demand` with
+every pump call off, or the managed `lal` alarm not annunciating
+and latching — or the receipted `ack` not clearing the latch while
+the alarm stands, or the hysteresis return not resuming `demand`
+at `start` — is `cutoff-failed`; two cutoff-leg passes diverging
+is `cutoff-nondeterministic`; consecutive demand cycles not
+alternating `duty` per the declared `rotation` policy — or a
+mid-cycle promotion not carrying the duty designation, the
+rotation cursor, and the accumulated run-hours, or the restored
+pair not resuming the alternation — is `rotation-failed`; two
+rotation-leg passes diverging is `rotation-nondeterministic`;
+a standing force dropped or silently
 re-substituted by a promotion — the `forces` entry missing from the
 promoted peer's snapshot or the sample no longer the forced value at
 substituted quality — or a release leaving the set non-empty is

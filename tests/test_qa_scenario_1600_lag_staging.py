@@ -545,8 +545,20 @@ class LagStagingTests(unittest.TestCase):
         self.assertEqual(
             order.index(scenarios.scenario_source_failover) + 1,
             order.index(scenarios.scenario_lag_staging))
+        # The station's acceptance legs — the running-pump handover,
+        # the manual takeover, and the cutoff clamp — share this
+        # restored window ahead of standby-loss.
         self.assertEqual(
             order.index(scenarios.scenario_lag_staging) + 1,
+            order.index(scenarios.scenario_duty_handover))
+        self.assertEqual(
+            order.index(scenarios.scenario_duty_handover) + 1,
+            order.index(scenarios.scenario_manual_takeover))
+        self.assertEqual(
+            order.index(scenarios.scenario_manual_takeover) + 1,
+            order.index(scenarios.scenario_low_level_cutoff))
+        self.assertEqual(
+            order.index(scenarios.scenario_low_level_cutoff) + 1,
             order.index(scenarios.scenario_standby_loss))
         # The standby-loss, demote-settle, demote-carry, and
         # repromote-suspended-settle legs share the same restored
