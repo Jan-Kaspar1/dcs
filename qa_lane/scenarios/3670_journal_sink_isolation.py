@@ -51,9 +51,13 @@ from .common import *
 # retained window rather than refused or emptied — it parks on its own
 # worker while the sink stands stalled, exactly as the contract
 # promises. Releasing the writer must drain the standing queue in `seq`
-# order into the durable file with no torn or duplicated record, answer
-# every parked request with a receipt, and reconverge the pair to one
-# active plus one tracking standby with launch roles restored.
+# order into the durable file with no torn or duplicated record — the
+# audited file is the field owner's own, resolved from the settled role
+# rather than the launch role, and it must carry the window's
+# settlements, so a healthy report cannot stand in for records the file
+# never took — answer every parked request with a receipt, and
+# reconverge the pair to one active plus one tracking standby with
+# launch roles restored.
 # Functional misses name journal-sink-isolation-failed; ordering
 # violations, served-counter regressions, and divergent passes name
 # journal-sink-isolation-nondeterministic; a rig that is unreachable,
@@ -156,11 +160,14 @@ def _settlements(entries, point):
 
 
 def _file_axis(path):
-    """The `--journal-file`'s own entry seq axis, or the reason it could
-    not be audited: a torn trailing line (a crash's partial append) is
-    dropped, an unparseable or unrecognized line earlier in the file is
-    the nondeterministic verdict."""
-    seqs = []
+    """The `--journal-file`'s own entry seq axis beside its parsed
+    entries in file order — the shape the served-window settlement
+    audit reads, so the durable record is judged against the same
+    `command_settled` records the retained window answered with — or
+    the reason the axis could not be audited: a torn trailing line (a
+    crash's partial append) is dropped, an unparseable or unrecognized
+    line earlier in the file is the nondeterministic verdict."""
+    seqs, entries = [], []
     lines = Path(path).read_text().splitlines()
     for index, line in enumerate(lines):
         if not line.strip():
@@ -170,14 +177,15 @@ def _file_axis(path):
         except ValueError:
             if index == len(lines) - 1:
                 continue
-            return None, 'the durable record carries a torn line at ' \
-                         'line ' + str(index + 1)
+            return None, None, 'the durable record carries a torn line ' \
+                         'at line ' + str(index + 1)
         if isinstance(record, dict) and 'entry' in record:
             seqs.append(record['entry'].get('seq'))
+            entries.append(record['entry'])
         elif not (isinstance(record, dict) and 'run_boundary' in record):
-            return None, 'durable line ' + str(index + 1) \
+            return None, None, 'durable line ' + str(index + 1) \
                          + ' is not a journal record'
-    return seqs, None
+    return seqs, entries, None
 
 
 def _drain_candidates(ctx, owner):
@@ -347,8 +355,9 @@ def scenario_journal_sink_isolation(ctx):
         "injected quality transition keep the journal queueing behind "
         'the parked writer while a GET /journal read stands parked on '
         'its own worker and is answered with the retained window; the '
-        'release drains the standing queue into the durable file in seq '
-        'order with no torn or duplicated record and answers every '
+        'release drains the standing queue into the field owner\'s own '
+        'durable file in seq order with no torn or duplicated record, '
+        'the file carrying the window\'s settlements, and answers every '
         'parked request; the pair reconverges to one active plus one '
         'tracking standby with launch roles restored')
     parked = []
@@ -362,11 +371,11 @@ def scenario_journal_sink_isolation(ctx):
                     'inconclusive', 'the run context carries no '
                     + seam + ' seam — the rig predates the '
                     'journal-sink mount lever')
-        journal_path = (ctx.get('journal_files') or {}).get('active')
-        if not journal_path or not Path(journal_path).exists():
+        journal_files = ctx.get('journal_files') or {}
+        if not any(journal_files.values()):
             return case.finish(
                 'inconclusive', 'the run context declares no '
-                '--journal-file for the field owner — the leg has no '
+                '--journal-file for either peer — the leg has no '
                 'durable journal sink to impede')
         for name in ('active', 'standby'):
             try:
@@ -389,6 +398,16 @@ def scenario_journal_sink_isolation(ctx):
                 'inconclusive', 'the deployed pair never settled to '
                 'one active plus a tracking standby')
         base = ctx[owner]
+        # The durable audit follows the field owner, not the launch
+        # role: a pair an earlier leg left with the other peer active
+        # parks that peer's writer, so only that peer's file carries
+        # the records this leg drained.
+        journal_path = journal_files.get(owner)
+        if not journal_path or not Path(journal_path).exists():
+            return case.finish(
+                'inconclusive', "the field owner's declared "
+                '--journal-file is absent — the durable audit has no '
+                'file to read')
         snapshot = _try_snapshot(ctx, base) or {}
         if _journal_sink(snapshot) is None:
             return case.finish(
@@ -427,7 +446,7 @@ def scenario_journal_sink_isolation(ctx):
             return case.finish(
                 'inconclusive', 'the served journal sink carries no '
                 'integer accepted counter')
-        before, torn = _file_axis(journal_path)
+        before, _baseline_entries, torn = _file_axis(journal_path)
         if torn:
             return case.finish(
                 'inconclusive', 'the durable journal could not be '
@@ -651,8 +670,10 @@ def scenario_journal_sink_isolation(ctx):
 
         # The durable audit: the file's own append axis continued
         # contiguously through the stall — no torn line, no duplicate,
-        # no reordered record.
-        after, torn = _file_axis(journal_path)
+        # no reordered record — and the records the standing queue held
+        # are in it, so the drain really appended what the window
+        # journaled rather than dropping them behind a healthy report.
+        after, after_entries, torn = _file_axis(journal_path)
         if torn:
             return case.finish(
                 'failed', 'journal-sink-isolation-nondeterministic: '
@@ -661,14 +682,18 @@ def scenario_journal_sink_isolation(ctx):
             return case.finish(
                 'inconclusive', 'the durable journal carries no entry '
                 'to audit')
+        durable = _settlements(after_entries, point)
         contiguous = after[:len(before)] == before \
             and _journal_axis(after) == 'ascending'
         ref = save_evidence(ctx['evidence_dir'],
                             'journal-sink-restored.json',
-                            {'endpoint': owner, 'released': released,
+                            {'endpoint': owner,
+                             'journal_file': journal_path,
+                             'released': released,
                              'drained': drained.get('drained'),
                              'lost': drained.get('lost'),
                              'entries': len(after),
+                             'settlements': durable,
                              'contiguous': contiguous})
         case.evidence('file', ref, 'the drained sink beside the durable '
                       "file's contiguous append axis")
@@ -678,6 +703,13 @@ def scenario_journal_sink_isolation(ctx):
                 "the durable journal's entry seqs are not the "
                 'contiguous append axis: '
                 + json.dumps(after[-12:])[:300])
+        if durable < settlements:
+            return case.finish(
+                'failed', 'journal-sink-isolation-failed: the durable '
+                'journal of the field owner carries ' + str(durable)
+                + ' of the retained window\'s ' + str(settlements)
+                + ' settlements — the drained queue never reached the '
+                'audited file')
 
         # The launch roles the cases behind this one meet.
         if wait_for(lambda: _pair_active(ctx),

@@ -1703,9 +1703,13 @@ Implementation order: second, after [daily architecture review](daily-architectu
   admissions plus an injected quality fault's transitions, and the
   release must drain the standing queue into the durable file in `seq`
   order — the file's own append axis contiguous, no torn or duplicated
-  record — answer every parked request with a receipt, and reconverge
-  the pair to one active plus one tracking standby with launch roles
-  restored. Named diagnostics are `journal-sink-isolation-failed` and
+  record, and the audited file the field owner's own, resolved from the
+  settled role rather than the launch role, carrying the window's
+  settlements so a healthy report cannot stand in for records the file
+  never took — answer every parked request with a receipt, and
+  reconverge the pair to one active plus one tracking standby with
+  launch roles restored. Named diagnostics are
+  `journal-sink-isolation-failed` and
   `journal-sink-isolation-nondeterministic`; two passes produce
   identical digests; a rig that is unreachable, that predates the
   served `journal_sink` section, that declares no `--journal-file`, or

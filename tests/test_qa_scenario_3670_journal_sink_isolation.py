@@ -39,6 +39,8 @@ EXPECTED_CASES = frozenset({
     'JournalSinkIsolationTests.test_duplicate_durable_record_is_nondeterministic',
     'JournalSinkIsolationTests.test_reordered_window_is_nondeterministic',
     'JournalSinkIsolationTests.test_retained_window_without_settlements_fails',
+    'JournalSinkIsolationTests.test_a_swapped_field_owner_is_followed_into_its_own_journal_file',
+    'JournalSinkIsolationTests.test_a_drain_that_never_appended_fails',
     'JournalSinkIsolationTests.test_unanswered_admission_fails',
     'JournalSinkIsolationTests.test_released_writer_never_drains_fails',
     'JournalSinkIsolationTests.test_owner_move_fails',
@@ -103,7 +105,7 @@ class _FakeJournalSink:
                 self._pending.append((self.seq, event))
             self.accepted = ordinal
         self.served.append({'seq': self.seq,
-                            'tick': self.feed.a_tick, 'event': event})
+                            'tick': self.feed._tick(), 'event': event})
         if self.feed.direct_journal_writes:
             self._append((self.seq, event))
             self.drained = ordinal
@@ -186,6 +188,11 @@ class _FakeJournalSink:
 
     def _append(self, record):
         seq, event = record
+        if self.feed.loses_durable:
+            # The drained-but-never-appended defect: the sink reports
+            # healthy with every record accounted while the file never
+            # took them.
+            return
         try:
             if self.feed.corrupt_durable and seq == 3:
                 # The torn append: a record the file took only in part.
@@ -208,14 +215,16 @@ class _FakeJournalSink:
 
 
 class JournalSinkFeed:
-    """A stubbed pair for the journal-sink-isolation scenario. ctrl-a
-    owns the field: every request on it is one completed scan — the tick
-    advances and whatever the request journals is recorded into the
-    recorder's own served ring, the journal sink's writer thread
-    draining each record to the durable file. ctrl-b tracks its stream.
-    The feed's flags stage each named defect the leg's diagnostics
-    cover, and `park`/`release` are the lever's hold on the
-    controller's drain writers."""
+    """A stubbed pair for the journal-sink-isolation scenario. The
+    field owner — `field_owner`, 'a' by default and swappable so the
+    owner need not be the launch role — serves the whole surface: every
+    request on it is one completed scan, the tick advances and whatever
+    the request journals is recorded into the recorder's own served
+    ring, the journal sink's writer thread draining each record to that
+    peer's durable file. The other peer tracks its stream. The feed's
+    flags stage each named defect the leg's diagnostics cover, and
+    `park`/`release` are the lever's hold on the controller's drain
+    writers."""
 
     def __init__(self, dirs):
         self.dirs = {key: Path(value) for key, value in dirs.items()}
@@ -224,6 +233,10 @@ class JournalSinkFeed:
         self.a_role = 'active'
         self.b_role = 'standby'
         self.b_tracking = True
+        # The peer serving the field this run parks: the leg must
+        # follow the settled role, not the launch role, both on the
+        # served surface and in the durable file it audits.
+        self.field_owner = 'a'
         self.receipts = []
         self.point = False
         self.capacity = 64
@@ -248,6 +261,7 @@ class JournalSinkFeed:
         self.duplicate_durable = False
         self.reorder_window = False
         self.drop_settlements = False
+        self.loses_durable = False   # drained, never appended
         self.refuse_attest = 0     # the nth submission never attests
         self.move_roles = False
         self.untracks = False
@@ -256,6 +270,37 @@ class JournalSinkFeed:
         self.sinks = {key: _FakeJournalSink(
             self.dirs[key] / 'journal.jsonl', self)
             for key in ('a', 'b')}
+
+    # ---- the pair's own halves ----
+
+    @property
+    def sink(self):
+        """The field owner's journal sink — the peer the leg's park
+        holds and the peer whose durable file the audit reads."""
+        return self.sinks[self.field_owner]
+
+    def _tick(self, peer=None):
+        return (self.a_tick if (peer or self.field_owner) == 'a'
+                else self.b_tick)
+
+    def _bump(self, peer=None):
+        peer = peer or self.field_owner
+        if peer == 'a':
+            self.a_tick += 1
+        else:
+            self.b_tick += 1
+
+    def _role_of(self, peer):
+        return self.a_role if peer == 'a' else self.b_role
+
+    def _sync(self, peer):
+        """A tracking standby's report carries its source's alignment;
+        the field owner reports no sync."""
+        if self._role_of(peer) != 'standby':
+            return None
+        if peer == 'b' and not self.b_tracking:
+            return None
+        return {'tracking': {'aligned': self._tick(self.field_owner)}}
 
     def seed_journal(self):
         """The bind-time durable record every launched controller writes
@@ -300,23 +345,26 @@ class JournalSinkFeed:
 
     # ---- the served monitor ----
 
-    def _scan(self):
-        """One completed scan cycle: the tick advances and, under the
-        staged defects, the cadence or the sink's named state lies."""
-        sink = self.sinks['a']
+    def _scan(self, peer=None):
+        """One completed scan cycle on the field owner: the tick
+        advances and, under the staged defects, the cadence or the
+        sink's named state lies."""
+        peer = peer or self.field_owner
+        sink = self.sink
         lagging = bool(sink.health()['depth'])
         if self.stall_on_lag and lagging:
             # The lengthened scan the contract forbids — no tick.
             return
         if self.late_reads and lagging:
             time.sleep(2.0)
-        self.a_tick += 1
+        self._bump(peer)
         for receipt in self.receipts:
             accepted = receipt['outcome'].get('accepted')
-            if accepted and self.a_tick >= accepted['apply_tick']:
+            if accepted and self._tick(peer) >= accepted['apply_tick']:
                 write = receipt['command']['write_value']
                 self.point = write['value']['bool']
-                receipt['outcome'] = {'applied': {'tick': self.a_tick}}
+                receipt['outcome'] = {'applied': {
+                    'tick': self._tick(peer)}}
         if self.was_parked and self.parked is None:
             if self.move_roles:
                 # The stall failed the pair over — the field owner does
@@ -328,14 +376,15 @@ class JournalSinkFeed:
                 self.b_tracking = False
 
     def _io_health(self):
-        """ctrl-a's io_health section — flat counters while the journal
-        sink lags, growing only under the staged defects."""
+        """The field owner's io_health section — flat counters while the
+        journal sink lags, growing only under the staged defects."""
         failures = overruns = 0
         if self.parked is not None:
+            elapsed = self._tick() - 400
             if self.degrades_io:
-                failures = self.a_tick - 400
+                failures = elapsed
             if self.overruns_under_stall:
-                overruns = self.a_tick - 400
+                overruns = elapsed
         return {'failed_reads': failures, 'failed_writes': 0,
                 'failed_exchanges': 0,
                 'consecutive_failures': failures,
@@ -345,11 +394,12 @@ class JournalSinkFeed:
         """POST /command: admission and the journaled settlement at
         submission, under the executor lock the scan just took."""
         receipt = {'command': body['command'],
-                   'outcome': {'accepted': {'apply_tick': self.a_tick + 1}},
+                   'outcome': {'accepted': {
+                       'apply_tick': self._tick() + 1}},
                    'actor': body.get('actor')}
         self.submissions += 1
         self.receipts.append(receipt)
-        ordinal = self.sinks['a'].offer({'command_settled': {
+        ordinal = self.sink.offer({'command_settled': {
             'receipt': copy.deepcopy(receipt)}})
         return receipt, ordinal
 
@@ -358,7 +408,7 @@ class JournalSinkFeed:
         off the lock the scans serialize on: the answer only once the
         drain covered the record the request journaled."""
         if self.submissions == self.refuse_attest \
-                or not self.sinks['a'].attest(ordinal):
+                or not self.sink.attest(ordinal):
             raise urllib.error.URLError('the journal drain never '
                                         'attested the record')
 
@@ -366,7 +416,7 @@ class JournalSinkFeed:
         """The served retained window — the recorder's own ring, never
         the durable file's."""
         entries = [copy.deepcopy(entry)
-                   for entry in self.sinks['a'].served]
+                   for entry in self.sink.served]
         if self.drop_settlements:
             entries = [entry for entry in entries
                        if 'command_settled' not in entry['event']]
@@ -391,14 +441,15 @@ class JournalSinkFeed:
         route, _, _query = path.partition('?')
         if self.down:
             raise urllib.error.URLError('connection refused')
-        if host == 'ctrl-b:2':
-            self.b_tick += 1
+        peer = 'b' if host == 'ctrl-b:2' else 'a'
+        if peer != self.field_owner:
+            # The tracking peer serves its role report only — the field
+            # owner holds the scanned field and the durable sinks.
+            self._scan(peer)
             if (method, route) == ('GET', '/role'):
-                sync = ({'tracking': {'aligned': self.a_tick}}
-                        if self.b_tracking and self.b_role == 'standby'
-                        else None)
-                return 200, {'role': self.b_role, 'tick': self.b_tick,
-                             'sync': sync}
+                return 200, {'role': self._role_of(peer),
+                             'tick': self._tick(peer),
+                             'sync': self._sync(peer)}
             raise AssertionError('unexpected request %s %s'
                                  % (method, url))
         if (method, route) == ('POST', '/command'):
@@ -412,7 +463,7 @@ class JournalSinkFeed:
             self._attest(ordinal)
             return 200, copy.deepcopy(receipt)
         if (method, route) == ('GET', '/journal'):
-            sink = self.sinks['a']
+            sink = self.sink
             if not self.serve_without_attest:
                 # The attesting read waits the standing queue out on its
                 # own worker — the request that must park while the
@@ -422,15 +473,16 @@ class JournalSinkFeed:
         with self._lock:
             self._scan()
             if (method, route) == ('GET', '/role'):
-                return 200, {'role': self.a_role, 'tick': self.a_tick,
-                             'sync': None}
+                return 200, {'role': self._role_of(peer),
+                             'tick': self._tick(peer),
+                             'sync': self._sync(peer)}
             if (method, route) == ('GET', '/snapshot'):
-                publication = {'published': self.a_tick, 'coalesced': 0,
+                publication = {'published': self._tick(), 'coalesced': 0,
                                'depth': 0, 'window': 4}
                 if not self.no_sink_section:
-                    publication['journal_sink'] = self.sinks['a'].health()
+                    publication['journal_sink'] = self.sink.health()
                 return 200, {
-                    'tick': self.a_tick,
+                    'tick': self._tick(),
                     'points': [{'point': 10, 'sample': {
                         'value': {'bool': self.point},
                         'quality': {'quality': 'good'}}}],
@@ -521,11 +573,18 @@ class JournalSinkIsolationTests(unittest.TestCase):
             record = scenarios.scenario_journal_sink_isolation(base)
         return record
 
-    def durable(self):
-        """The field owner's durable journal file, parsed line by line."""
+    def durable(self, peer='a'):
+        """A peer's durable journal file, parsed line by line."""
         return [json.loads(line) for line
-                in (self.dirs['a'] / 'journal.jsonl').read_text()
+                in (self.dirs[peer] / 'journal.jsonl').read_text()
                 .splitlines() if line.strip()]
+
+    def settlements_in_file(self, peer):
+        """The durable file's `command_settled` records — what the leg's
+        drain audit counts against the retained window's."""
+        return [item['entry'] for item in self.durable(peer)
+                if 'entry' in item
+                and 'command_settled' in item['entry']['event']]
 
     def test_registered_in_scenarios(self):
         self.assertIn(scenarios.scenario_journal_sink_isolation,
@@ -666,6 +725,38 @@ class JournalSinkIsolationTests(unittest.TestCase):
         self.assertEqual(record['outcome'], 'failed', record)
         self.assertIn('journal-sink-isolation-failed', record['detail'])
         self.assertIn('settlement', record['detail'])
+
+    def test_a_swapped_field_owner_is_followed_into_its_own_journal_file(self):
+        # A pair an earlier leg left with the other peer owning the
+        # field: the leg must park that peer's writer, read its served
+        # surface, and audit its durable file — the launch role's file
+        # would carry none of the window's records, and the durable
+        # claim would pass without ever reading the sink it parked.
+        self.feed.field_owner = 'b'
+        self.feed.a_role = 'standby'
+        self.feed.b_role = 'active'
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        restored = json.loads(
+            (self.evidence / 'journal-sink-restored.json').read_text())
+        self.assertEqual(restored['endpoint'], 'standby')
+        self.assertEqual(restored['journal_file'],
+                         str(self.dirs['b'] / 'journal.jsonl'))
+        self.assertTrue(self.settlements_in_file('b'), restored)
+        self.assertEqual(restored['settlements'],
+                         len(self.settlements_in_file('b')))
+        self.assertFalse(self.settlements_in_file('a'))
+        report.validate_scenario(record)
+
+    def test_a_drain_that_never_appended_fails(self):
+        # The sink's counters settle healthy and drained while its
+        # appends never reached the file: only the durable audit of the
+        # window's settlements names the record the queue owed.
+        self.feed.loses_durable = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('journal-sink-isolation-failed', record['detail'])
+        self.assertIn('never reached the audited file', record['detail'])
 
     def test_unanswered_admission_fails(self):
         # The second submission's attest never lands: its record stays
