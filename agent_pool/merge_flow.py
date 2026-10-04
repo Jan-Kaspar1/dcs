@@ -322,6 +322,8 @@ def _block_cause(park, history, job):
         return "quota-kill"
     if last_invocation == "timeout":
         return "timeout"
+    if last_invocation == "stall":
+        return "stall-kill"
     redispatch = next((e for e in after if e.get("kind") == "redispatch"), None)
     if redispatch is not None and event_cause(redispatch) == "quota-requeue":
         return "quota-kill"

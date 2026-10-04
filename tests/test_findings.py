@@ -874,11 +874,19 @@ class EndToEndTests(LaneFixture):
                           'report_dir': str(self.root / 'qa' / 'reports')})
         supervisor = Supervisor(config)
         runtime = Mock()
-        runtime.prepare_clone.side_effect = lambda worker, **kw: Path(config['pool_root']) / worker
+        prepared_branch = [None]
+        def prepare_clone(worker, **kw):
+            prepared_branch[0] = kw.get('branch')
+            return Path(config['pool_root']) / worker
+        runtime.prepare_clone.side_effect = prepare_clone
         runtime.spawn.side_effect = lambda key, *a, **kw: {'invocation': key, 'key': key, 'started_at': 0}
         runtime.poll.return_value = {'exit_code': 0}
         runtime.inspect_result.return_value = {'clean': True, 'changed': True}
-        runtime.run_git.return_value = 'base'
+        def run_git(cwd, *args):
+            if args[:2] == ('branch', '--show-current'):
+                return prepared_branch[0] or 'base'
+            return 'base'
+        runtime.run_git.side_effect = run_git
         runtime.session_id.return_value = 'session-one'
         runtime.recover.return_value = []
         supervisor.github = self.github
