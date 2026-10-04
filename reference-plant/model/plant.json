@@ -93,6 +93,7 @@
         "device": 1,
         "name": "level-primary"
       },
+      "stale_after_ticks": 2,
       "record": {
         "every_ticks": 5,
         "retain_days": 1095

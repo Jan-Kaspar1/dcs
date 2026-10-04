@@ -137,6 +137,28 @@
 #                run-boundary marker; a missing or unparseable state
 #                file never passes silently
 #                (restart-resume-failed, restart-resume-nondeterministic)
+#   stale-freshness
+#                this composition's own declared freshness budget
+#                (decision 45's `stale_after_ticks`) exercised on the
+#                deployed pair: the composition declares the budget on
+#                its primary wet-well level — under the manifest's
+#                failover budget, so staleness presents inside the
+#                writer-loss window — beside an unbudgeted neighbour
+#                on the same field step; the writer-holding peer is
+#                frozen so the field stops stepping while the surviving
+#                peer's reads keep answering, and the budgeted point
+#                must walk Good → Uncertain(Stale) at the declared lag
+#                while its unbudgeted neighbour keeps serving its last
+#                sample, the stale presentation degraded rather than a
+#                healthy last-known value, the declared failover-select
+#                annunciating rather than the control path holding the
+#                reading, and the resumed writer returning the point to
+#                Good with the stale interval retained in the served
+#                history and the pair's launch roles restored. The
+#                stage's doctored case — the held read served as a
+#                healthy last-known value — must report
+#                (stale-freshness-failed, stale-freshness-nondeterministic,
+#                stale-freshness-unchecked)
 #   surface      the served operator surface — the signal index, the
 #                monitoring page, the snapshot's descriptors, the
 #                block-interface registry covering every declared
@@ -1381,6 +1403,39 @@ for tamper in missing-state-file corrupt-state-file; do
     echo "  $tamper: reported, restart-resume-failed"
 done
 
+echo "== stale-freshness =="
+# The consumer composition's own declared freshness budget, on the
+# deployment the manifest declares. The stage brings the pair up
+# through the pair stage's shared rig, so it and the legs run one pair
+# definition. Two passes must render identical digest lines, and the
+# doctored case — the held read served as a healthy last-known value —
+# must fail.
+run_stale_freshness() {
+    python3 ci/stale_freshness.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json \
+        || fail "stale-freshness-failed: the declared freshness stage did not hold — its evidence lines are above"
+}
+STALE_FRESHNESS_FIRST="$(run_stale_freshness)" || exit 1
+STALE_FRESHNESS_SECOND="$(run_stale_freshness)" || exit 1
+[ "$STALE_FRESHNESS_FIRST" = "$STALE_FRESHNESS_SECOND" ] \
+    || fail "stale-freshness-nondeterministic: two stale-freshness stage passes produced different digests"
+echo "  $STALE_FRESHNESS_FIRST identical across both passes"
+if python3 ci/stale_freshness.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json \
+        --tamper expect-last-good; then
+    fail "stale-freshness-unchecked: the expect-last-good case passed the declared freshness stage"
+fi
+
 echo "== surface =="
 python3 ci/simulate.py \
     --surface \
@@ -1483,7 +1538,7 @@ for file in ci/alarm_rationalization.py ci/alarm_validation.py \
         ci/managed_carryover.py ci/oos.py ci/overview_url.py \
         ci/power_trip.py \
         ci/restart.py ci/schema_conformance.py ci/simulate.py \
-        ci/staging.py ci/legs/*.py README.md; do
+        ci/stale_freshness.py ci/staging.py ci/legs/*.py README.md; do
     if grep -nE 'crates/|\.\./|file://|/home/|target/debug' "$file"; then
         fail "path-dependency-leak: $file references a platform-checkout path"
     fi

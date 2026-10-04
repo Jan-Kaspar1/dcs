@@ -111,6 +111,21 @@ ci/staging.py          the pair contract's staging leg — the emitted
                        rise through the declared crossings, the
                        high-level annunciation, the bounded staging
                        response, and the declared de-stage order
+ci/stale_freshness.py  the declared-freshness stage — this
+                       composition's own `stale_after_ticks` budget on
+                       the primary wet-well level, exercised on the
+                       deployed pair: the writer-holding peer frozen so
+                       the field stops stepping while the surviving
+                       peer's reads keep answering, the budgeted point
+                       walking Good → Uncertain(Stale) at the declared
+                       lag while its unbudgeted neighbour keeps serving
+                       its last sample Good, the stale presentation
+                       degraded rather than a healthy last-known value,
+                       the declared `failover-select` annunciating
+                       instead of holding the reading, and the resumed
+                       writer returning the point to Good with the
+                       stale interval retained in the served history
+                       and the pair's launch roles restored
 ci/oos.py              the pair contract's out-of-service leg — a
                        receipted maintenance inhibit on the duty
                        pump's declared `oos` point excluding it from
