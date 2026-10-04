@@ -16,9 +16,12 @@ The manifest is read through `cargo metadata --no-deps`: Cargo's own
 TOML dialect decides which declaration is the pin — inline-table key
 order, line wrapping, and comments are inert, and a commented-out pin
 declares nothing — while `--no-deps` leaves the committed lockfile
-unread and unwritten. The lockfile is read through `tomllib`, the
-stdlib TOML parser, so a `[[package]]` entry's field order is the
-same record however it was merged or edited.
+unread and unwritten. Only `dcs-build` must be declared directly:
+`dcs-core` and `dcs-model` are the contract's optional direct
+declarations, so a manifest naming neither resolves both through
+`dcs-build` at the same pin and still passes. The lockfile is read
+through `tomllib`, the stdlib TOML parser, so a `[[package]]` entry's
+field order is the same record however it was merged or edited.
 
 Usage, from the consumer tree's root:
 
@@ -28,10 +31,14 @@ Usage, from the consumer tree's root:
 leg, a doctored scratch copy in the stage's self-checks. `REMOTE` is
 the remote this check resolves — `DCS_REMOTE`, the stand-in the
 workspace-side proofs substitute — and `RECORD` the release record's
-`record.md` when one was substituted, else the empty string. Exit
+`record.md`: the one `ci/check.sh` fetches at the pinned rev in the
+contract's own shape, the substituted one under `DCS_RECORD_DIR`, or
+the empty string for the stage's doctored legs. Exit
 status 2 is a release crate recorded from a non-git source —
-`path-dependency-leak`'s finding — and 1 every other disagreement,
-`lockfile-stale`'s.
+`path-dependency-leak`'s finding — 3 a tag query the remote could
+not answer at all — the served target unverifiable rather than
+absent, `pin-unresolvable`'s finding — and 1 every other
+disagreement, `lockfile-stale`'s.
 """
 
 import json
@@ -65,6 +72,16 @@ def leak(message):
 # dependency carrying no source, or a source that is not the pinned
 # remote's git query, declares no pin this leg can hold the lockfile
 # to.
+#
+# `dcs-build` must be declared directly — it is the release's
+# engineering seam, the crate a consumer composes with, and every other
+# release crate reaches the tree through it. `dcs-core` and `dcs-model`
+# are the contract's optional direct declarations ("a consumer may also
+# declare them directly", `docs/release-contract.md`): a manifest
+# naming neither resolves both through `dcs-build` at the same pin and
+# declares no pin of its own for them, so the census below learns the
+# pin from whatever the manifest does declare and the lockfile's own
+# record of all three release crates is authoritative for the rest.
 try:
     metadata = subprocess.run(
         ["cargo", "metadata", "--format-version", "1", "--no-deps", "--offline"],
@@ -76,8 +93,10 @@ if metadata.returncode != 0:
     sys.exit(f"Cargo.toml does not resolve as a cargo manifest: {metadata.stderr.strip()}")
 document = json.loads(metadata.stdout)
 git_pin = re.compile(r"^git\+[^?]+\?(tag|rev)=")
+# The census walks every release crate, so a crate this manifest does
+# not declare directly contributes no pin rather than a missing one.
 declared = {}
-for name in ("dcs-build", "dcs-model"):
+for name in release:
     pins = {
         dependency["source"]
         for package in document.get("packages", [])
@@ -87,7 +106,9 @@ for name in ("dcs-build", "dcs-model"):
         and git_pin.match(dependency["source"])
     }
     if not pins:
-        sys.exit(f"{name} declares no `git = ..., tag|rev = ...` pin in Cargo.toml")
+        if name == "dcs-build":
+            sys.exit("dcs-build declares no `git = ..., tag|rev = ...` pin in Cargo.toml")
+        continue
     if len(pins) != 1:
         sys.exit(f"{name} declares conflicting git pins in Cargo.toml: {sorted(pins)}")
     declared[name] = pins.pop()
@@ -152,16 +173,34 @@ if not re.fullmatch(r"[0-9a-f]{40}", precise):
     sys.exit(f"{lock_path} records no precise revision for {url} at {query}: {source}")
 
 # The recorded revision must be the one the declared pin names. A tag
-# the remote does not serve yet is not this leg's finding: an
-# unresolvable pin is `pin-unresolvable`'s, and a remote that cannot
-# be reached at all leaves the query comparison above holding.
+# the remote answers without serving — the ref genuinely absent — is
+# not this leg's finding: an unresolvable pin is `pin-unresolvable`'s.
+# A query the remote cannot answer is a different shape: a transport
+# failure, an auth refusal, a safe.directory rejection, or a corrupt
+# repository all exit nonzero, which stdout alone cannot tell from
+# "not published" — yet the tag's target is then unverifiable, never
+# absent. The leg refuses on that path (status 3) because nothing
+# downstream rescues it: `cargo fetch --locked` resolves the recorded
+# sha through libgit2 and cargo's git cache without re-checking the
+# tag's target, so a lockfile recording a commit the tag does not
+# land on would otherwise pass green on the ambient CLI's health.
 if kind == "tag":
-    refs = subprocess.run(
-        ["git", "ls-remote", url, f"refs/tags/{value}", f"refs/tags/{value}^{{}}"],
-        capture_output=True, text=True, check=False,
-    ).stdout
+    try:
+        refs = subprocess.run(
+            ["git", "ls-remote", url,
+             f"refs/tags/{value}", f"refs/tags/{value}^{{}}"],
+            capture_output=True, text=True, check=False,
+        )
+    except OSError as error:
+        print(f"git ls-remote could not run: {error}", file=sys.stderr)
+        sys.exit(3)
+    if refs.returncode != 0:
+        print(f"{url} could not be queried for {value}: git ls-remote "
+              f"exited {refs.returncode}: {refs.stderr.strip()}",
+              file=sys.stderr)
+        sys.exit(3)
     served = {}
-    for line in refs.splitlines():
+    for line in refs.stdout.splitlines():
         sha, _, ref = line.partition("\t")
         served[ref] = sha
     target = served.get(f"refs/tags/{value}^{{}}") or served.get(f"refs/tags/{value}")
