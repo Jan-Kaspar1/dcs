@@ -1669,6 +1669,48 @@ Implementation order: second, after [daily architecture review](daily-architectu
   run carrying no born staging lever, no per-seat journal file, or no
   settled pair reports inconclusive.
 
+### Landed 2026-10-03 (journal-sink scan-isolation leg, #1005)
+
+- The `--journal-file` sink-isolation contract (#942's journal-append
+  isolation decision, in service of WW-FND-004's "no durable sink may
+  pace the scan") now has lane evidence beside the state-file
+  isolation leg's checkpoint-sink coverage: scenario leg
+  `3670_journal_sink_isolation`, the audit trail's half of the same
+  bounded-queue-plus-dedicated-writer decision 36 records.
+- The impediment is the mount-impediment lever the sink-isolation legs
+  share, #999's staging idea pointed at the journal path — with the
+  lever the append-mode sink actually admits. A `--journal-file`
+  writer opens its file once at bind and appends through the held
+  descriptor, so no staged FIFO can park a mid-run write; the thing
+  that has to stall is the writer thread itself, which the runner
+  reaches through the controller container's host pid and its `/proc`
+  task surface (`dcs-drain` is every durable sink writer's comm, and
+  the leg tells the journal one from its siblings by observable
+  effect: only the journal writer's park holds a journaled record in
+  the queue). The latest drain thread probes first, matching the
+  released binary's bind order, and the leg reports inconclusive rather
+  than probing a lever the run context was never granted.
+- With the pair settled and tracking and the journaled traffic flowing,
+  the leg holds the field owner's journal writer and asserts through
+  the serving monitor that `publication.journal_sink` reports its named
+  `lagging` state with the accepted counter advancing and the depth
+  bounded inside the queue's declared capacity, that the served tick
+  advances inside the documented bound while the `io_health` counters
+  stand unmoved and every serving read answers inside its bound, and
+  that the durability-attesting `GET /journal` read stands parked on
+  its own worker rather than answering while the file could not have
+  caught up. The window's traffic is the receipted `write_value`
+  admissions plus an injected quality fault's transitions, and the
+  release must drain the standing queue into the durable file in `seq`
+  order — the file's own append axis contiguous, no torn or duplicated
+  record — answer every parked request with a receipt, and reconverge
+  the pair to one active plus one tracking standby with launch roles
+  restored. Named diagnostics are `journal-sink-isolation-failed` and
+  `journal-sink-isolation-nondeterministic`; two passes produce
+  identical digests; a rig that is unreachable, that predates the
+  served `journal_sink` section, that declares no `--journal-file`, or
+  that admits no mount lever reports inconclusive.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,
