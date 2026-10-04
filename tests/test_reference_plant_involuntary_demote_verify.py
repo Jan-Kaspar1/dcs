@@ -139,9 +139,17 @@ class Registration(unittest.TestCase):
         self.assertEqual(record["passes"], "involuntary-demote-verify")
 
     def test_the_announced_hint_legs_share_the_hostile_endpoint(self):
-        shared = importlib.import_module("announced_source_verify")
+        # The staging is imported, not restated: the pull ledger the
+        # announced-source-verify leg records is the ledger this leg
+        # asserts its bounded verify pass against. Read the shared module
+        # through the leg's own reference — a sibling test module's
+        # reload replaces the name in `sys.modules`, and identity
+        # against the reloaded copy would prove nothing about sharing.
+        shared = leg.announced_source_verify
         self.assertTrue(leg.ForeignEndpoint is shared.ForeignEndpoint)
         self.assertTrue(leg.refusals is shared.refusals)
+        self.assertIn("import announced_source_verify",
+                      normalized_source(_LEG_PATH))
 
     def test_the_doctored_case_carries_named_evidence(self):
         tampers = {record["name"]: record for record in leg.LEG["tampers"]}
@@ -154,6 +162,15 @@ class Registration(unittest.TestCase):
                     f"{name} declares evidence the leg never prints: "
                     f"{evidence!r}",
                 )
+
+    def test_the_contract_declares_the_emitted_diagnostics(self):
+        contract = (_ROOT / "docs" / "release-contract.md").read_text()
+        for name in (
+            "`involuntary-demote-verify-failed`",
+            "`involuntary-demote-verify-nondeterministic`",
+            "`involuntary-demote-verify-unchecked`",
+        ):
+            self.assertIn(name, contract)
 
 
 class VerdictClassification(unittest.TestCase):
@@ -386,6 +403,14 @@ class RoleVocabulary(unittest.TestCase):
         # A bare hint on an unkeyed run earns not even a bounded verify
         # pull, so the allowance the leg asserts against is zero.
         self.assertEqual(leg.UNKEYED_PULL_BOUND, 1)
+
+    def test_only_the_switch_own_answers_are_a_preempt_verdict(self):
+        # The switch's own 200 and its named 409 refusals are product
+        # verdicts — a refused preempt is a failure the leg reports.
+        # Anything else (an unrouted 404 on a release predating the
+        # verb) admits no claim-preempt staging at all, which is
+        # inconclusive, never a product failure.
+        self.assertEqual(leg.PREEMPT_ANSWERS, (200, 409))
 
     def test_role_of_tolerates_a_dropped_report(self):
         self.assertEqual(leg.role_of({"role": "active"}), "active")

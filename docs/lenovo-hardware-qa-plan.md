@@ -1669,6 +1669,60 @@ Implementation order: second, after [daily architecture review](daily-architectu
   run carrying no born staging lever, no per-seat journal file, or no
   settled pair reports inconclusive.
 
+### Landed 2026-10-04 (involuntary-demotion lazy hint-verification leg, #1484/#924)
+
+- The involuntary half of decision 92's announced-source contract — the
+  per-revision lane evidence for WW-LCM-001's takeover-continuity clause
+  and WW-FND-004's command integrity — is exercised on the deployed pair
+  by scenario leg `2140_involuntary_demote_verify`. Every leg filed
+  against the announced-hint seam so far drove the *request* boundary:
+  `POST /demote` can hang its verification on the call, pulling each
+  recorded `?peer=` hint once under the keyed `line_proof`. An
+  involuntary demotion — a field claim's mid-run loss, the superseded
+  owner demoting in place on its own fenced write — crosses no such
+  boundary, so nothing can hang a verify on it and the recorded set is
+  consumed from the tracking path instead, lazily. No leg reached that
+  path: the forged-checkpoint refusal leg proves the request boundary's
+  own verdict, and says nothing about what an unfenced verify consumes.
+- The episode stages the hostile endpoint the announce legs share — the
+  run's bridge-placed forge serving one staged document and ledgering
+  every pull that reaches it — and preempts the field claim through the
+  documented `POST /promote` on the tracking standby, never a demote
+  first, so the owner's demotion is the fencing path's alone. The staged
+  document is the owner's own checkpoint replayed as a standby-shaped
+  continuation with one internal `In` sample planted against the pass's
+  own settled write, so an adoption would be observable in the demoted
+  peer's served image and not only in its journal.
+- The leg judges the contract's four clauses on whichever posture the run
+  launches under, and the posture decides the verdict rather than the
+  rig: on a keyed run the recorded hint is a *verify candidate*, so the
+  forge's ledger must show the bounded verify pass and never a chase (a
+  hint followed as a pull target is dialed once per scan), the refused
+  probe must be journaled by name as `tracking_source_refused` — a
+  refused candidate is durable audit, never silence — and the verified
+  successor's endpoint pins into `tracking_source_adopted`; on an unkeyed
+  run a bare hint is no tracking source at all, so the ledger must read
+  *no* pull whatsoever and no refusal can journal either, because nothing
+  was served to refuse, while the peer still resolves through the field's
+  own arbitration and reports its honest `tracking`/`orphaned` verdict.
+  Neither posture may adopt the staged document, the demoted peer's
+  served line document must name the promoted successor, and the pair
+  must reconverge to exactly one `active` plus one `tracking` standby
+  with the claim and the entry roles restored for the legs behind it.
+- Named diagnostics are `demote-hint-verify-failed` (a chase past the
+  bounded allowance or a verify pass that never ran, a refusal that
+  vanished from the journal, an adoption naming the forge or no verified
+  source at all, a served document carrying the planted sample or
+  another `line_owner`, a pair that never reconverged, a demotion that
+  never landed in place, a refused claim preempt, a restore that never
+  settled) and `demote-hint-verify-nondeterministic` when the two
+  passes' digests diverge, with the self-check's
+  `demote-hint-verify-unchecked` covering every planted negative. Two
+  consecutive passes produce identical digests; a run carrying only one
+  endpoint, no forge action, a host-placed forge, no per-controller
+  journal files, no writable bool in-point to plant against, an
+  unreachable monitor, or a pair that never settled reports inconclusive.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,

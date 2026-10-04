@@ -127,10 +127,15 @@ class Registration(unittest.TestCase):
     def test_the_announced_hint_legs_share_the_hostile_endpoint(self):
         # The staging is imported, not restated: the pull ledger the
         # announced-source-verify leg records is the ledger this leg
-        # asserts its bounded verify pass against.
-        shared = importlib.import_module("announced_source_verify")
+        # asserts its bounded verify pass against. Read the shared module
+        # through the leg's own reference — a sibling test module's
+        # reload replaces the name in `sys.modules`, and identity
+        # against the reloaded copy would prove nothing about sharing.
+        shared = leg.announced_source_verify
         self.assertTrue(leg.ForeignEndpoint is shared.ForeignEndpoint)
         self.assertTrue(leg.forged_document is shared.forged_document)
+        self.assertIn("import announced_source_verify",
+                      normalized_source(_LEG_PATH))
 
     def test_the_doctored_case_carries_named_evidence(self):
         tampers = {record["name"]: record for record in leg.LEG["tampers"]}
@@ -143,6 +148,15 @@ class Registration(unittest.TestCase):
                     f"{name} declares evidence the leg never prints: "
                     f"{evidence!r}",
                 )
+
+    def test_the_contract_declares_the_emitted_diagnostics(self):
+        contract = (_ROOT / "docs" / "release-contract.md").read_text()
+        for name in (
+            "`tracking-source-auth-failed`",
+            "`tracking-source-auth-nondeterministic`",
+            "`tracking-source-auth-unchecked`",
+        ):
+            self.assertIn(name, contract)
 
 
 class VerdictClassification(unittest.TestCase):

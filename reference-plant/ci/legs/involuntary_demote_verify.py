@@ -54,8 +54,10 @@ both postures the contract names, through the shared `launch_pair` rig:
 The contract postdates some pinned release lines: where the launched
 tooling predates it — a served checkpoint without the
 `source_owns_field` stamp, the declared `journal_file` persistence
-absent, or no durable `tracking_source_refused` record at all — the leg
-reports `involuntary-demote-verify-digest inconclusive` rather than
+absent, a `POST /promote` the monitor does not route at all (the
+harness admits no claim-preempt staging), or no durable
+`tracking_source_refused` record at all — the leg reports
+`involuntary-demote-verify-digest inconclusive` rather than
 asserting until the manifest repins a release carrying the contract.
 
 Usage:
@@ -165,6 +167,14 @@ POLL_SLEEP = 0.02
 # a proven endpoint of this line. `degraded` is the wedge this contract
 # exists to refuse — a stranded pull on the foreign endpoint.
 CONVERGED_VERDICTS = ("tracking", "orphaned")
+
+# The statuses the documented `POST /promote` answers on a serving
+# monitor: the switch's own 200, or a 409 naming one of its refusals
+# (`not_converged`, `already_active`, `no_tracking_source`). Anything
+# else — an unrouted 404, a malformed-body 400 — is a release carrying
+# no claim-preempt staging at all, which the leg reports inconclusive
+# rather than as a preempt refusal it cannot read.
+PREEMPT_ANSWERS = (200, 409)
 
 
 def drive(urls, rounds, accept, failures, what):
@@ -470,6 +480,13 @@ def involuntary_demote_verify_pass(args, tamper):
         # demotion must be the superseded owner's own fenced write.
         floor = len(pair.journal_records(duty_journal))
         status, body = pair.request(f"{standby_url}/promote", {})
+        if status not in PREEMPT_ANSWERS:
+            raise Inconclusive(
+                f"POST /promote on the tracking standby answered {status} "
+                f"{body} — the harness admits no claim-preempt staging, "
+                "so the pinned release predates the verb the involuntary "
+                "demotion rides on"
+            )
         if status != 200:
             failures.append(
                 f"POST /promote on the tracking standby answered {status} "
@@ -642,6 +659,14 @@ def involuntary_demote_verify_pass(args, tamper):
             pulls_at_entry = len(foreign.served_pulls())
             floor = len(pair.journal_records(unkeyed_journal))
             status, body = pair.request(f"{unkeyed_peer_url}/promote", {})
+            if status not in PREEMPT_ANSWERS:
+                raise Inconclusive(
+                    "POST /promote on the unkeyed peer answered "
+                    f"{status} {body} — the harness admits no "
+                    "claim-preempt staging on the unkeyed seat either, "
+                    "so the pinned release predates the verb the "
+                    "involuntary demotion rides on"
+                )
             if status != 200:
                 failures.append(
                     "POST /promote on the unkeyed peer answered "

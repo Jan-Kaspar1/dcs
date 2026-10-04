@@ -154,6 +154,15 @@ class Registration(unittest.TestCase):
                     f"{evidence!r}",
                 )
 
+    def test_the_contract_declares_the_emitted_diagnostics(self):
+        contract = (_ROOT / "docs" / "release-contract.md").read_text()
+        for name in (
+            "`announced-source-verify-failed`",
+            "`announced-source-verify-nondeterministic`",
+            "`announced-source-verify-unchecked`",
+        ):
+            self.assertIn(name, contract)
+
 
 class VerdictClassification(unittest.TestCase):
     """`main()`'s three verdicts — a green digest line, the named

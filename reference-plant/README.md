@@ -89,21 +89,21 @@ ci/legs.py             the pair stage's leg driver — discovers the
                        ci/legs/*.py legs in declared order, runs each
                        twice requiring identical digests, and exercises
                        each leg's declared doctored cases
- ci/legs/               the pair stage's legs — one file per leg, each
-                        carrying its explanatory docstring and its stage
-                        registration in a module-level LEG literal (its
-                        declared order, titles, tool flags, and doctored
-                        cases). ci/legs/pair.py is the redundant-pair
-                        leg and the shared launch/settle/restore harness
-                        the legs run on. Adding a leg is one new file —
-                        no edit to the check script, the lint, or this
-                        list. The announced-hint authenticity legs share
-                        their hostile endpoint: ci/legs/
-                        announced_source_verify.py owns the loopback
-                        `ForeignEndpoint` staging (a served forged
-                        document, a pull ledger, a `?peer=` announce),
-                        which ci/legs/tracking_source_auth.py and
-                        ci/legs/involuntary_demote_verify.py import
+ci/legs/               the pair stage's legs — one file per leg, each
+                       carrying its explanatory docstring and its stage
+                       registration in a module-level LEG literal (its
+                       declared order, titles, tool flags, and doctored
+                       cases). ci/legs/pair.py is the redundant-pair
+                       leg and the shared launch/settle/restore harness
+                       the legs run on. Adding a leg is one new file —
+                       no edit to the check script, the lint, or this
+                       list. The announced-hint authenticity legs share
+                       their hostile endpoint: ci/legs/
+                       announced_source_verify.py owns the loopback
+                       `ForeignEndpoint` staging (a served forged
+                       document, a pull ledger, a `?peer=` announce),
+                       which ci/legs/tracking_source_auth.py and
+                       ci/legs/involuntary_demote_verify.py import
 
 ci/managed_carryover.py  the pair contract's managed run-state
                         carryover leg — the managed alarm kinds'

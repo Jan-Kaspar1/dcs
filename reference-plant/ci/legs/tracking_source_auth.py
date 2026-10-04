@@ -367,10 +367,10 @@ def tracking_source_auth_pass(args, tamper):
         )
 
         pre_adoptions = adopted_ports(rig.standby_files["journal_file"])
-        redirect = foreign_announce()
+        redirect = foreign.address
         answered = pair.get(
-            f"{standby_url}/checkpoint?peer={foreign.address}",
-            f"GET /checkpoint?peer={foreign.address}",
+            f"{standby_url}/checkpoint?peer={redirect}",
+            f"GET /checkpoint?peer={redirect}",
             failures,
         )
         if not isinstance(answered, dict) or "tick" not in answered:
