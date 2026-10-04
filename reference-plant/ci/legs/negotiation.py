@@ -56,7 +56,6 @@ exit nonzero carrying the degraded report it actually saw.
 """
 
 import argparse
-import hashlib
 import json
 import os
 import shutil
@@ -622,9 +621,7 @@ def main():
         return 1
     if failures:
         return 1
-    digest = hashlib.sha256(
-        json.dumps(digest_entries, sort_keys=True).encode()
-    ).hexdigest()
+    digest = simulate.stable_digest(digest_entries)
     print(
         f"negotiation-digest {digest} — degraded "
         f"({evidence['degraded_detail']}) for {WINDOW_TICKS} scans, "

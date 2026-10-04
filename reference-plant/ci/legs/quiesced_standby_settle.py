@@ -118,7 +118,6 @@ named diagnostic (`quiesced-standby-settle-unchecked`).
 """
 
 import argparse
-import hashlib
 import json
 import os
 import sys
@@ -927,9 +926,7 @@ def main():
         return 1
     if failures:
         return 1
-    digest = hashlib.sha256(
-        json.dumps(digest_entries, sort_keys=True).encode()
-    ).hexdigest()
+    digest = simulate.stable_digest(digest_entries)
     print(
         f"quiesced-standby-settle-digest {digest} — the carried "
         f"admission held pending across "

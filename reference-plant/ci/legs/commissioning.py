@@ -881,9 +881,7 @@ def commissioning_pass(args, tamper):
                     peer_turnover["journal"] = {
                         "declared": os.path.basename(journal_path),
                         "records": len(records),
-                        "sha256": hashlib.sha256(
-                            json.dumps(records, sort_keys=True).encode()
-                        ).hexdigest(),
+                        "sha256": simulate.stable_digest(records),
                     }
             state_path = files.get("state_file")
             if state_path is not None:
@@ -989,9 +987,7 @@ def main():
         return 1
     if failures:
         return 1
-    digest = hashlib.sha256(
-        json.dumps(digest_entries, sort_keys=True).encode()
-    ).hexdigest()
+    digest = simulate.stable_digest(digest_entries)
     print(
         f"commissioning-digest {digest} — tracking by tick "
         f"{evidence['converged']}, {evidence['io_points']} field "

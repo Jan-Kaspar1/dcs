@@ -1,45 +1,40 @@
-"""`ci/lockfile_pin.py` — the reference plant's committed-lockfile leg
-— unit-tested against a seeded local remote: the leg compares the
-committed `Cargo.lock` against the pin `Cargo.toml` declares, at the
-revision that pin names, and Cargo resolves any git object in `rev =`
-— so every spelling is covered here against a remote seeded with two
-commits, a `main` moved past the first and a tag on the second: a
+"""`ci/lockfile.py` — the reference plant's committed-lockfile leg —
+run against a seeded local remote: the leg holds the committed
+`Cargo.lock` against the pin `Cargo.toml` declares, at the revision that
+pin names, and Cargo resolves *any* git rev in `rev =` — so every
+spelling is covered here. The remote is seeded with two commits, `main`
+moved past the first and a tag `movable-tag` on the second, and a
 branch name, an abbreviated sha, a tag name spelled through `rev`, and
 the `tag =` spelling itself are each read back off the remote and
 compared, while a full sha is compared literally. The reported defect
-(`lockfile-leg-rev-compare-skipped-for-non-full-sha`) skipped the
-comparison for every spelling but a full sha, so a lockfile recording a
-commit the branch had moved past passed the leg that exists to report
-exactly that; a pin the remote serves nothing for stays
-`pin-unresolvable`'s finding and says so out loud rather than passing
-silently. The leak and stale halves are covered with it: a release
-crate recorded with no `source` at all — a `path` package — carries its
-own exit status, a missing release crate and a divergent query are
-stale, and the release record's filled `Commit` field must name the
-recorded revision. `ci/check.sh`'s `lockfile` stage runs this same
-module, which these tests hold to the stage's own delegation."""
-import contextlib
-import importlib.util
-import io
+(`lockfile-leg-rev-compare-skipped-for-non-full-sha`) gated that
+comparison on a 40-hex `rev`, so every other spelling was admitted and
+then checked not at all: a lockfile recording a commit the branch had
+moved past passed the leg that exists to report exactly that. A pin the
+remote serves nothing for stays `pin-unresolvable`'s finding and says so
+out loud rather than passing silently, and a remote that cannot be
+queried at all is refused as unverifiable. The leak and stale halves are
+covered with it: a release crate recorded with no `source` at all — a
+`path` package — carries its own exit status, a missing release crate
+and a divergent query are stale, and the release record's filled
+`Commit` field must name the recorded revision.
+
+The leg is a script beside the other `ci/check.sh` stage legs — it reads
+its tree's manifest through `cargo metadata`, so it resolves in the
+working directory — which is why each case here runs it as a subprocess
+rooted in a scratch tree of its own. `ci/check.sh`'s `lockfile` stage
+runs this same script, which the last case holds to.
+"""
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 _CI = Path(__file__).resolve().parents[1] / "reference-plant" / "ci"
-_LEG = _CI / "lockfile_pin.py"
+_LEG = _CI / "lockfile.py"
 _CHECK = _CI / "check.sh"
-
-
-def load(path, name):
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-lockfile_pin = load(_LEG, "lockfile_pin")
 
 
 class Remote:
@@ -49,7 +44,7 @@ class Remote:
     revision the tests compare against. No network is involved."""
 
     def __init__(self):
-        self.dir = Path(tempfile.mkdtemp(prefix="dcs-lockfile-pin-"))
+        self.dir = Path(tempfile.mkdtemp(prefix="dcs-lockfile-"))
         self.url = f"file://{self.dir / 'remote.git'}"
         self.git("init", "--quiet", "--bare", str(self.dir / "remote.git"))
         self.git("init", "--quiet", "-b", "main", str(self.dir / "seed"))
@@ -65,6 +60,12 @@ class Remote:
         self.tip = self.rev("HEAD")
         self.git(*seed, "tag", "movable-tag")
         self.git(*seed, "push", "--quiet", "origin", "movable-tag")
+        # The bare repository's HEAD points at the seeded branch, so
+        # `git ls-remote` reports it — a bare repository left on the
+        # ambient default branch serves a dangling HEAD, which the
+        # `rev = "HEAD"` case below would then read as no ref at all.
+        self.git("-C", str(self.dir / "remote.git"), "symbolic-ref",
+                 "HEAD", "refs/heads/main")
         # An abbreviation of the tip the recorded base commit does not
         # share, so the short-sha case is decided by construction
         # rather than by an assumed hex-prefix collision.
@@ -75,7 +76,20 @@ class Remote:
         )
 
     def git(self, *args):
-        subprocess.run(["git", *args], check=True, capture_output=True, text=True)
+        subprocess.run(
+            ["git", *args],
+            check=True,
+            capture_output=True,
+            text=True,
+            env={
+                "GIT_AUTHOR_NAME": "reference plant ci",
+                "GIT_AUTHOR_EMAIL": "ci@example.invalid",
+                "GIT_COMMITTER_NAME": "reference plant ci",
+                "GIT_COMMITTER_EMAIL": "ci@example.invalid",
+                "HOME": str(self.dir),
+                "PATH": "/usr/bin:/bin:/usr/local/bin",
+            },
+        )
 
     def rev(self, ref):
         return subprocess.run(
@@ -85,20 +99,28 @@ class Remote:
             text=True,
         ).stdout.strip()
 
-    def tree(self, kind, value, recorded, name="dcs-model", source=None):
-        """A scratch manifest declaring `kind = "<value>"` on this
-        remote and a scratch lockfile recording `recorded` for every
-        release crate — `source` replaces each recorded source line
-        whole, for the leak and divergent-query cases — and `name`
-        renaming the third block, for the absent-crate case."""
+    def tree(self, kind, value, recorded, name="dcs-model", source=None, remote=None):
+        """A scratch tree whose manifest declares `kind = "<value>"`
+        on this remote and whose lockfile records `recorded` for every
+        release crate — `source` replaces each recorded source whole,
+        for the leak and divergent-query cases — `remote` pins another
+        URL in the manifest and the lockfile alike, for the
+        unreachable-remote case — and `name` renaming the third block,
+        for the absent-crate case. The scratch root is under the
+        remote's, so one `rmtree` takes every case with it."""
         directory = Path(tempfile.mkdtemp(dir=self.dir))
-        pin = f'{{ git = "{self.url}", {kind} = "{value}" }}'
+        url = self.url if remote is None else remote
+        pin = f'{{ git = "{url}", {kind} = "{value}" }}'
+        # A manifest cargo can read: `cargo metadata` — how the leg
+        # resolves the declared pin — refuses a package with no target.
+        (directory / "src").mkdir()
+        (directory / "src" / "main.rs").write_text("fn main() {}\n")
         (directory / "Cargo.toml").write_text(
             '[package]\nname = "movable-pin"\nversion = "0.1.0"\nedition = "2021"\n'
             "\n[dependencies]\n"
             f"dcs-build = {pin}\ndcs-model = {pin}\n"
         )
-        line = f'source = "git+{self.url}?{kind}={value}#{recorded}"'
+        line = f'source = "git+{url}?{kind}={value}#{recorded}"'
         if source is not None:
             line = source.format(url=self.url, query=f"{kind}={value}", sha=recorded)
         blocks = [
@@ -108,19 +130,21 @@ class Remote:
         (directory / "Cargo.lock").write_text("version = 4\n\n" + "\n".join(blocks))
         return directory
 
-    def run(self, directory, record=""):
-        """The leg's own exit status over one scratch pair, with its
-        stdout and stderr captured."""
-        out, err = io.StringIO(), io.StringIO()
-        argv = [
-            "--manifest", str(directory / "Cargo.toml"),
-            "--lock", str(directory / "Cargo.lock"),
-            "--remote", self.url,
-            "--record", str(record) if record else "",
-        ]
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            status = lockfile_pin.main(argv)
-        return status, out.getvalue(), err.getvalue()
+    def run(self, directory, remote=None, record=""):
+        """The leg's own exit status over one scratch tree, with its
+        stdout and stderr captured. The manifest resolves in the
+        working directory, so the run is rooted in `directory`."""
+        finished = subprocess.run(
+            [
+                sys.executable, str(_LEG), "Cargo.lock",
+                self.url if remote is None else remote,
+                str(record) if record else "",
+            ],
+            cwd=directory,
+            capture_output=True,
+            text=True,
+        )
+        return finished.returncode, finished.stdout, finished.stderr
 
 
 REMOTE = None
@@ -146,6 +170,10 @@ class MovablePinTests(unittest.TestCase):
         self.assertIn(named, err, f"the refusal named no revision the pin names: {err}")
 
     def test_a_branch_pin_recording_a_commit_it_moved_past_is_refused(self):
+        # The reported reproduction: `rev = "main"` against a lockfile
+        # recording the commit the branch has moved past. The refusal
+        # names the revision read back off the remote, so it is the
+        # `tag` path's ls-remote comparison, not a silent pass.
         status, _, err = REMOTE.run(REMOTE.tree("rev", "main", REMOTE.base))
         self.assert_refused(status, err, REMOTE.base, REMOTE.tip)
         self.assertIn("refs/heads/main", err)
@@ -174,6 +202,18 @@ class MovablePinTests(unittest.TestCase):
         status, out, _ = REMOTE.run(REMOTE.tree("rev", "movable-tag", REMOTE.tip))
         self.assertEqual(status, 0, out)
 
+    def test_a_full_sha_rev_pin_is_compared_literally(self):
+        status, _, err = REMOTE.run(REMOTE.tree("rev", REMOTE.tip, REMOTE.base))
+        self.assertEqual(status, 1)
+        self.assertIn(f"records {REMOTE.base} for rev {REMOTE.tip}", err)
+        status, out, _ = REMOTE.run(REMOTE.tree("rev", REMOTE.tip, REMOTE.tip))
+        self.assertEqual(status, 0, out)
+
+    def test_the_remote_head_is_a_served_ref_like_any_other(self):
+        status, _, err = REMOTE.run(REMOTE.tree("rev", "HEAD", REMOTE.base))
+        self.assert_refused(status, err, REMOTE.base, REMOTE.tip)
+        self.assertIn("names HEAD at", err)
+
     def test_a_tag_pin_with_a_moved_target_is_refused(self):
         status, _, err = REMOTE.run(REMOTE.tree("tag", "movable-tag", REMOTE.base))
         self.assert_refused(status, err, REMOTE.base, REMOTE.tip)
@@ -183,31 +223,24 @@ class MovablePinTests(unittest.TestCase):
         self.assertEqual(status, 0, out)
         self.assertIn(f"records tag=movable-tag at {REMOTE.tip}", out)
 
-    def test_a_full_sha_rev_pin_is_compared_literally(self):
-        status, _, err = REMOTE.run(REMOTE.tree("rev", REMOTE.tip, REMOTE.base))
-        self.assertEqual(status, 1)
-        self.assertIn(f"records {REMOTE.base} for rev {REMOTE.tip}", err)
-        status, out, _ = REMOTE.run(REMOTE.tree("rev", REMOTE.tip, REMOTE.tip))
-        self.assertEqual(status, 0, out)
-
     def test_a_pin_the_remote_serves_nothing_for_is_named_unresolvable(self):
         status, out, _ = REMOTE.run(REMOTE.tree("rev", "no-such-branch", REMOTE.base))
         self.assertEqual(status, 0, out)
         self.assertIn("unresolvable pin is pin-unresolvable's finding", out)
 
-    def test_an_unreachable_remote_leaves_the_query_comparison_holding(self):
-        absent = REMOTE.dir / "absent.git"
-        self.assertEqual(lockfile_pin.remote_refs(f"file://{absent}"), {})
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            lockfile_pin.check_precise(REMOTE.tip, REMOTE.url, REMOTE.tip, "tag",
-                                       "movable-tag", {})
-            lockfile_pin.check_precise(REMOTE.tip, REMOTE.url, REMOTE.tip, "rev",
-                                       "main", {})
-        self.assertEqual(
-            out.getvalue().count("unresolvable pin is pin-unresolvable's finding"), 2,
-            out.getvalue(),
-        )
+    def test_an_unreachable_remote_leaves_the_target_unverifiable(self):
+        # The pin's target cannot be read, which is not the same as the
+        # pin being absent: nothing downstream re-checks it, so the leg
+        # refuses on its own status rather than passing. The manifest
+        # declares the unreachable remote, so the leg reaches the query
+        # rather than the remote-mismatch refusal.
+        absent = f"file://{REMOTE.dir / 'absent.git'}"
+        for kind, value in (("tag", "movable-tag"), ("rev", "main")):
+            status, _, err = REMOTE.run(
+                REMOTE.tree(kind, value, REMOTE.base, remote=absent), remote=absent
+            )
+            self.assertEqual(status, 3, f"the {kind} pin's target went unchecked: {err}")
+            self.assertIn("could not be queried", err)
 
 
 class RecordedSourceTests(unittest.TestCase):
@@ -256,50 +289,41 @@ class RecordedSourceTests(unittest.TestCase):
     def test_the_release_records_filled_commit_must_name_the_recorded_revision(self):
         record = Path(tempfile.mkdtemp(dir=REMOTE.dir)) / "record.md"
         record.write_text(f"# Release\n\n| Commit | `{REMOTE.base}` |\n")
-        status, _, err = REMOTE.run(REMOTE.tree("tag", "movable-tag", REMOTE.tip), record)
+        status, _, err = REMOTE.run(REMOTE.tree("tag", "movable-tag", REMOTE.tip), record=record)
         self.assertEqual(status, 1)
         self.assertIn(f"records commit {REMOTE.base}", err)
         record.write_text(f"# Release\n\n| Commit | `{REMOTE.tip}` |\n")
-        status, out, _ = REMOTE.run(REMOTE.tree("tag", "movable-tag", REMOTE.tip), record)
+        status, out, _ = REMOTE.run(REMOTE.tree("tag", "movable-tag", REMOTE.tip), record=record)
         self.assertEqual(status, 0, out)
 
 
-class ServedNameTests(unittest.TestCase):
-    """The ref-name resolution the movable `rev` path compares
-    through: git's own `rev-parse` shapes first, any other namespace's
-    entry of that name only when the remote serves none of them, and an
-    annotated tag read peeled."""
-
-    def test_the_heads_and_head_shapes_resolve(self):
-        served = {"refs/heads/main": "a" * 40, "HEAD": "b" * 40}
-        self.assertEqual(lockfile_pin.served_name(served, "main"), {"refs/heads/main": "a" * 40})
-        self.assertEqual(lockfile_pin.served_name(served, "HEAD"), {"HEAD": "b" * 40})
-
-    def test_an_annotated_tag_resolves_to_its_peeled_commit(self):
-        served = {"refs/tags/v1.2.3": "c" * 40, "refs/tags/v1.2.3^{}": "d" * 40}
-        self.assertEqual(
-            lockfile_pin.served_name(served, "v1.2.3"), {"refs/tags/v1.2.3": "d" * 40}
-        )
-
-    def test_another_namespaces_entry_resolves_when_no_shape_is_served(self):
-        served = {"refs/pull/7/head": "e" * 40}
-        self.assertEqual(
-            lockfile_pin.served_name(served, "7/head"), {"refs/pull/7/head": "e" * 40}
-        )
-
-    def test_a_name_the_remote_serves_nothing_for_resolves_to_nothing(self):
-        self.assertEqual(lockfile_pin.served_name({"refs/heads/main": "a" * 40}, "nope"), {})
-
-
 class CheckStageTests(unittest.TestCase):
-    """`ci/check.sh`'s `lockfile` stage runs the extracted leg, so the
-    module these tests cover is the one a consumer's own CI runs."""
+    """`ci/check.sh`'s `lockfile` stage runs this script and proves the
+    movable-pin comparison on a scratch remote it seeds itself."""
 
-    def test_the_stages_leg_is_the_extracted_module(self):
+    def test_the_stages_leg_is_the_extracted_script(self):
         text = _CHECK.read_text()
         leg = text.split("lockfile_leg() {", 1)[1].split("}", 1)[0]
-        self.assertIn("ci/lockfile_pin.py", leg)
-        self.assertNotIn("re.fullmatch", text.split('echo "== lockfile =="', 1)[1])
+        self.assertIn("ci/lockfile.py", leg)
+
+    def test_the_stage_declares_no_refusal_it_stands_down_on(self):
+        # The reported defect's other face: the stage read a `rev` that
+        # names no immutable target as having no served-target
+        # comparison to exercise, so the movable spellings were never
+        # compared at all. Every spelling now names a revision, and
+        # each is exercised below on a scratch remote the stage seeds.
+        text = _CHECK.read_text()
+        self.assertNotIn('marker = ""', text)
+        self.assertNotIn("no served-target comparison to exercise", text)
+
+    def test_the_stage_checks_every_movable_rev_spelling_twice(self):
+        text = _CHECK.read_text()
+        for case in ("main", '"$PIN_SHORT"', "movable-tag"):
+            for want in ("refuse", "accept"):
+                self.assertIn(
+                    f'movable_pin_case {case} "$PIN_{"BASE" if want == "refuse" else "TIP"}" {want}',
+                    text,
+                )
 
 
 if __name__ == "__main__":

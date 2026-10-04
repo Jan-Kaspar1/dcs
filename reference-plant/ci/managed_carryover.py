@@ -76,7 +76,6 @@ named diagnostic rather than passing silently.
 """
 
 import argparse
-import hashlib
 import json
 import os
 import sys
@@ -1021,9 +1020,7 @@ def main():
         return 1
     if failures:
         return 1
-    digest = hashlib.sha256(
-        json.dumps(digest_entries, sort_keys=True).encode()
-    ).hexdigest()
+    digest = simulate.stable_digest(digest_entries)
     print(
         f"carry-digest {digest} — tracking by tick "
         f"{evidence['converged']}, shelved at tick "

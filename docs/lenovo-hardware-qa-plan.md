@@ -1134,6 +1134,73 @@ Implementation order: second, after [daily architecture review](daily-architectu
   present on that very monitor — and the leg names it as the contract
   failure it is.
 
+### Landed 2026-10-02 (announced-source authenticity leg, #1222)
+
+- The announced-source authenticity rule on unkeyed deployments —
+  the per-revision lane evidence for the contract #867's fix
+  establishes (decision 12's announce contract, WW-LCM-001's
+  takeover-continuity clause and WW-FND-004's command integrity) — is
+  exercised per revision by scenario leg `2055_announced_source_verify`
+  on the deployed pair. `GET /checkpoint` is public and
+  unauthenticated, so on a pair carrying no `--pair-token` every
+  document shape a `?peer=`-announced endpoint could serve is
+  derivable from the run's own answers and proves nothing about who
+  serves it: an announced-only demotion must refuse the named
+  `no_tracking_source`, and the bare hint must never become a demotion
+  tracking source or unblock the demote guard. This is the fourth
+  filing of the class (#850, #832, #872, #867) — a forge replayed the
+  victim's own `/checkpoint` with `owns_field` flipped, the `?peer=`
+  announce was accepted, and `POST /demote` demoted the live active
+  onto the forged stream. The lazy-verification legs (#924, #1111) pin
+  the involuntary path; this leg pins the voluntary announce-and-demote
+  path's forged-document refusal, which no leg covered.
+- Each pass opens the announced-only window 2050 stages (the tracking
+  peer stopped, the field owner warm-restarted so no genuine announce
+  stands), reads the owner's own served checkpoint, and stages the two
+  reproductions' forged documents on the run's bridge-placed
+  `dcs-forge` endpoint launched tokenless: the victim's document
+  replayed verbatim with `source_owns_field` rewritten `false` — every
+  other field the victim's own, `line_owner` naming the victim
+  included — and that same replay with its tick jumped far ahead. Both
+  are announced to the field owner through the endpoint's own
+  `GET /checkpoint?peer=` pull, and `POST /demote` runs against each.
+- Through the owner's served role and served checkpoint, the forged
+  endpoint's hits ledger, and the owner's durable `--journal-file` the
+  leg asserts that the named refusal answers, that no
+  `tracking_source_adopted` record names the forged endpoint in the
+  pass's journal window or anywhere in the whole durable file, that no
+  role change is journaled, that the active keeps both its role and its
+  `source_owns_field` claim, and that the pair reconverges to exactly
+  one active plus one tracking standby with the launch roles restored.
+  The deployed posture decides which refusal the evidence must show,
+  and both are the same contract: on an unkeyed run the endpoint's
+  ledger records no verify pull at all — a bare hint there earns not
+  even one — and on a keyed run the verify pull reaches the endpoint,
+  is answered unsigned, and the proof gate refuses it, naming the
+  endpoint in a `tracking_source_refused` journal record where the
+  build records probe refusals.
+- Named diagnostics are `announced-source-verify-failed` and
+  `announced-source-verify-nondeterministic`, with the self-check's
+  `announced-source-verify-unchecked` covering the planted
+  forged-announce-adopted, field-claim-released, silent-announce,
+  durable-adoption, unkeyed-pull, keyed-unpulled, unflipped-document
+  and non-reconverged records; two passes produce identical digests. A
+  run context carrying only one endpoint, missing lifecycle or forge
+  actions, a host-placed forge, or missing per-controller journal files
+  reports inconclusive, as does a field owner carrying a configured
+  `--standby` source — the announced-only window the leg stages is not
+  that demotion path — a dropped served read, and a served checkpoint
+  carrying no `source_owns_field` stamp. #867's fix is a behavioural
+  guard with no new served field and no new durable record, so the
+  pre-contract signature is behavioural too: on an unkeyed pair the
+  forged announce *armed the demotion* — `POST /demote` answered 200
+  where the named refusal belongs — is a revision predating the
+  contract, reported inconclusive as
+  `announced-source-verify-predates`. Every released build before that
+  fix lands presents exactly that shape. On a keyed pair the same
+  observation is not that signature (the proof gate refused this shape
+  long before #867), so there the leg names the contract failure it is.
+
 ### Landed 2026-10-02 (demoted ex-owner's ahead-bound re-join leg, #1275)
 
 - The demoted ex-owner's ahead-bound line rejoin contract — the
@@ -1668,6 +1735,104 @@ Implementation order: second, after [daily architecture review](daily-architectu
   planted negative. Two consecutive passes produce identical digests; a
   run carrying no born staging lever, no per-seat journal file, or no
   settled pair reports inconclusive.
+
+### Landed 2026-10-03 (journal-sink scan-isolation leg, #1005)
+
+- The `--journal-file` sink-isolation contract (#942's journal-append
+  isolation decision, in service of WW-FND-004's "no durable sink may
+  pace the scan") now has lane evidence beside the state-file
+  isolation leg's checkpoint-sink coverage: scenario leg
+  `3670_journal_sink_isolation`, the audit trail's half of the same
+  bounded-queue-plus-dedicated-writer decision 36 records.
+- The impediment is the mount-impediment lever the sink-isolation legs
+  share, #999's staging idea pointed at the journal path — with the
+  lever the append-mode sink actually admits. A `--journal-file`
+  writer opens its file once at bind and appends through the held
+  descriptor, so no staged FIFO can park a mid-run write; the thing
+  that has to stall is the writer thread itself, which the runner
+  reaches through the controller container's host pid and its `/proc`
+  task surface (`dcs-drain` is every durable sink writer's comm, and
+  the leg tells the journal one from its siblings by observable
+  effect: only the journal writer's park holds a journaled record in
+  the queue). The latest drain thread probes first, matching the
+  released binary's bind order, and the leg reports inconclusive rather
+  than probing a lever the run context was never granted.
+- With the pair settled and tracking and the journaled traffic flowing,
+  the leg holds the field owner's journal writer and asserts through
+  the serving monitor that `publication.journal_sink` reports its named
+  `lagging` state with the accepted counter advancing and the depth
+  bounded inside the queue's declared capacity, that the served tick
+  advances inside the documented bound while the `io_health` counters
+  stand unmoved and every serving read answers inside its bound, and
+  that the durability-attesting `GET /journal` read stands parked on
+  its own worker rather than answering while the file could not have
+  caught up. The window's traffic is the receipted `write_value`
+  admissions plus an injected quality fault's transitions, and the
+  release must drain the standing queue into the durable file in `seq`
+  order — the file's own append axis contiguous, no torn or duplicated
+  record, and the audited file the field owner's own, resolved from the
+  settled role rather than the launch role, carrying the window's
+  settlements so a healthy report cannot stand in for records the file
+  never took — answer every parked request with a receipt, and
+  reconverge the pair to one active plus one tracking standby with
+  launch roles restored. Named diagnostics are
+  `journal-sink-isolation-failed` and
+  `journal-sink-isolation-nondeterministic`; two passes produce
+  identical digests; a rig that is unreachable, that predates the
+  served `journal_sink` section, that declares no `--journal-file`, or
+  that admits no mount lever reports inconclusive.
+### Landed 2026-10-03 (settled-receipt arbitration leg, #1479)
+
+- The contradictory-settled-receipt arbitration contract — the
+  `divergent-settled-receipts-oscillate-flooding-journal` finding
+  (defect; severity high; confidence high), reported by run
+  `qax-20260919-003` against revision `2937abf` on rig `lenovo`,
+  module `dcs-runtime` — is exercised on the deployed rig by scenario
+  leg `1970_settled_receipt_arbitration`. The receipt log is the
+  pair's one command audit, so adoption of a *settled* receipt must be
+  idempotent or arbitrated, never last-pull-wins between
+  contradictory terminal verdicts, and a settlement must journal once
+  per admission. The finding had two peers holding one admission
+  settled at one submission index to two different terminal verdicts
+  hand the index back and forth on every mutual adoption at ~5-8 Hz:
+  ~990 phantom `command_settled` lines appended to each durable
+  `journal.jsonl` within minutes, both served rings wrapping their
+  1024 cap and evicting the earlier real audit, and a flapping
+  consumer-facing `/receipts` that a single `POST /promote` ended.
+- The staging is the reproduction's surviving trigger after the
+  quiesced-apply fix: the leg races a receipted batch of writable-point
+  submissions against the tracking peer's promotion, whose boundary
+  `final_sync` pull lands inside the field owner's pending window and
+  *carries* the still-`Accepted` admission onto the successor. The
+  promoted peer settles the carried admission at its own boundary and
+  the field-owner's next scan settles the same admission at its own —
+  two lines, one submission index, two different apply ticks — after
+  which the field's own arbitration fences the incumbent in place and
+  the demote that leaves both lines following each other opens the
+  adoption window the ping-pong ran in. The audit reads both peers'
+  serving monitors across that window and both durable journals:
+  the same admission must appear with two different journaled verdicts
+  (the contradiction really was staged — each line can only journal
+  what it observed), the two served receipt logs must converge on one
+  arbitrated verdict that never moves under the poll, each peer's
+  durable journal must record at most one `command_settled` for the
+  admission, and the reconciled holder's promotion must return the
+  pair to one active plus one tracking standby on its launch roles.
+- Named diagnostics are `settled-arbitration-failed` and
+  `settled-arbitration-nondeterministic`, with the self-check's
+  `settled-arbitration-unchecked` covering every planted negative — the
+  served verdict moving under the poll, the peers still disagreeing
+  after the window, a durable journal that recorded the admission
+  twice, and evidence carrying no verdict at all; two consecutive
+  passes produce identical digests; a run whose served surfaces
+  predate the receipt-attribution and checkpoint-window contract,
+  whose ctx declares no durable journal for one peer, whose pair never
+  settles tracking, or whose staging never lands a promotion pull
+  inside a pending window reports inconclusive; the pair leaves on its
+  launch roles. The consumer-boundary mirror of the same contract is
+  `reference-plant/ci/legs/settled_receipt_arbitration.py`, whose
+  declared pair is driven and therefore stages the contradiction with
+  no freeze and no timing race.
 
 ## Outcome
 

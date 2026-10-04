@@ -624,6 +624,28 @@ pub enum CommandOutcome {
     },
 }
 
+/// A submission's mint identity — unique to the admission that produced
+/// its receipt, independent of the absolute submission index the receipt
+/// sits at and of the command's payload.
+///
+/// `origin` is the minting run's nonce — the value the assembling shell
+/// stamps through `Executor::with_submission_origin`, a fresh
+/// `mint_generation` per process boot — and `seq` the run's own mint
+/// order. Together they keep two admissions distinct however they
+/// collide: the promote/fence window's split mint, where the demoting
+/// peer and its successor each assign the same per-peer absolute index
+/// to a different command, or two submissions whose command, actor, and
+/// outcome are byte-identical. A receipt carries its identity unchanged
+/// through checkpoint adoption, carrying, and collision re-homing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SubmissionId {
+    /// The minting run's nonce.
+    pub origin: u64,
+    /// The minting run's own submission sequence — the n-th receipt the
+    /// run minted.
+    pub seq: u64,
+}
+
 /// The controller's verdict on one submitted [`Command`].
 ///
 /// Receipts are produced in submission order and live in the executor's
@@ -657,6 +679,24 @@ pub struct CommandReceipt {
     /// receipt serializes without the key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<String>,
+    /// The mint identity of the submission this receipt records —
+    /// `Some` when the minting run carries a submission origin.
+    ///
+    /// The pair's receipt log reconciles on it: two peers can mint
+    /// receipts at the same absolute index inside the promote/fence
+    /// window — the per-peer `attempts` counters converge only through
+    /// checkpoint adoption — and the index alone cannot tell a carried
+    /// receipt from a colliding one. With mint identities the collision
+    /// is nameable: [`same_submission`](Self::same_submission) is the
+    /// comparison adoption, carrying, and the settle journal share.
+    ///
+    /// Serde-optional like `actor`: receipts and checkpoints predating
+    /// the field deserialize `None`, and an unminted receipt serializes
+    /// without the key. Unminted receipts fall back to content
+    /// identity — command plus actor — so a byte-identical pair stays
+    /// indistinguishable by construction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submission: Option<SubmissionId>,
     /// The reason the submitter declared for the command, when it
     /// declared one.
     ///
@@ -684,6 +724,35 @@ pub struct CommandReceipt {
     /// serializes without the key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+impl CommandReceipt {
+    /// Whether two receipts record the same submission — the identity
+    /// the pair's one command audit reconciles on.
+    ///
+    /// Mint identities decide when both receipts carry one: equal ids
+    /// are the same submission however its outcome advanced since —
+    /// carried onto the tracked line and settled there — and unequal
+    /// ids are different submissions however equal the command bytes —
+    /// the promote/fence window's colliding mints included. Receipts
+    /// without an identity — an unminted run, or one captured before
+    /// the field existed — compare on the whole submission record:
+    /// command, actor, and the declared `reason`, the fields a receipt
+    /// carries unchanged from submission to terminal verdict, so an
+    /// identical command under a different attribution is a different
+    /// admission while two byte-identical receipts are one audit record
+    /// by definition. Outcome is never part of the comparison: it
+    /// advances as the submission settles.
+    pub fn same_submission(&self, other: &CommandReceipt) -> bool {
+        match (self.submission, other.submission) {
+            (Some(this), Some(other)) => this == other,
+            _ => {
+                self.command == other.command
+                    && self.actor == other.actor
+                    && self.reason == other.reason
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1026,6 +1095,7 @@ mod tests {
                 command: set_parameter(),
                 outcome,
                 actor: None,
+                submission: None,
                 reason: None,
             };
             let json = serde_json::to_string(&receipt).unwrap();
@@ -1042,6 +1112,7 @@ mod tests {
             command: write_value(),
             outcome: CommandOutcome::Applied { tick: Tick(4) },
             actor: Some("operator-7".to_string()),
+            submission: None,
             reason: None,
         };
         let json = serde_json::to_string(&attributed).unwrap();
@@ -1068,12 +1139,89 @@ mod tests {
     }
 
     #[test]
+    fn receipt_submission_identity_is_serde_optional() {
+        let minted = CommandReceipt {
+            command: write_value(),
+            outcome: CommandOutcome::Applied { tick: Tick(4) },
+            actor: None,
+            reason: None,
+            submission: Some(SubmissionId { origin: 11, seq: 3 }),
+        };
+        let json = serde_json::to_string(&minted).unwrap();
+        assert!(
+            json.contains("\"submission\":{\"origin\":11,\"seq\":3}"),
+            "{json}"
+        );
+        assert_eq!(
+            serde_json::from_str::<CommandReceipt>(&json).unwrap(),
+            minted
+        );
+
+        // An unminted receipt carries no key on the wire, and a receipt
+        // predating the field deserializes with `None`.
+        let unminted = CommandReceipt {
+            submission: None,
+            ..minted.clone()
+        };
+        let json = serde_json::to_string(&unminted).unwrap();
+        assert!(!json.contains("submission"), "{json}");
+        assert_eq!(
+            serde_json::from_str::<CommandReceipt>(&json).unwrap(),
+            unminted
+        );
+    }
+
+    #[test]
+    fn same_submission_compares_identity_not_index_or_outcome() {
+        let minted = |seq: u64, outcome: CommandOutcome, actor: &str| CommandReceipt {
+            command: write_value(),
+            outcome,
+            actor: Some(actor.to_string()),
+            reason: None,
+            submission: Some(SubmissionId { origin: 11, seq }),
+        };
+        // The same submission across its own settle: equal identities
+        // reconcile however the outcome advanced.
+        let accepted = minted(
+            0,
+            CommandOutcome::Accepted {
+                apply_tick: Tick(5),
+            },
+            "op-a",
+        );
+        let settled = minted(0, CommandOutcome::Applied { tick: Tick(5) }, "op-a");
+        assert!(accepted.same_submission(&settled));
+        // Equal command, equal actor, different mint — two submissions.
+        let other_mint = minted(1, CommandOutcome::Applied { tick: Tick(5) }, "op-a");
+        assert!(!settled.same_submission(&other_mint));
+        // Different origins never merge — the pair's split mint.
+        let mut other_origin = settled.clone();
+        other_origin.submission = Some(SubmissionId { origin: 22, seq: 0 });
+        assert!(!settled.same_submission(&other_origin));
+        // A minted receipt and an unminted one — or two unminted — fall
+        // back to command plus actor: identical content is one record.
+        let unminted = CommandReceipt {
+            submission: None,
+            ..settled.clone()
+        };
+        assert!(settled.same_submission(&unminted));
+        let unminted_twin = unminted.clone();
+        assert!(unminted.same_submission(&unminted_twin));
+        let different_actor = CommandReceipt {
+            actor: Some("op-b".to_string()),
+            ..unminted.clone()
+        };
+        assert!(!unminted.same_submission(&different_actor));
+    }
+
+    #[test]
     fn receipt_reason_is_serde_optional_beside_actor() {
         let reasoned = CommandReceipt {
             command: write_value(),
             outcome: CommandOutcome::Applied { tick: Tick(4) },
             actor: Some("operator-7".to_string()),
             reason: Some("nuisance trips during pump work".to_string()),
+            submission: None,
         };
         let json = serde_json::to_string(&reasoned).unwrap();
         assert!(
@@ -1215,6 +1363,7 @@ mod tests {
                 reason: CommandError::UnknownPoint { point: PointId(7) },
             },
             actor: None,
+            submission: None,
             reason: None,
         };
         let json = serde_json::to_string(&receipt).unwrap();

@@ -53,7 +53,6 @@ generating a dead reference.
 """
 
 import argparse
-import hashlib
 import json
 import os
 import sys
@@ -64,6 +63,7 @@ sys.path.insert(0, os.path.dirname(_HERE))
 
 import overview_url
 import pair
+import simulate
 
 
 # The leg's stage registration — ci/legs.py reads this literal
@@ -311,9 +311,7 @@ def main():
         return 1
     if failures:
         return 1
-    digest = hashlib.sha256(
-        json.dumps(digest_entries, sort_keys=True).encode()
-    ).hexdigest()
+    digest = simulate.stable_digest(digest_entries)
     print(
         f"pair-overview-digest {digest} — the declared topology "
         f"generates pair(s) {evidence['pairs']}, every member "

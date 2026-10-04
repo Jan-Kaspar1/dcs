@@ -92,7 +92,6 @@ rather than passing an unexercised contract.
 """
 
 import argparse
-import hashlib
 import json
 import os
 import signal
@@ -1421,9 +1420,7 @@ def main():
         return 1
     if failures:
         return 1
-    digest = hashlib.sha256(
-        json.dumps(digest_entries, sort_keys=True).encode()
-    ).hexdigest()
+    digest = simulate.stable_digest(digest_entries)
     print(
         f"reclaim-convergence-gate-digest {digest} — the fenced "
         "ex-owner's unsynchronized reclaim never preempted the "

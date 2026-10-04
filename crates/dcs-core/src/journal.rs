@@ -561,6 +561,7 @@ mod tests {
                         },
                         outcome: CommandOutcome::Applied { tick: Tick(4) },
                         actor: None,
+                        submission: None,
                         reason: None,
                     },
                 },
@@ -796,6 +797,7 @@ mod tests {
             },
             outcome: CommandOutcome::Applied { tick: Tick(14) },
             actor: Some("operator-3".to_string()),
+            submission: None,
             reason: None,
         };
         let entry = JournalEntry {

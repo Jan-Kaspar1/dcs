@@ -32,17 +32,17 @@ model/plant.json       the emitted, approved plant model
 model/dynamics.json    the declared simulation dynamics
 ci/scenario.json       the generated scenario the CI drives
 ci/check.sh            the clean-CI check a fresh clone runs
-ci/lockfile_pin.py     the lockfile leg — the committed Cargo.lock
-                       held against the manifest's declared pin: every
-                       release crate recorded from a git source on that
-                       remote and that `tag`/`rev` fragment, at the
-                       revision the pin names, read off the remote for
-                       every spelling Cargo resolves dynamically (a
-                       `tag` pin's target, a branch or tag name spelled
-                       through `rev`, a full sha compared literally, a
-                       short sha held to abbreviate the recorded
-                       revision) so a movable pin cannot leave a stale
-                       lockfile passing the stage
+ci/lockfile.py         the committed-lockfile leg — the manifest's
+                       declared pin read through `cargo metadata
+                       --no-deps`, the lockfile parsed as TOML, the
+                       release crates' recorded sources held to the
+                       pin before any fetch can rewrite the artifact,
+                       and the revision held to the one that pin names
+                       for every spelling Cargo accepts in `rev =` —
+                       a `tag`'s target and every ref a `rev` names
+                       read back off the remote, a full sha compared
+                       literally, a short sha held to abbreviate the
+                       recorded revision
 ci/alarm_validation.py the alarm-validation leg — the emitted model's
                        managed-alarm record audited, doctored copies
                        refused by the released `dcs-controller
@@ -175,17 +175,29 @@ dcs-build = { git = "https://github.com/Jan-Kaspar1/dcs.git", tag = "v0.10.0" }
 dcs-model = { git = "https://github.com/Jan-Kaspar1/dcs.git", tag = "v0.10.0" }
 ```
 
+Only the `dcs-build` line carries the pin every stage holds to:
+`dcs-core` and `dcs-model` resolve with it at the same tag or `rev`, and
+the second line above is this tree's optional direct declaration — the
+release contract lets a consumer name them directly, e.g. to assert
+`dcs_model::MODEL_VERSION` in `src/main.rs`. Dropping it resolves no
+crate differently, and the `lockfile` stage records the pin from the
+`dcs-build` declaration alone while holding the committed `Cargo.lock`'s
+record of all three release crates to it. Whichever of the three you do
+declare must name the identical tag or `rev`.
+
 `rev = "<commit>"` names the identical immutable commit — the recorded
 commit `docs/releases/v0.10.0/record.md` carries — and is always
-supported. A `rev` may also name a branch or a tag, which Cargo
-resolves afresh on every resolve; such a pin is checked like the tag
-above, against what the remote serves under that name, so the lockfile
-cannot record a commit its branch has moved past. Prefer an immutable
-spelling — `tag = "<release>"` or a full-sha `rev =` — for anything a
-fresh clone must reproduce.
-
-`Cargo.lock` is committed so every build resolves the same
-sources; a tag pin resolves the tag once and the committed lockfile
+supported. Cargo accepts any git rev in `rev =`, and a pin it resolves
+afresh on every resolve — a branch name, a tag name, an abbreviated sha
+— is checked the same way a `tag` is: the `lockfile` stage reads what
+the remote serves under that name and requires the lockfile to record
+exactly that, so a lockfile recording a commit the branch has moved
+past is `lockfile-stale` rather than a silent pass. Such a pin is
+checked, but it still resolves to whatever the branch names at the
+moment anyone runs `cargo update`, so prefer an immutable spelling —
+`tag = "<release>"` or a full-sha `rev =` — for anything a fresh clone
+has to reproduce. `Cargo.lock` is committed so every build resolves the
+same sources; a tag pin resolves the tag once and the committed lockfile
 records the commit it landed on. The two are one artifact, not two
 declarations that drift: the committed lockfile records this
 manifest's pin — the same remote, the same `tag`/`rev`, resolved to the
@@ -450,6 +462,16 @@ doctored case passing silently or missing its named evidence fails
 document; the leg set and each leg's contract prose live in the
 directory and its docstrings.
 
+One leg in particular is about this pair's operator console rather than
+its control behaviour: `ci/legs/responsiveness.py` holds the field
+owner's checkpoint source unreachable and drives a `POST /scan` batch
+against the survivor's monitor, requiring `/snapshot`, `/role`,
+`/journal`, and a receipted command on that same monitor to keep
+answering inside the leg's declared bound — the mirror, on the pair this
+deployment actually ships, of the platform rig's bounded-responsiveness
+leg. A consumer UI that stalls only when a peer dies is the dishonesty
+the pair's publication boundary exists to prevent.
+
 The check's `consumers` stage then proves the replaceable-consumer
 boundary end to end — `ci/consumers.py --schedule <name>` replays the
 identical driven run once per consumer schedule: `zero-clients` (no UI
@@ -701,7 +723,9 @@ crossing it proves is always "this source, unchanged, across the
 repin".
 
 An **incompatible** crossing fails with named diagnostics, never
-silently: a pin that resolves no release crates is `pin-unresolvable`;
+silently: a pin that resolves no release crates — or a remote the
+`lockfile` stage cannot query for the revision the declared pin names,
+which is unverifiable rather than absent — is `pin-unresolvable`;
 a committed `Cargo.lock` that records another remote, another
 `rev`/`tag`, or another revision than the manifest declares is
 `lockfile-stale`; a release crate recorded from a `path` into a
@@ -743,7 +767,19 @@ selection's declared signals unreported, the guards ungated, the
 managed alarm unannunciated, the restore not returning the pump to
 group control, or the journal missing an attributed transition — is
 `takeover-failed`; two takeover-leg passes diverging is
-`takeover-nondeterministic`; a standing force dropped or silently
+`takeover-nondeterministic`; a level at or below the declared
+`cutoff` not asserting `below_cutoff`, not releasing `demand` with
+every pump call off, or the managed `lal` alarm not annunciating
+and latching — or the receipted `ack` not clearing the latch while
+the alarm stands, or the hysteresis return not resuming `demand`
+at `start` — is `cutoff-failed`; two cutoff-leg passes diverging
+is `cutoff-nondeterministic`; consecutive demand cycles not
+alternating `duty` per the declared `rotation` policy — or a
+mid-cycle promotion not carrying the duty designation, the
+rotation cursor, and the accumulated run-hours, or the restored
+pair not resuming the alternation — is `rotation-failed`; two
+rotation-leg passes diverging is `rotation-nondeterministic`;
+a standing force dropped or silently
 re-substituted by a promotion — the `forces` entry missing from the
 promoted peer's snapshot or the sample no longer the forced value at
 substituted quality — or a release leaving the set non-empty is

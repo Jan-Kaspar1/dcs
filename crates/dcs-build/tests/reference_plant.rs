@@ -10,10 +10,18 @@
 //! end to end: the committed lockfile's agreement with the declared
 //! pin — every `dcs-*` record of a released crate carried by a git
 //! source, a path package's sourceless record named
-//! `path-dependency-leak`, and the recorded revision held against the
-//! revision the declared pin names for every spelling Cargo resolves
-//! dynamically — a branch name, an abbreviated sha, a tag name read
-//! back off the remote — `cargo fetch --locked` resolving without a
+//! `path-dependency-leak`, a manifest declaring only `dcs-build`
+//! directly — the contract's optional direct `dcs-core`, `dcs-model`
+//! declarations omitted — passing on the lockfile recording all three
+//! release crates at that pin, and a tag re-pointed after the cut with
+//! the lockfile regenerated to follow it named `lockfile-stale`
+//! against the release record's `Commit` field — a tag query the
+//! remote cannot answer refused rather than read as the tag's
+//! absence, and every spelling Cargo resolves afresh in `rev =` — a
+//! branch name, a short sha, a tag name — held to the revision the
+//! remote serves under that name rather than admitted uncompared —
+//! `cargo fetch
+//! --locked` resolving without a
 //! re-resolve,
 //! byte-identical emit against the checked-in artifacts,
 //! released-tooling acceptance — plus the contract's remaining
@@ -297,6 +305,19 @@ fn pinned_release(dir: &Path) -> String {
     panic!("the template's Cargo.toml records no release pin");
 }
 
+/// The release the template's deployment manifest declares — the
+/// `docs/releases/<tag>/` record directory the check fetches its
+/// record artifacts from.
+fn declared_release(dir: &Path) -> String {
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("deploy/manifest.json")).unwrap())
+            .expect("deploy/manifest.json is JSON");
+    manifest["dcs_release"]
+        .as_str()
+        .expect("deploy/manifest.json records no dcs_release")
+        .to_owned()
+}
+
 /// The `DCS_UPGRADE_REV` default the tree's own `ci/check.sh` records —
 /// the previous release's recorded rev the `upgrade` stage materializes
 /// its baseline at.
@@ -499,23 +520,33 @@ impl Materialized {
     /// rev — so the stage proves the real named crossing onto the pin's
     /// release; the stand-in serves both ends of it.
     fn check(&self, tools: &Path) -> Output {
-        self.run(Some(tools))
+        self.run(Some(tools), true)
     }
 
     /// The same run without the tooling substitution, for a check that
     /// must fail before its `tooling` stage resolves any binary.
     fn check_without_tooling(&self) -> Output {
-        self.run(None)
+        self.run(None, true)
     }
 
-    fn run(&self, tools: Option<&Path>) -> Output {
+    /// The shipped configuration: the remote substitution a consumer's
+    /// own CI makes and nothing else — never the workspace proof's
+    /// `DCS_RECORD_DIR` record tree, so the release record the check
+    /// reads is the one it fetches itself at the pinned rev.
+    fn check_shipped(&self) -> Output {
+        self.run(None, false)
+    }
+
+    fn run(&self, tools: Option<&Path>, record_dir: bool) -> Output {
         let mut check = Command::new("bash");
         check
             .arg("ci/check.sh")
             .current_dir(&self.dir)
             .env("DCS_REMOTE", &self.remote)
-            .env("DCS_RECORD_DIR", root().join("docs/releases"))
             .env("CARGO_TARGET_DIR", self.dir.join("target"));
+        if record_dir {
+            check.env("DCS_RECORD_DIR", root().join("docs/releases"));
+        }
         if let Some(tools) = tools {
             check.env("DCS_TOOLS", tools);
         }
@@ -591,33 +622,53 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         stdout.contains("a lockfile missing a release crate refused: lockfile-stale"),
         "the lockfile stage's missing-crate doctored case did not report its named diagnostic:\n{stdout}"
     );
+    assert!(
+        stdout.contains("a lockfile recording a release crate twice refused"),
+        "the lockfile stage's duplicate-record doctored cases were not refused:\n{stdout}"
+    );
     // The movable-pin half, the reported defect
     // (`lockfile-leg-rev-compare-skipped-for-non-full-sha`): every
-    // spelling Cargo resolves dynamically — the branch name, an
+    // spelling Cargo resolves afresh in `rev =` — the branch name, an
     // abbreviated sha, a tag name — is compared against what the
-    // stand-in serves under that name, so a lockfile recording a
-    // revision the pin has moved past is refused, and the same
-    // spelling recording the revision the pin does name is accepted:
-    // three refused cases beside the two above, three accepted. Read
-    // the stage's own section — the upgrade stage re-runs the whole
-    // pipeline, and its repinned pass repeats the evidence.
+    // remote serves under that name, so a lockfile recording a
+    // revision its pin has moved past is refused, and the same
+    // spelling recording the revision the pin does name is accepted.
+    // A leg refusing every movable pin would pass the refusal half, so
+    // the accepted half is asserted beside it. Read the stage's own
+    // section — the upgrade stage re-runs the whole pipeline, and its
+    // repinned pass repeats the evidence.
     let lock_stage = stdout
         .split("== lockfile ==")
         .nth(1)
         .and_then(|tail| tail.split("== resolve ==").next())
         .unwrap_or_else(|| panic!("the lockfile stage did not run:\n{stdout}"));
+    let movable: Vec<&str> = lock_stage
+        .lines()
+        .filter(|line| line.contains("a `rev = "))
+        .collect();
     assert_eq!(
-        lock_stage.matches("refused: lockfile-stale").count(),
-        5,
-        "the lockfile stage did not refuse every planted stale lockfile:\n{lock_stage}"
+        movable.len(),
+        6,
+        "the lockfile stage did not check every movable `rev` spelling, twice each:\n\
+         {lock_stage}"
     );
     assert_eq!(
-        lock_stage
-            .matches("lockfile recording the revision the pin names accepted")
+        movable
+            .iter()
+            .filter(|line| line.contains("refused: lockfile-stale"))
             .count(),
         3,
-        "the lockfile stage refused a movable `rev` pin recording the revision it \
-         names:\n{lock_stage}"
+        "the lockfile stage did not refuse every movable pin recording a revision its \
+         pin has moved past:\n{lock_stage}"
+    );
+    assert_eq!(
+        movable
+            .iter()
+            .filter(|line| line.contains("recording the revision the pin names accepted"))
+            .count(),
+        3,
+        "the lockfile stage refused a movable `rev` pin recording the revision it names:\n\
+         {lock_stage}"
     );
     let lock_line = stdout
         .lines()
@@ -1241,6 +1292,494 @@ fn the_committed_lockfile_satisfies_the_declared_pin() {
     );
 }
 
+/// A release tag re-pointed after the cut is the tamper the record's
+/// `Commit` field exists to detect: a lockfile regenerated to follow
+/// the moved tag satisfies every leg the tag's own target answers —
+/// the manifest's `tag` query still matches, and the remote's served
+/// target still equals the recorded revision — so only the record
+/// still naming the commit the release was cut on calls the
+/// divergence out. The reported defect
+/// (`lockfile-record-commit-check-unreachable-in-consumer-path`):
+/// that comparison was wired only into the workspace proof's
+/// `DCS_RECORD_DIR` substitution, which a consumer running the
+/// template's own CI never makes — the shipped check fetched the
+/// record tree for its schema artifacts and never fed `record.md` to
+/// the leg.
+///
+/// The reproduction is the reported one: the stand-in's tag is
+/// re-pointed at a commit whose release record still names the tag's
+/// original target in its `Commit` field — the record as a post-cut
+/// descendant carries it — the committed lockfile is rewritten to
+/// record the new target exactly as `cargo update` would have, and
+/// the shipped configuration — `DCS_REMOTE` and nothing else — must
+/// report `lockfile-stale` naming the record's commit.
+#[test]
+fn a_repointed_release_tag_reports_lockfile_stale() {
+    let copy = Materialized::new();
+    let pin = pinned_release(&copy.dir);
+    let precise = committed_lock_rev(&copy.dir);
+
+    // The moved tag's target: a child of the tag's original target
+    // whose only change fills the release record's `Commit` field with
+    // that original sha — so the crate trees the lockfile resolves
+    // stay the original commit's, and every leg but the record's
+    // Commit-field comparison still answers green.
+    git(
+        &copy.dir,
+        &[
+            "clone",
+            "--quiet",
+            "--branch",
+            "main",
+            &copy.remote,
+            "moved-tag",
+        ],
+    );
+    let work = copy.dir.join("moved-tag");
+    let record_path = work
+        .join("docs/releases")
+        .join(declared_release(&copy.dir))
+        .join("record.md");
+    let contents = std::fs::read_to_string(&record_path).unwrap();
+    let filled = if contents.contains(&format!("| Commit | `{precise}`")) {
+        contents
+    } else {
+        let edited = contents.replacen(
+            "| Commit | *pending*",
+            &format!("| Commit | `{precise}`"),
+            1,
+        );
+        assert_ne!(
+            edited, contents,
+            "the record's Commit field is neither `{precise}` nor a pending \
+             field this test can fill"
+        );
+        edited
+    };
+    std::fs::write(&record_path, &filled).unwrap();
+    git(&work, &["add", "-A"]);
+    git(
+        &work,
+        &[
+            "-c",
+            "user.name=dcs-ci",
+            "-c",
+            "user.email=dcs-ci@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "re-point the release record",
+        ],
+    );
+    let moved = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&work)
+            .output()
+            .expect("git rev-parse runs")
+            .stdout,
+    )
+    .expect("git rev-parse answers utf8")
+    .trim()
+    .to_owned();
+    git(
+        &work,
+        &[
+            "push",
+            "--quiet",
+            "--force",
+            "origin",
+            &format!("HEAD:refs/tags/{pin}"),
+        ],
+    );
+
+    // The lockfile regenerated to follow the moved tag: every release
+    // crate's record now names the tag's new target, exactly what
+    // `cargo update` against the re-pointed ref would write.
+    let lock = copy.dir.join("Cargo.lock");
+    let committed = std::fs::read_to_string(&lock).unwrap();
+    let regenerated = committed.replace(
+        &format!("?tag={pin}#{precise}"),
+        &format!("?tag={pin}#{moved}"),
+    );
+    assert_ne!(
+        regenerated, committed,
+        "the committed lockfile records no `?tag={pin}#{precise}` source to regenerate"
+    );
+    std::fs::write(&lock, &regenerated).unwrap();
+
+    let refused = copy.check_shipped();
+    let stdout = String::from_utf8_lossy(&refused.stdout);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success(),
+        "a Cargo.lock regenerated to a re-pointed release tag passed the \
+         shipped check:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("lockfile-stale"),
+        "the re-pointed tag was refused without its named diagnostic:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("records commit {precise}")),
+        "the refusal did not name the release record's Commit field as the \
+         divergence:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("== resolve =="),
+        "the record-commit divergence was caught only after the resolve stage:\n{stdout}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&lock).unwrap(),
+        regenerated,
+        "the refused run repaired the regenerated lockfile instead of reporting it"
+    );
+}
+
+/// A tag query the remote cannot answer is unverifiable, never the
+/// absent-tag skip — the reported defect
+/// (`lockfile-leg-tag-check-skipped-on-ls-remote-failure`): the leg
+/// parsed `git ls-remote`'s stdout only, so any transport failure —
+/// a safe.directory refusal, an auth rejection, a corrupt repository —
+/// produced an empty ref map indistinguishable from "tag not
+/// published yet", and a lockfile recording a commit the tag does not
+/// land on passed the leg while `cargo fetch --locked` stayed green
+/// through libgit2 and cargo's git cache. The leg's verdict hung on
+/// ambient git-CLI health rather than the artifact.
+///
+/// The reproduction: the stand-in serves the doctored record's sha —
+/// a child of the tag's target advertised on its own branch, so the
+/// tag still lands where the committed revision names it — while a
+/// `git` shim on `PATH` refuses only `ls-remote`, the same
+/// libgit2-vs-CLI divergence the rig's safe.directory refusal
+/// produced. `cargo fetch --locked` still resolves the doctored
+/// tree, but the leg refuses the unanswerable query, the shipped
+/// check names `pin-unresolvable` before its resolve stage, and the
+/// same artifact under a healthy CLI reports `lockfile-stale` naming
+/// the tag's real target — the served-target comparison the
+/// stand-in's tag seeding at the recorded commit leaves dead.
+#[test]
+fn an_unanswerable_tag_query_is_unverifiable_not_absent() {
+    let copy = Materialized::new();
+    let pin = pinned_release(&copy.dir);
+    let precise = committed_lock_rev(&copy.dir);
+
+    // A commit the remote serves that the tag does not land on: a
+    // child of the tag's own target, so the crate trees the lockfile
+    // resolves carry the recorded versions and `cargo fetch --locked`
+    // answers green on the wrong sha exactly as the rig's did.
+    git(
+        &copy.dir,
+        &[
+            "clone",
+            "--quiet",
+            "--branch",
+            "main",
+            &copy.remote,
+            "wrong-target",
+        ],
+    );
+    let work = copy.dir.join("wrong-target");
+    std::fs::write(work.join("wrong-target"), "not the tag's target\n").unwrap();
+    git(&work, &["add", "-A"]);
+    git(
+        &work,
+        &[
+            "-c",
+            "user.name=dcs-ci",
+            "-c",
+            "user.email=dcs-ci@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "a commit the tag does not land on",
+        ],
+    );
+    let wrong = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&work)
+            .output()
+            .expect("git rev-parse runs")
+            .stdout,
+    )
+    .expect("git rev-parse answers utf8")
+    .trim()
+    .to_owned();
+    git(
+        &work,
+        &["push", "--quiet", "origin", "HEAD:refs/heads/wrong-target"],
+    );
+
+    // The lockfile regenerated to record the wrong commit under the
+    // tag's own query — the served target still the committed
+    // revision, so only the leg's ls-remote comparison can name it.
+    let lock = copy.dir.join("Cargo.lock");
+    let committed = std::fs::read_to_string(&lock).unwrap();
+    let doctored = committed.replace(
+        &format!("?tag={pin}#{precise}"),
+        &format!("?tag={pin}#{wrong}"),
+    );
+    assert_ne!(
+        doctored, committed,
+        "the committed lockfile records no `?tag={pin}#{precise}` source to doctor"
+    );
+    std::fs::write(&lock, &doctored).unwrap();
+
+    // A `git` on PATH that refuses only `ls-remote` — the reported
+    // reproduction's safe.directory divergence: the CLI cannot read
+    // the remote while cargo's libgit2 still resolves it. Every
+    // other verb delegates to the real binary resolved before the
+    // shim enters PATH.
+    let real_git = String::from_utf8(
+        Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .expect("sh runs")
+            .stdout,
+    )
+    .expect("command -v git answers utf8")
+    .trim()
+    .to_owned();
+    let shim_dir = copy.dir.join("shim-bin");
+    std::fs::create_dir(&shim_dir).unwrap();
+    let shim = shim_dir.join("git");
+    std::fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = ls-remote ]; then\n\
+             echo 'fatal: detected dubious ownership in repository' >&2\n\
+             exit 128\n\
+             fi\n\
+             exec {real_git} \"$@\"\n"
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = format!(
+        "{}:{}",
+        shim_dir.display(),
+        std::env::var("PATH").expect("PATH is set")
+    );
+
+    // The green half of the reported reproduction: `cargo fetch
+    // --locked` resolves the recorded sha without re-checking the
+    // tag's target — only the leg could name this artifact.
+    let fetched = Command::new(CARGO)
+        .args(["fetch", "--locked"])
+        .current_dir(&copy.dir)
+        .env("CARGO_TARGET_DIR", copy.dir.join("target"))
+        .env("PATH", &path)
+        .output()
+        .expect("cargo fetch runs");
+    assert!(
+        fetched.status.success(),
+        "cargo fetch --locked did not resolve the wrong-sha lockfile — the \
+         reproduction needs the fetch green while the leg refuses:\n{}",
+        String::from_utf8_lossy(&fetched.stderr)
+    );
+
+    // Under the refusing CLI the leg must not pass: the tag's target
+    // is unverifiable, which is not the absent-tag skip.
+    let leg = Command::new("python3")
+        .args(["ci/lockfile.py", "Cargo.lock", &copy.remote])
+        .current_dir(&copy.dir)
+        .env("PATH", &path)
+        .output()
+        .expect("the lockfile leg runs");
+    assert!(
+        !leg.status.success(),
+        "the leg passed a tag query the remote could not answer"
+    );
+    let stderr = String::from_utf8_lossy(&leg.stderr);
+    assert!(
+        stderr.contains("ls-remote"),
+        "the unanswerable query was refused without naming the failed query:\n{stderr}"
+    );
+
+    // Through the shipped check the same state names its diagnostic
+    // before the resolve stage can rewrite the artifact.
+    let refused = Command::new("bash")
+        .arg("ci/check.sh")
+        .current_dir(&copy.dir)
+        .env("DCS_REMOTE", &copy.remote)
+        .env("CARGO_TARGET_DIR", copy.dir.join("target"))
+        .env("PATH", &path)
+        .output()
+        .expect("ci/check.sh runs");
+    let stdout = String::from_utf8_lossy(&refused.stdout);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success(),
+        "an unverifiable tag target passed the shipped check:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("pin-unresolvable"),
+        "the unanswerable query was refused without its named diagnostic:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("== resolve =="),
+        "the unverifiable remote was caught only after the resolve stage:\n{stdout}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&lock).unwrap(),
+        doctored,
+        "the refused run repaired the doctored lockfile instead of reporting it"
+    );
+
+    // The same artifact under a healthy CLI: the leg reaches the
+    // served-target comparison and names the tag's real target.
+    let leg = Command::new("python3")
+        .args(["ci/lockfile.py", "Cargo.lock", &copy.remote])
+        .current_dir(&copy.dir)
+        .output()
+        .expect("the lockfile leg runs");
+    assert!(
+        !leg.status.success(),
+        "the leg passed a lockfile recording a commit the tag does not land on"
+    );
+    let stderr = String::from_utf8_lossy(&leg.stderr);
+    assert!(
+        stderr.contains(&format!("but {pin} lands on {precise}")),
+        "the wrong-target record was refused without naming the tag's target:\n{stderr}"
+    );
+}
+
+/// A consumer lockfile that legitimately carries a further git-pinned
+/// package must still pass the `lockfile` stage end to end: the
+/// positive leg judges only the release crates' records, and the
+/// stage's self-check doctors only their `?query#sha` sources — never
+/// a whole-file census of git sources. This is the reported defect
+/// (`lockfile-doctor-hardcoded-git-source-count`): the doctor rewrote
+/// every `?query#sha` source in the file and hard-aborted on any count
+/// but three, so a consumer extending the template with a pinned git
+/// dependency — or a lockfile recording a second version of a release
+/// crate — crashed the stage with an opaque `doctor:` message and a
+/// real stale or duplicate lockfile state never reached its named
+/// diagnostic.
+///
+/// The materialized tree gains a `vendored-widget` dependency pinned
+/// `tag = "v0.1.0"` against its own `file://` remote — a tiny crate
+/// repository built in the scratch, tagged, and recorded in the
+/// committed lockfile exactly as `cargo update` would have written it
+/// — then runs the full clean check: the positive leg accepts the
+/// recorded release pin beside the foreign source, and the doctored
+/// copy still reports `lockfile-stale`.
+#[test]
+fn a_foreign_git_pin_beside_the_release_pins_passes_the_lockfile_stage() {
+    let tools = build_tools();
+    let copy = Materialized::new();
+
+    // The vendored crate the template does not ship: a tiny library in
+    // its own repository inside the materialized scratch — swept with
+    // it — committed and tagged like a real consumer's pinned git
+    // dependency.
+    let vendored = copy.dir.join("vendored-widget");
+    std::fs::create_dir_all(vendored.join("src")).unwrap();
+    std::fs::write(
+        vendored.join("Cargo.toml"),
+        "[package]\nname = \"vendored-widget\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(vendored.join("src/lib.rs"), "pub fn vendored() {}\n").unwrap();
+    git(&vendored, &["init"]);
+    git(&vendored, &["add", "-A"]);
+    git(
+        &vendored,
+        &[
+            "-c",
+            "user.name=dcs-ci",
+            "-c",
+            "user.email=dcs-ci@example.invalid",
+            "commit",
+            "-m",
+            "vendored widget",
+        ],
+    );
+    git(&vendored, &["tag", "v0.1.0"]);
+    let sha = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&vendored)
+            .output()
+            .expect("git rev-parse runs")
+            .stdout,
+    )
+    .expect("git rev-parse answers utf8");
+    let remote = format!("file://{}", vendored.display());
+
+    // The manifest declares the pin beside the release crates, and the
+    // committed lockfile records it — the root package's dependency
+    // list and a name-sorted `[[package]]` entry, the bytes
+    // `cargo update` would have written for the added dependency.
+    let manifest_path = copy.dir.join("Cargo.toml");
+    let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+    let edited = manifest.replace(
+        "serde_json = \"1\"",
+        &format!(
+            "serde_json = \"1\"\nvendored-widget = {{ git = \"{remote}\", tag = \"v0.1.0\" }}"
+        ),
+    );
+    assert_ne!(
+        edited, manifest,
+        "the template's Cargo.toml no longer records the serde_json dependency"
+    );
+    std::fs::write(&manifest_path, edited).unwrap();
+
+    let lock_path = copy.dir.join("Cargo.lock");
+    let mut lock = std::fs::read_to_string(&lock_path).unwrap();
+    let root_at = lock
+        .find("name = \"pump-station\"")
+        .expect("the template lockfile records no pump-station package");
+    let deps_end = lock[root_at..]
+        .find("\n]")
+        .map(|at| root_at + at + 1)
+        .expect("the pump-station package records no dependency list");
+    lock.insert_str(deps_end, " \"vendored-widget\",\n");
+    let zmij_at = lock
+        .find("[[package]]\nname = \"zmij\"")
+        .expect("the template lockfile no longer records the zmij package");
+    lock.insert_str(
+        zmij_at,
+        &format!(
+            "[[package]]\nname = \"vendored-widget\"\nversion = \"0.1.0\"\nsource = \"git+{remote}?tag=v0.1.0#{}\"\n\n",
+            sha.trim()
+        ),
+    );
+    std::fs::write(&lock_path, &lock).unwrap();
+    // The reproduction shape: four git-pinned sources in the file —
+    // the three release crates' and the consumer's own — where the
+    // doctor's census used to abort.
+    assert_eq!(
+        lock.matches("?tag=").count(),
+        4,
+        "the doctored fixture does not carry a fourth git-pinned source"
+    );
+
+    let output = copy.check(&tools);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "a consumer lockfile carrying an extra git-pinned package failed \
+         the template's ci/check.sh:\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("== lockfile =="),
+        "the lockfile stage did not run:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("a lockfile recorded at another revision refused: lockfile-stale"),
+        "the lockfile stage's doctored case did not report its named diagnostic \
+         beside the foreign pin:\n{stdout}"
+    );
+}
+
 /// A released crate reaching the build through a path package rather
 /// than the pinned remote is `path-dependency-leak`, whatever
 /// `cargo fetch --locked` says about the same file.
@@ -1476,6 +2015,487 @@ fn a_lockfile_missing_a_release_crate_reports_lockfile_stale() {
         doctored,
         "the refused run repaired the doctored lockfile instead of reporting it"
     );
+}
+
+/// Every `[[package]]` record of a release crate is screened — the
+/// leg collects every package block as a name→source multimap, never
+/// a last-wins map.
+///
+/// The reported defect
+/// (`lockfile-leg-validates-only-last-package-block-per-name`): the
+/// leg built `dict(re.findall(...))` over name/source pairs, so every
+/// same-name record collapsed to the last match. A `dcs-model`
+/// recorded a second time at a divergent `rev` pin — a recording a
+/// transitive dependency can legitimately introduce — was refused
+/// only when it happened to sort last: divergent-first passed,
+/// divergent-last refused, identical content yielding opposite
+/// verdicts purely by block order. Cargo's canonical package order
+/// sorts `?rev=` before `?tag=`, so the hiding order is the realistic
+/// one. The doctored lockfiles plant the divergent record ahead of
+/// and behind the pinned one — both must refuse, naming the divergent
+/// sources — plus the sourceless twin (issue 1450's path-package
+/// record, which never reached the regex at all) in both positions,
+/// each on the leak exit status.
+#[test]
+fn every_record_of_a_release_crate_is_screened() {
+    let copy = Materialized::new();
+    let lock = copy.dir.join("Cargo.lock");
+    let committed = std::fs::read_to_string(&lock).unwrap();
+
+    // The leg's own verdict, run directly against each doctored copy.
+    let leg = |doctored: &str| -> Output {
+        std::fs::write(&lock, doctored).unwrap();
+        Command::new("python3")
+            .arg("ci/lockfile.py")
+            .arg("Cargo.lock")
+            .arg(&copy.remote)
+            .arg("")
+            .current_dir(&copy.dir)
+            .output()
+            .expect("python3 runs the lockfile leg")
+    };
+
+    // dcs-model's committed package block — the record a second,
+    // divergent recording duplicates.
+    let start = committed
+        .find("[[package]]\nname = \"dcs-model\"\n")
+        .expect("the committed lockfile records a dcs-model package block");
+    let end = committed[start..]
+        .find("\n[[package]]")
+        .map(|i| start + i + 1)
+        .unwrap_or(committed.len());
+    let block = &committed[start..end];
+    let source_line = block
+        .lines()
+        .find(|line| line.starts_with("source = \""))
+        .expect("dcs-model's package block records a source");
+    // The divergent recording: the same crate at another rev — the
+    // `upgrade` stage's recorded baseline — on the manifest's own
+    // remote, so only the pin disagrees.
+    let baseline = recorded_upgrade_from(&copy.dir);
+    let divergent = block.replacen(
+        source_line,
+        &format!("source = \"git+{}?rev={baseline}#{baseline}\"", copy.remote),
+        1,
+    );
+    assert_ne!(
+        divergent, block,
+        "the divergent record is indistinguishable from the committed block"
+    );
+    for (case, doctored) in [
+        (
+            "the divergent record first",
+            format!(
+                "{}{}{}",
+                &committed[..start],
+                divergent,
+                &committed[start..]
+            ),
+        ),
+        (
+            "the divergent record last",
+            format!("{}{}{}", &committed[..end], divergent, &committed[end..]),
+        ),
+    ] {
+        let output = leg(&doctored);
+        assert!(
+            !output.status.success(),
+            "{case}: a lockfile recording a release crate at a second, divergent pin \
+             passed the leg"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("different sources"),
+            "{case}: the duplicated record was refused without naming the divergent \
+             sources:\n{stderr}"
+        );
+    }
+
+    // The sourceless twin: a path package records no `source` key at
+    // all — the record that never reached the collected map under the
+    // regex. Either position is the same leak finding.
+    let sourceless = block.replacen(&format!("{source_line}\n"), "", 1);
+    assert_ne!(
+        sourceless, block,
+        "the sourceless twin is indistinguishable from the committed block"
+    );
+    for (case, doctored) in [
+        (
+            "the sourceless record first",
+            format!(
+                "{}{}{}",
+                &committed[..start],
+                sourceless,
+                &committed[start..]
+            ),
+        ),
+        (
+            "the sourceless record last",
+            format!("{}{}{}", &committed[..end], sourceless, &committed[end..]),
+        ),
+    ] {
+        let output = leg(&doctored);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{case}: a sourceless duplicate of a release crate is not the leak \
+             finding's exit status:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// The lockfile leg reads the manifest through `cargo metadata
+/// --no-deps` and the lockfile as parsed TOML — never a positional
+/// spelling — so a TOML-equivalent respelling of the shipped
+/// declaration is not a `lockfile-stale` or `path-dependency-leak`
+/// finding. This is the reported
+/// `lockfile-leg-positional-toml-regex-misdiagnoses` reproduction:
+/// the `tag` fragment spelled before `git` in the inline table, the
+/// pin broken across the table's lines, an inert commented-out pin
+/// beside the real declaration, and `dcs-core`'s `source` field
+/// recorded after its `dependencies` list are each the same pinned
+/// declaration — the leg must pass every one. The boundary still
+/// stands the other way: a release crate recorded with no `source`
+/// at all resolves from a path into some checkout, and the check
+/// names it `path-dependency-leak`.
+#[test]
+fn toml_equivalent_respellings_pass_the_lockfile_leg() {
+    let copy = Materialized::new();
+    let manifest = copy.dir.join("Cargo.toml");
+    let lock = copy.dir.join("Cargo.lock");
+    let committed_manifest = std::fs::read_to_string(&manifest).unwrap();
+    let committed_lock = std::fs::read_to_string(&lock).unwrap();
+
+    // The materialized manifest's dependency line for a release crate,
+    // broken out as its `git` remote and `tag`/`rev` fragment.
+    let dep_line = |name: &str| {
+        let line = committed_manifest
+            .lines()
+            .find(|line| line.starts_with(&format!("{name} = {{")))
+            .unwrap_or_else(|| panic!("the materialized manifest declares no {name} inline table"))
+            .to_owned();
+        let quoted = |key: &str| {
+            let marker = format!("{key} = \"");
+            let start = line
+                .find(&marker)
+                .unwrap_or_else(|| panic!("{name}'s dependency declares no '{marker}': {line}"))
+                + marker.len();
+            line[start..start + line[start..].find('"').unwrap()].to_owned()
+        };
+        let kind = ["tag", "rev"]
+            .into_iter()
+            .find(|kind| line.contains(&format!("{kind} = \"")))
+            .unwrap_or_else(|| panic!("{name}'s dependency declares no pin: {line}"));
+        let spec = (quoted("git"), kind.to_owned(), quoted(kind));
+        (line, spec.0, spec.1, spec.2)
+    };
+    // The leg's own verdict: exit status 0 records the declared pin.
+    let leg = |case: &str| {
+        let output = Command::new("python3")
+            .arg("ci/lockfile.py")
+            .arg("Cargo.lock")
+            .arg(&copy.remote)
+            .arg("")
+            .current_dir(&copy.dir)
+            .output()
+            .expect("python3 runs the lockfile leg");
+        assert!(
+            output.status.success(),
+            "{case}: a TOML-equivalent respelling was refused:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+
+    // The inline table's `tag`/`rev` fragment spelled before `git` —
+    // the same declaration in another key order.
+    let mut respelled = committed_manifest.clone();
+    for name in ["dcs-build", "dcs-model"] {
+        let (line, git, kind, value) = dep_line(name);
+        respelled = respelled.replacen(
+            &line,
+            &format!("{name} = {{ {kind} = \"{value}\", git = \"{git}\" }}"),
+            1,
+        );
+    }
+    std::fs::write(&manifest, &respelled).unwrap();
+    leg("the pin fragments spelled `tag`/`rev` before `git`");
+
+    // The same pin broken across the inline table's lines.
+    let mut respelled = committed_manifest.clone();
+    for name in ["dcs-build", "dcs-model"] {
+        let (line, git, kind, value) = dep_line(name);
+        respelled = respelled.replacen(
+            &line,
+            &format!("{name} = {{\n    git = \"{git}\",\n    {kind} = \"{value}\"\n}}"),
+            1,
+        );
+    }
+    std::fs::write(&manifest, &respelled).unwrap();
+    leg("the pin broken across the inline table's lines");
+
+    // An inert commented-out pin at an old rev beside the real
+    // declaration — a comment declares nothing.
+    let (line, git, _, _) = dep_line("dcs-build");
+    std::fs::write(
+        &manifest,
+        committed_manifest.replacen(
+            &line,
+            &format!(
+                "# dcs-build = {{ git = \"{git}\", rev = \"{}\" }}\n{line}",
+                "0".repeat(40)
+            ),
+            1,
+        ),
+    )
+    .unwrap();
+    leg("an inert commented-out pin beside the real declaration");
+    std::fs::write(&manifest, &committed_manifest).unwrap();
+
+    // dcs-core's `source` field recorded after its `dependencies`
+    // list — the same `[[package]]` record in another field order.
+    let start = committed_lock
+        .find("[[package]]\nname = \"dcs-core\"\n")
+        .expect("the committed lockfile records a dcs-core package block");
+    let end = committed_lock[start..]
+        .find("\n[[package]]")
+        .map(|i| start + i)
+        .unwrap_or(committed_lock.len());
+    let block = &committed_lock[start..end];
+    let source_line = block
+        .lines()
+        .find(|line| line.starts_with("source = \""))
+        .expect("dcs-core's package block records a source");
+    let mut fields: Vec<&str> = block.lines().filter(|line| *line != source_line).collect();
+    let close = fields
+        .iter()
+        .position(|line| *line == "]")
+        .expect("dcs-core's package block carries a dependencies list")
+        + 1;
+    fields.insert(close, source_line);
+    std::fs::write(
+        &lock,
+        format!(
+            "{}{}{}",
+            &committed_lock[..start],
+            fields.join("\n"),
+            &committed_lock[end..]
+        ),
+    )
+    .unwrap();
+    leg("the lockfile's `source` field recorded after `dependencies`");
+
+    // The diagnostic boundary still stands: a release crate recorded
+    // with no `source` at all resolves from a path into some
+    // checkout — `path-dependency-leak`'s finding, which the check
+    // names.
+    let fields: Vec<&str> = block
+        .lines()
+        .filter(|line| !line.starts_with("source = \""))
+        .collect();
+    std::fs::write(
+        &lock,
+        format!(
+            "{}{}{}",
+            &committed_lock[..start],
+            fields.join("\n"),
+            &committed_lock[end..]
+        ),
+    )
+    .unwrap();
+    let output = Command::new("python3")
+        .arg("ci/lockfile.py")
+        .arg("Cargo.lock")
+        .arg(&copy.remote)
+        .arg("")
+        .current_dir(&copy.dir)
+        .output()
+        .expect("python3 runs the lockfile leg");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a release crate recorded with no source is not the leak finding's exit status:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let refused = Command::new("bash")
+        .arg("ci/check.sh")
+        .current_dir(&copy.dir)
+        .env("DCS_REMOTE", &copy.remote)
+        .env("DCS_RECORD_DIR", root().join("docs/releases"))
+        .env("CARGO_TARGET_DIR", copy.dir.join("target"))
+        .output()
+        .expect("ci/check.sh runs");
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success(),
+        "a lockfile recording a release crate without a source passed the check"
+    );
+    assert!(
+        stderr.contains("path-dependency-leak"),
+        "a source-less release crate record was refused without its named diagnostic:\n{stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&refused.stdout).contains("== resolve =="),
+        "the leaked path source was caught only after the resolve stage:\n{stderr}"
+    );
+}
+
+/// The release contract's `dcs-core`, `dcs-model` direct declarations
+/// are optional — `docs/release-contract.md`: "a consumer may also
+/// declare them directly — e.g. to assert
+/// `dcs_model::MODEL_VERSION` — under the same pin". A manifest
+/// naming neither resolves both through `dcs-build` at that one pin,
+/// and the committed lockfile's record of all three release crates is
+/// what the lockfile leg holds to it.
+///
+/// The reported defect (`lockfile-leg-misdiagnoses-omitted-direct-
+/// dep`): the leg's manifest census required both `dcs-build` *and*
+/// `dcs-model` as direct dependencies, turning this template's own
+/// declaration shape into a correctness gate — a consumer that dropped
+/// the direct `dcs-model` line was reported `lockfile-stale` (exit 1,
+/// "dcs-model declares no `git = ..., tag|rev = ...` pin in
+/// Cargo.toml") over a lockfile recording all three crates correctly
+/// at the declared pin. The reproduction is the reported one: the
+/// direct `dcs-model` dependency line deleted from the materialized
+/// manifest, the committed lockfile untouched. The leg must record the
+/// pin — on that committed artifact and on the lockfile `cargo update`
+/// writes for the doctored manifest alike.
+#[test]
+fn an_omitted_optional_direct_release_dep_passes_the_lockfile_leg() {
+    let copy = Materialized::new();
+    let manifest = copy.dir.join("Cargo.toml");
+    let lock = copy.dir.join("Cargo.lock");
+    let committed_manifest = std::fs::read_to_string(&manifest).unwrap();
+    let committed_lock = std::fs::read_to_string(&lock).unwrap();
+
+    let declared = committed_manifest
+        .lines()
+        .find(|line| line.starts_with("dcs-model = {"))
+        .unwrap_or_else(|| {
+            panic!("the materialized manifest declares no direct dcs-model dependency")
+        })
+        .to_owned();
+    let omitted = committed_manifest.replace(&format!("{declared}\n"), "");
+    assert_ne!(
+        omitted, committed_manifest,
+        "the doctor left the direct dcs-model dependency in place"
+    );
+    assert!(
+        !omitted.contains("dcs-model = {"),
+        "the doctored manifest still declares dcs-model directly"
+    );
+    // The lockfile the omitted declaration must still satisfy: all
+    // three release crates recorded, each from the manifest's own pin —
+    // the condition the leg holds to, and the one `cargo fetch
+    // --locked` later re-checks.
+    let pin = pinned_release(&copy.dir);
+    let precise = committed_lock_rev(&copy.dir);
+    for name in ["dcs-build", "dcs-core", "dcs-model"] {
+        assert!(
+            committed_lock.contains(&format!("[[package]]\nname = \"{name}\"\n")),
+            "the committed lockfile records no {name} package block"
+        );
+    }
+    assert_eq!(
+        committed_lock
+            .matches(&format!("?tag={pin}#{precise}"))
+            .count()
+            + committed_lock
+                .matches(&format!("?rev={pin}#{precise}"))
+                .count(),
+        3,
+        "the committed lockfile does not record all three release crates at {pin}#{precise}"
+    );
+    std::fs::write(&manifest, &omitted).unwrap();
+
+    // The leg's own verdict: exit status 0 records the declared pin.
+    let passes_the_leg = |case: &str| {
+        let output = Command::new("python3")
+            .arg("ci/lockfile.py")
+            .arg("Cargo.lock")
+            .arg(&copy.remote)
+            .arg("")
+            .current_dir(&copy.dir)
+            .output()
+            .expect("python3 runs the lockfile leg");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "{case}: a manifest omitting the contract-optional direct dcs-model \
+             declaration was refused on a lockfile recording all three release \
+             crates at the declared pin:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("declares no"),
+            "{case}: the omitted optional declaration was diagnosed as a missing pin:\n{stderr}"
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains(&precise),
+            "{case}: the leg recorded no revision the lockfile carries: {stdout}"
+        );
+    };
+    // The reported reproduction, verbatim: the committed lockfile
+    // untouched.
+    passes_the_leg("the committed lockfile, untouched");
+
+    // The same lockfile still satisfies that manifest once the file is
+    // the one `cargo update` writes for it: Cargo records the consumer
+    // package's own dependency list, so a consumer that drops the line
+    // regenerates the file — that one entry drops, every `[[package]]`
+    // record stays — and no re-resolve is needed afterwards, because the
+    // omitted declaration removes no resolved package. What the leg
+    // refused was therefore a shape, not a disagreement.
+    let root_start = committed_lock
+        .find("[[package]]\nname = \"pump-station\"\n")
+        .expect("the committed lockfile records the consumer package");
+    let root_end = committed_lock[root_start..]
+        .find("\n[[package]]")
+        .map(|at| root_start + at)
+        .unwrap_or(committed_lock.len());
+    let regenerated = format!(
+        "{}{}{}",
+        &committed_lock[..root_start],
+        committed_lock[root_start..root_end].replacen(" \"dcs-model\",\n", "", 1),
+        &committed_lock[root_end..],
+    );
+    assert_ne!(
+        regenerated, committed_lock,
+        "the doctor left the consumer package's own dcs-model dependency entry in place"
+    );
+    std::fs::write(&lock, &regenerated).unwrap();
+    passes_the_leg("the regenerated lockfile");
+    let before = std::fs::read(&lock).unwrap();
+    let metadata = Command::new(CARGO)
+        .args(["metadata", "--locked", "--format-version", "1"])
+        .current_dir(&copy.dir)
+        .env("CARGO_TARGET_DIR", copy.dir.join("target"))
+        .output()
+        .expect("cargo metadata runs");
+    assert!(
+        metadata.status.success(),
+        "the regenerated Cargo.lock does not satisfy a manifest without the direct \
+         dcs-model declaration: {}",
+        String::from_utf8_lossy(&metadata.stderr)
+    );
+    assert_eq!(
+        std::fs::read(&lock).unwrap(),
+        before,
+        "the locked resolve rewrote the regenerated Cargo.lock"
+    );
+    let graph = String::from_utf8_lossy(&metadata.stdout);
+    for name in ["dcs-build", "dcs-core", "dcs-model"] {
+        assert!(
+            graph.contains(&format!("\"name\":\"{name}\"")),
+            "{name} is absent from the resolved graph of a manifest declaring only \
+             dcs-build directly"
+        );
+    }
+    assert!(
+        graph.contains(&format!("git+{}?", copy.remote)),
+        "the resolved graph carries no release crate from the pinned remote"
+    );
+    std::fs::write(&manifest, &committed_manifest).unwrap();
 }
 
 /// The `upgrade` stage is the executable assertion of the documented
