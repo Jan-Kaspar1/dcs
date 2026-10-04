@@ -28,7 +28,9 @@ Usage, from the consumer tree's root:
 leg, a doctored scratch copy in the stage's self-checks. `REMOTE` is
 the remote this check resolves — `DCS_REMOTE`, the stand-in the
 workspace-side proofs substitute — and `RECORD` the release record's
-`record.md` when one was substituted, else the empty string. Exit
+`record.md`: the one `ci/check.sh` fetches at the pinned rev in the
+contract's own shape, the substituted one under `DCS_RECORD_DIR`, or
+the empty string for the stage's doctored legs. Exit
 status 2 is a release crate recorded from a non-git source —
 `path-dependency-leak`'s finding — and 1 every other disagreement,
 `lockfile-stale`'s.
