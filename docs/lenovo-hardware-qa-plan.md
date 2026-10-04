@@ -1736,6 +1736,80 @@ Implementation order: second, after [daily architecture review](daily-architectu
   run carrying no born staging lever, no per-seat journal file, or no
   settled pair reports inconclusive.
 
+### Landed 2026-10-04 (bounded interlock-release orphan-window leg, #1179/#828)
+
+- The bounded orphan window a `POST /demote` landing inside the
+  interlock-release propagation window leaves behind — the per-revision
+  lane evidence for the contract #828's fix establishes (WW-LCM-001's
+  takeover-continuity clause, and the fail-safe rule that the field must
+  never stand energized under a standing protection trip with no
+  controller able to take over) — is exercised per revision by scenario
+  leg `3850_release_orphan_window` on the deployed pair. The station's
+  release propagates over driven scans, never on the write (`power-fail`
+  inverted into `power-ok`, `power-ok` dropping each pump's availability,
+  the protection interlock guarding the command, and only then the
+  group's staged image carrying the released `p10x-cmd`), so a legal
+  demote landing between the contact write and the scan that writes
+  that release abandons the in-flight write. The recorded finding left
+  both pumps hand-running and energized ~1 s through the demote with
+  both peers `standby`/`orphaned`, healing only when an operator promote
+  converged and wrote the safe command; #828 closed the wedge behind that
+  window, and this leg pins the bound itself.
+- Each pass settles the pair on its launch layout, joins the field's
+  standing writer claim under the owner's pinned `--owner-token`, hand-runs
+  both pumps through the bounded receipted operator path (the four
+  writable `p10x-mode`/`p10x-hand` writes, each settling `applied` and
+  attributed to the leg), drives the journaled `power-fail` contact
+  through the plant protocol while both outputs still read energized, and
+  demotes the owner in the same breath. The window is then watched
+  through the plant protocol's own field reads and both peers' serving
+  monitors across the declared bound (`ROW_BOUND` seconds of served
+  observation, polled one cadence short so an out-of-bound reading is a
+  real observation and never a measurement artefact): no peer may report
+  the promote-blocking `diverged`, the peer whose pull lands the
+  ownerless line must journal `field_orphaned`, `POST /promote` must be
+  answered `promoting` — never the `not_converged` refusal — and the
+  promoted peer's first field-owning scans must write the abandoned
+  release, after which the pair reconverges to one active plus one
+  tracking standby.
+- The window's *shape* is deliberately outside the digest: the contract
+  accepts either half — the pending write landing before the demotion
+  completes, or the promotion flushing it inside the bound — and which
+  half a pass observes is the rig's scan timing, not the build under test.
+  The digest records the bound's disposition (the energization never
+  outlived it, the promote converged, the pair reconverged, the rig
+  restored); the observed shape and the measured window ride the
+  evidence file and the case's observations, where the window is named
+  by its own bound.
+- Named diagnostics are `release-orphan-window-failed` (a hand run that
+  never energized both outputs, a receipted write that never settled
+  applied, a demote that never landed, a peer reporting the
+  promote-blocking `diverged`, a release the declared interlock chain does
+  not explain, an unjournaled orphan transition, a promote answered
+  `not_converged`, outputs energized past the declared bound, a pair that
+  never reconverged, a rig left tripped or hand-run) and
+  `release-orphan-window-nondeterministic` (a lost trip write, a lost
+  field read, a starved monitor, an empty window, an unsettled demotion, an
+  unread journal, two diverging digests), with the self-check's
+  `release-orphan-window-unchecked` covering every planted negative — the
+  issue's named doctored case among them, the outputs asserted as bounded
+  while they stay energized past the bound. Two consecutive passes produce
+  identical digests. A run context carrying only one endpoint, no plant
+  endpoint, no pinned owner tokens, an unreachable monitor, a model
+  declaring no power-fail interlock wiring, or pumps already standing in
+  hand reports inconclusive. A staged revision predating the contract
+  reports inconclusive too, on its behavioural signature: the ownerless
+  window's rows reporting `diverged` with the sibling's promote answered
+  `not_converged` — the shape #828 closed, which a build carrying the
+  fix cannot present.
+- The consumer-boundary mirror of this contract rides the reference
+  plant's redundant pair in clean CI as `ci/legs/release_orphan_window.py`
+  (#1180), where the same run drives the driven-scan rig: its declared
+  bound is `RELEASE_SCANS` driven pair ticks, the pair having no wall-clock
+  scans of its own, and its two doctored cases — `expect-flushed` and
+  `skip-promote` — flip the leg’s own expectations to the shapes the
+  honest episode must not present.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,
