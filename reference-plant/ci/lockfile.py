@@ -16,9 +16,12 @@ The manifest is read through `cargo metadata --no-deps`: Cargo's own
 TOML dialect decides which declaration is the pin — inline-table key
 order, line wrapping, and comments are inert, and a commented-out pin
 declares nothing — while `--no-deps` leaves the committed lockfile
-unread and unwritten. The lockfile is read through `tomllib`, the
-stdlib TOML parser, so a `[[package]]` entry's field order is the
-same record however it was merged or edited.
+unread and unwritten. Only `dcs-build` must be declared directly:
+`dcs-core` and `dcs-model` are the contract's optional direct
+declarations, so a manifest naming neither resolves both through
+`dcs-build` at the same pin and still passes. The lockfile is read
+through `tomllib`, the stdlib TOML parser, so a `[[package]]` entry's
+field order is the same record however it was merged or edited.
 
 Usage, from the consumer tree's root:
 
@@ -69,6 +72,16 @@ def leak(message):
 # dependency carrying no source, or a source that is not the pinned
 # remote's git query, declares no pin this leg can hold the lockfile
 # to.
+#
+# `dcs-build` must be declared directly — it is the release's
+# engineering seam, the crate a consumer composes with, and every other
+# release crate reaches the tree through it. `dcs-core` and `dcs-model`
+# are the contract's optional direct declarations ("a consumer may also
+# declare them directly", `docs/release-contract.md`): a manifest
+# naming neither resolves both through `dcs-build` at the same pin and
+# declares no pin of its own for them, so the census below learns the
+# pin from whatever the manifest does declare and the lockfile's own
+# record of all three release crates is authoritative for the rest.
 try:
     metadata = subprocess.run(
         ["cargo", "metadata", "--format-version", "1", "--no-deps", "--offline"],
@@ -80,8 +93,10 @@ if metadata.returncode != 0:
     sys.exit(f"Cargo.toml does not resolve as a cargo manifest: {metadata.stderr.strip()}")
 document = json.loads(metadata.stdout)
 git_pin = re.compile(r"^git\+[^?]+\?(tag|rev)=")
+# The census walks every release crate, so a crate this manifest does
+# not declare directly contributes no pin rather than a missing one.
 declared = {}
-for name in ("dcs-build", "dcs-model"):
+for name in release:
     pins = {
         dependency["source"]
         for package in document.get("packages", [])
@@ -91,7 +106,9 @@ for name in ("dcs-build", "dcs-model"):
         and git_pin.match(dependency["source"])
     }
     if not pins:
-        sys.exit(f"{name} declares no `git = ..., tag|rev = ...` pin in Cargo.toml")
+        if name == "dcs-build":
+            sys.exit("dcs-build declares no `git = ..., tag|rev = ...` pin in Cargo.toml")
+        continue
     if len(pins) != 1:
         sys.exit(f"{name} declares conflicting git pins in Cargo.toml: {sorted(pins)}")
     declared[name] = pins.pop()

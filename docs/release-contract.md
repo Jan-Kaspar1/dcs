@@ -353,7 +353,11 @@ tag lands on and the release record's filled `Commit` field, with
 rewriting the committed lockfile, a lockfile recorded at another
 revision — or missing a release crate's `[[package]]` block entirely,
 nothing recorded at all, which is stale rather than a leak — reporting
-`lockfile-stale`, and the reported defect put back:
+`lockfile-stale`, a manifest declaring only `dcs-build` directly — the
+direct `dcs-core`, `dcs-model` declarations being optional, both crates
+reached transitively through `dcs-build` at the one pin — passing that
+stage on the very lockfile recording all three crates at it, and the
+reported defect put back:
 a consumer crate of its own reaching a released crate through a
 `path` dependency — which the re-resolved lockfile records beside the
 pinned one, sourceless, and which `cargo fetch --locked` accepts over
