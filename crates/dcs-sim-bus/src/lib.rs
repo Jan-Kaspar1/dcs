@@ -68,8 +68,10 @@
 //! logical tick that stamps written registers and steps any declared
 //! dynamics by the request's `dt` — the same caller-supplied time base
 //! the plant protocol's `step` carries, so a controller's step request
-//! advances the simulated process in lockstep. `dt` must be finite and
-//! non-negative; a step carrying one that is not is refused with an
+//! advances the simulated process in lockstep. `dt` must be finite,
+//! non-negative, and at most `dcs_sim::MAX_STEP_DT` — the bound the
+//! plant protocol's `step` applies, the bank being a `SimDriver` keyed
+//! by register; a step carrying any other `dt` is refused with an
 //! `invalid_request` error. Nothing on the wire advances on a wall
 //! clock.
 //!

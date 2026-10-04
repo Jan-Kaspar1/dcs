@@ -1006,7 +1006,8 @@ controller scan.
                   delivery under the stdout_snapshot_drops counter
                   reported on stderr, never the scan's cadence
   --dt T          simulated process time per scan (default: scan period in
-                  seconds, or 1.0 when unpaced)
+                  seconds, or 1.0 when unpaced); at most 1000000 time
+                  units, the plant step contract's bound
   --listen ADDR   serve the monitoring endpoints on ADDR while the paced
                   scan runs; requires --scan-ms. While pacing, POST /scan is
                   refused: the wall clock owns the scan schedule
@@ -1273,6 +1274,19 @@ impl Options {
             && (!dt.is_finite() || dt < 0.0)
         {
             return Err("--dt must be finite and non-negative".to_string());
+        }
+        if let Some(dt) = dt
+            && dt > dcs_sim::MAX_STEP_DT
+        {
+            // The field refuses an over-bound step by name, so a run
+            // paced above the bound would die on its first scan with a
+            // wire diagnostic; the run defect is reported where it is
+            // configured instead.
+            return Err(format!(
+                "--dt must be at most {} — a scan period, bounded by \
+                 the plant's step contract",
+                dcs_sim::MAX_STEP_DT
+            ));
         }
         if auto_promote == Some(0) {
             return Err("--auto-promote must be at least one missed pull".to_string());

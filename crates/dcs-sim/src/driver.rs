@@ -11,6 +11,43 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 
+/// The largest simulated-time advance one plant tick may request:
+/// 10<sup>6</sup> time units per [`SimDriver::step`] — about 11.6 days.
+///
+/// A step's `dt` is one scan period: the controller's `--scan-ms`
+/// (milliseconds) or its `--dt` (seconds of simulated process time
+/// per scan). Every plant this platform serves paces itself in
+/// milliseconds to seconds, so the bound leaves four to five orders of
+/// magnitude of headroom above the largest scan a run would declare,
+/// while it buys three properties a bare `dt.is_finite()` check cannot:
+///
+/// - **every element's clock keeps advancing.** Each element's
+///   simulated time advances by `dt` per tick, and an accumulated
+///   clock absorbs a later advance silently once it is large enough:
+///   at `t = 1e308` the `f64` sum `t + dt` is `t` for every `dt` this
+///   platform can name, so one accepted huge step leaves a
+///   [`DeadTime`](crate::DeadTime) line frozen on its last sample
+///   forever — no error, no refusal, and no later legal step to
+///   recover it. Bounded at `MAX_STEP_DT`, absorption needs about
+///   `1.8e296` ticks at one bound per tick;
+/// - **the step's arithmetic stays inside the range a `Float` sample
+///   can spell.** `y + u·dt` at `dt ≤ 1e6` leaves 300 orders of
+///   magnitude between the product and the `f64` ceiling, so an
+///   ordinary plant signal cannot overflow a well-scaled integrator —
+///   where an extreme one still can, the per-element guard below holds
+///   the last finite state and reports it `Bad`/`out_of_range`;
+/// - **no accepted step can store a value the wire cannot carry.** A
+///   non-finite `Float` serves `{"float":null}`, which this
+///   protocol's own `Value` cannot deserialize — the field corrupting
+///   for every attachment until the plant restarts.
+///
+/// The bound is the field's own contract: [`SimDriver::step`] refuses
+/// a `dt` above it, and the plant protocol
+/// ([`dcs-sim-net`](https://docs.rs/dcs-sim-net)) answers the same
+/// `dt` with the named `invalid_request` refusal rather than letting
+/// a controller's first scan kill the run.
+pub const MAX_STEP_DT: f64 = 1.0e6;
+
 /// A fault injected on a simulated point for diagnostics testing.
 ///
 /// Faults are set per point with [`SimDriver::inject_fault`] and stay active
@@ -533,15 +570,19 @@ impl SimDriver {
     /// arithmetic lands finite resumes it, so a finite input write
     /// repairs an overflowed element without restarting the field.
     ///
-    /// `dt` must be finite and non-negative.
+    /// `dt` must be finite, non-negative, and at most
+    /// [`MAX_STEP_DT`] — a step is one scan period, and a time jump
+    /// past the bound would leave an element's accumulated clock
+    /// unable to advance again under any later legal step.
     ///
     /// # Panics
     ///
-    /// Panics when `dt` is negative or non-finite.
+    /// Panics when `dt` is negative, non-finite, or above
+    /// [`MAX_STEP_DT`].
     pub fn step(&self, dt: f64) -> Tick {
         assert!(
-            dt.is_finite() && dt >= 0.0,
-            "step dt must be finite and non-negative, got {dt}"
+            (0.0..=MAX_STEP_DT).contains(&dt),
+            "step dt must be finite, non-negative, and at most {MAX_STEP_DT}, got {dt}"
         );
         let state = &mut *self.state.lock().unwrap();
         state.tick = Tick(state.tick.0 + 1);
@@ -1197,12 +1238,12 @@ mod tests {
     #[test]
     fn an_overflowing_step_marks_the_output_bad_and_the_element_recovers() {
         // Finite, contract-legal inputs can still overflow the element's
-        // own arithmetic — a 1e308 input stepping 1e308 lands past the
-        // f64 range. The step commits nothing: the output reports the
-        // last finite state `Bad`/`out_of_range` — a sample every wire
-        // contract still decodes — rather than storing a non-finite
-        // value that serializes `{"float":null}` and stays corrupt under
-        // every later step until the field restarts.
+        // own arithmetic — a 1e308 input stepping 1.0 walks past the f64
+        // range on the second tick. The step commits nothing: the output
+        // reports the last finite state `Bad`/`out_of_range` — a sample
+        // every wire contract still decodes — rather than storing a
+        // non-finite value that serializes `{"float":null}` and stays
+        // corrupt under every later step until the field restarts.
         let map = ChannelMap::new()
             .with_point(float_point(1, Direction::In))
             .with_point(float_point(2, Direction::In))
@@ -1213,7 +1254,9 @@ mod tests {
             }));
         let sim = SimDriver::new(map).unwrap();
         sim.write(PointId(1), Value::Float(1e308)).unwrap();
-        sim.step(1e308);
+        // Even at the bound a 1e308 signal's product leaves the f64
+        // range: `1e308 · 1e6` is `+inf`, so the step commits nothing.
+        sim.step(MAX_STEP_DT);
         let sample = sim.read(PointId(2)).unwrap();
         assert_eq!(sample.value, Value::Float(0.0));
         assert_eq!(sample.quality, Quality::Bad(QualityReason::OutOfRange));
@@ -1224,7 +1267,7 @@ mod tests {
 
         // A second overflowing step holds the same verdict — the
         // accumulator never left its finite state.
-        sim.step(1e308);
+        sim.step(MAX_STEP_DT);
         assert_eq!(sim.read(PointId(2)).unwrap().value, Value::Float(0.0));
 
         // The documented recovery: a finite input write followed by a
@@ -1235,6 +1278,113 @@ mod tests {
         let sample = sim.read(PointId(2)).unwrap();
         assert_eq!(sample.value, Value::Float(2.0));
         assert!(sample.quality.is_good());
+    }
+
+    #[test]
+    fn a_step_at_the_documented_bound_is_accepted_and_keeps_state_finite() {
+        // The bound is a usable ceiling, not a formality: a scan paced
+        // at the bound advances the field as any other step does, and
+        // the accumulator stays well inside the range a `Float` sample
+        // can spell — `1e300 · 1e6 = 1e306` still serves as a number.
+        let map = ChannelMap::new()
+            .with_point(float_point(1, Direction::In))
+            .with_point(float_point(2, Direction::In))
+            .with_element(ProcessElement::Integrator(Integrator {
+                input: PointId(1),
+                output: PointId(2),
+                initial: 0.0,
+            }));
+        let sim = SimDriver::new(map).unwrap();
+        sim.write(PointId(1), Value::Float(1e300)).unwrap();
+        sim.step(MAX_STEP_DT);
+        let sample = sim.read(PointId(2)).unwrap();
+        assert_eq!(sample.value, Value::Float(1e306));
+        assert!(sample.quality.is_good());
+        let json = serde_json::to_string(&sample).unwrap();
+        assert!(!json.contains("null"), "{json}");
+    }
+
+    #[test]
+    fn a_step_above_the_documented_bound_is_refused() {
+        // QA `huge-step-dt-poisons-plant-state`: the finding's
+        // reproduction is a *finite* `dt` the pre-bound assert accepted
+        // (`1e308`), and the acceptance it bought was the whole defect —
+        // one request wound the accumulator past the range, or left a
+        // delay line's clock where no legal step could move it again.
+        // The bound names the refusal instead, and it costs the field
+        // nothing: the refused tick never happened.
+        let map = ChannelMap::new()
+            .with_point(float_point(1, Direction::In))
+            .with_point(float_point(2, Direction::In))
+            .with_element(ProcessElement::Integrator(Integrator {
+                input: PointId(1),
+                output: PointId(2),
+                initial: 0.0,
+            }));
+        let sim = SimDriver::new(map).unwrap();
+        sim.write(PointId(1), Value::Float(1.0)).unwrap();
+        sim.step(1.0);
+        let before = (sim.tick(), sim.read(PointId(2)).unwrap());
+        for above in [MAX_STEP_DT + 1.0, 1e7, 1e308] {
+            let refused =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sim.step(above)));
+            assert!(
+                refused.is_err(),
+                "dt {above} is above the bound and must not be applied"
+            );
+            assert_eq!(
+                (sim.tick(), sim.read(PointId(2)).unwrap()),
+                before,
+                "a refused dt must leave the field exactly as it stood"
+            );
+        }
+        // The field still steps normally on a legal dt afterwards.
+        assert_eq!(sim.step(MAX_STEP_DT), Tick(before.0.0 + 1));
+        assert!(sim.read(PointId(2)).unwrap().quality.is_good());
+    }
+
+    #[test]
+    #[should_panic(expected = "step dt must be finite, non-negative, and at most 1000000")]
+    fn the_findings_huge_finite_dt_is_refused_before_touching_the_field() {
+        // The finding's exact reproduction vector — `step(1e308)` on a
+        // map with an integrator — asserted at the field itself, where
+        // the refusal is the assert rather than a wire error.
+        let map = ChannelMap::new()
+            .with_point(float_point(1, Direction::In))
+            .with_point(float_point(2, Direction::In))
+            .with_element(ProcessElement::Integrator(Integrator {
+                input: PointId(1),
+                output: PointId(2),
+                initial: 0.0,
+            }));
+        let sim = SimDriver::new(map).unwrap();
+        sim.write(PointId(1), Value::Float(1.0)).unwrap();
+        sim.step(1e308);
+    }
+
+    #[test]
+    fn a_dead_time_line_keeps_advancing_under_bounded_steps() {
+        // The absorption the bound exists to prevent: at a clock of
+        // `1e308` an accumulated delay line can no longer be moved by
+        // any legal step, so its last sample would stand forever. Bounded
+        // steps keep the clock strictly increasing — this line delivers
+        // the input `delay` after it, tick by tick, as declared.
+        let sim = SimDriver::new(dead_time_map(2.0)).unwrap();
+        sim.write(PointId(1), Value::Float(1.0)).unwrap();
+        let mut delivered = None;
+        for _ in 0..40 {
+            sim.step(MAX_STEP_DT);
+            if let Value::Float(1.0) = sim.read(PointId(2)).unwrap().value {
+                delivered = Some(sim.tick());
+                break;
+            }
+        }
+        assert!(
+            delivered.is_some(),
+            "a bounded step sequence must deliver the delayed sample: \
+             the line reads {:?}",
+            sim.read(PointId(2)).unwrap().value
+        );
     }
 
     fn second_order_map(time_constant: f64, damping_ratio: f64) -> ChannelMap {

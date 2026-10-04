@@ -602,8 +602,10 @@ impl BusDriver {
     /// Advances the device server's bank one tick of `dt` time units —
     /// the explicit step behind the register protocol, stepping any
     /// declared dynamics by `dt` — and returns the bank's new tick.
-    /// `dt` must be finite and non-negative; a step carrying one that
-    /// is not is refused with [`LinkError::InvalidRequest`]. Stepping
+    /// `dt` must be finite, non-negative, and at most
+    /// [`dcs_sim::MAX_STEP_DT`](dcs_sim::MAX_STEP_DT); a step carrying
+    /// any other `dt` is refused with [`LinkError::InvalidRequest`].
+    /// Stepping
     /// mutates the shared device, so while an attachment holds the
     /// write-ownership claim a non-holder's step answers
     /// [`LinkError::Fenced`].

@@ -38,8 +38,18 @@
 //!   value does not decode at all, the point's `IoError::InvalidValue`
 //!   when a peer's own encoding carries it.
 //! - `{"op":"step","dt":0.1}` — `SimDriver::step`; answers
-//!   `{"result":"stepped","tick":7}`. A negative or non-finite `dt` is
-//!   refused as `invalid_request`, never a panic.
+//!   `{"result":"stepped","tick":7}`. A negative, non-finite, or
+//!   over-bound `dt` is refused as `invalid_request` with the bound
+//!   named, never a panic. The bound is
+//!   [`dcs_sim::MAX_STEP_DT`](dcs_sim::MAX_STEP_DT) — 10<sup>6</sup>
+//!   time units per plant tick, five orders of magnitude above any scan
+//!   period a control run paces itself at. A *finite* huge `dt` is
+//!   protocol-legal JSON the request boundary cannot reject as
+//!   unspellable, so the field bounds it by name: applying one would
+//!   wind an element's accumulator past the `f64` range, or park an
+//!   accumulated clock where no legal later step can move it again,
+//!   from a single accepted request and for every attachment until the
+//!   plant restarts.
 //! - `{"op":"inject_fault","point":3,"fault":"timeout"}` —
 //!   `SimDriver::inject_fault`; answers `done`.
 //! - `{"op":"clear_fault","point":3}` — `SimDriver::clear_fault`;
@@ -162,7 +172,8 @@
 //! `TypeMismatch`, `InvalidValue`, or an injected fault's
 //! `Disconnected`/`Timeout`), and
 //! `{"kind":"invalid_request","detail":…}` covers an unparseable line or
-//! an invalid `step`. The write-ownership refusals are
+//! an invalid `step` — a `dt` outside the documented bound. The
+//! write-ownership refusals are
 //! `{"kind":"fenced","detail":…}` while another owner stands and
 //! `{"kind":"unclaimed","detail":…}` while none does — distinct kinds so
 //! a probe can tell "closed until an owner claims" from "fenced out by
