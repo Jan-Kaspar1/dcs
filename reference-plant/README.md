@@ -32,6 +32,17 @@ model/plant.json       the emitted, approved plant model
 model/dynamics.json    the declared simulation dynamics
 ci/scenario.json       the generated scenario the CI drives
 ci/check.sh            the clean-CI check a fresh clone runs
+ci/lockfile_pin.py     the lockfile leg — the committed Cargo.lock
+                       held against the manifest's declared pin: every
+                       release crate recorded from a git source on that
+                       remote and that `tag`/`rev` fragment, at the
+                       revision the pin names, read off the remote for
+                       every spelling Cargo resolves dynamically (a
+                       `tag` pin's target, a branch or tag name spelled
+                       through `rev`, a full sha compared literally, a
+                       short sha held to abbreviate the recorded
+                       revision) so a movable pin cannot leave a stale
+                       lockfile passing the stage
 ci/alarm_validation.py the alarm-validation leg — the emitted model's
                        managed-alarm record audited, doctored copies
                        refused by the released `dcs-controller
@@ -166,7 +177,14 @@ dcs-model = { git = "https://github.com/Jan-Kaspar1/dcs.git", tag = "v0.10.0" }
 
 `rev = "<commit>"` names the identical immutable commit — the recorded
 commit `docs/releases/v0.10.0/record.md` carries — and is always
-supported. `Cargo.lock` is committed so every build resolves the same
+supported. A `rev` may also name a branch or a tag, which Cargo
+resolves afresh on every resolve; such a pin is checked like the tag
+above, against what the remote serves under that name, so the lockfile
+cannot record a commit its branch has moved past. Prefer an immutable
+spelling — `tag = "<release>"` or a full-sha `rev =` — for anything a
+fresh clone must reproduce.
+
+`Cargo.lock` is committed so every build resolves the same
 sources; a tag pin resolves the tag once and the committed lockfile
 records the commit it landed on. The two are one artifact, not two
 declarations that drift: the committed lockfile records this

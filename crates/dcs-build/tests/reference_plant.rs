@@ -10,7 +10,10 @@
 //! end to end: the committed lockfile's agreement with the declared
 //! pin — every `dcs-*` record of a released crate carried by a git
 //! source, a path package's sourceless record named
-//! `path-dependency-leak` — `cargo fetch --locked` resolving without a
+//! `path-dependency-leak`, and the recorded revision held against the
+//! revision the declared pin names for every spelling Cargo resolves
+//! dynamically — a branch name, an abbreviated sha, a tag name read
+//! back off the remote — `cargo fetch --locked` resolving without a
 //! re-resolve,
 //! byte-identical emit against the checked-in artifacts,
 //! released-tooling acceptance — plus the contract's remaining
@@ -587,6 +590,34 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
     assert!(
         stdout.contains("a lockfile missing a release crate refused: lockfile-stale"),
         "the lockfile stage's missing-crate doctored case did not report its named diagnostic:\n{stdout}"
+    );
+    // The movable-pin half, the reported defect
+    // (`lockfile-leg-rev-compare-skipped-for-non-full-sha`): every
+    // spelling Cargo resolves dynamically — the branch name, an
+    // abbreviated sha, a tag name — is compared against what the
+    // stand-in serves under that name, so a lockfile recording a
+    // revision the pin has moved past is refused, and the same
+    // spelling recording the revision the pin does name is accepted:
+    // three refused cases beside the two above, three accepted. Read
+    // the stage's own section — the upgrade stage re-runs the whole
+    // pipeline, and its repinned pass repeats the evidence.
+    let lock_stage = stdout
+        .split("== lockfile ==")
+        .nth(1)
+        .and_then(|tail| tail.split("== resolve ==").next())
+        .unwrap_or_else(|| panic!("the lockfile stage did not run:\n{stdout}"));
+    assert_eq!(
+        lock_stage.matches("refused: lockfile-stale").count(),
+        5,
+        "the lockfile stage did not refuse every planted stale lockfile:\n{lock_stage}"
+    );
+    assert_eq!(
+        lock_stage
+            .matches("lockfile recording the revision the pin names accepted")
+            .count(),
+        3,
+        "the lockfile stage refused a movable `rev` pin recording the revision it \
+         names:\n{lock_stage}"
     );
     let lock_line = stdout
         .lines()
