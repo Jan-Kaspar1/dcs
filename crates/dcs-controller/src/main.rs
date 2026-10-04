@@ -1752,11 +1752,15 @@ fn keyed_monitor<'d>(monitor: Monitor<'d>, options: &Options) -> Monitor<'d> {
 /// version, the git revision it was compiled from where one was
 /// recorded, and the fingerprint of the model it loaded.
 ///
-/// The revision is read from `DCS_BUILD_SHA` — the build arm CI stamps
-/// into the image — and is absent otherwise. An absent revision is
-/// reported absent rather than invented: a consumer must be able to
-/// tell "this build did not record one" from "it did, and here it is",
-/// because the first is a deployment gap and the second is evidence.
+/// The revision is read from `DCS_BUILD_SHA` in this process's
+/// environment — the deployment's own way of stamping it, whether the
+/// image baked it in or the launch passes it with
+/// `docker run -e`/`--env-file` — and is absent when no one supplied
+/// one. An absent revision is reported absent rather than invented: a
+/// consumer must be able to tell "this build did not record one" from
+/// "it did, and here it is", because the first is a deployment gap and
+/// the second is evidence. The crate version is always present; it is
+/// compiled in, so it is never a deployment's to forget.
 fn build_identity(model: &PlantModel) -> BuildIdentity {
     BuildIdentity {
         version: env!("CARGO_PKG_VERSION").to_string(),

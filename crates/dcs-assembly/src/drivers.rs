@@ -193,11 +193,17 @@ pub const SIM_CYCLIC_KIND: &str = dcs_sim_bus::CYCLIC_DEVICE_KIND;
 ///   startup failure.
 ///
 /// A malformed declaration is [`DeviceError::Parameters`], surfacing as
-/// [`AssemblyError::InvalidDeviceParameters`]. Until the EtherCAT
-/// master integration lands (the Lenovo HQ-4 lane), a well-formed
-/// declaration still fails assembly — [`DeviceError::Backend`] — since
-/// no bus can be initialized: a hardware-bound kind is never silently
-/// substituted by simulation.
+/// [`AssemblyError::InvalidDeviceParameters`]. A well-formed one then
+/// resolves through whichever registry the caller chose, and the three
+/// answers are the kind's whole startup contract: the deployment-bound
+/// [`DriverRegistry::with_ethercat_buses`] attaches the device to its
+/// logical bus over the deployment's bindings; the compile-check
+/// [`DriverRegistry::for_check`] validates the declaration and opens no
+/// segment; and [`DriverRegistry::standard`] — the bus-less registry,
+/// which no run resolves a hardware-bound device through — fails the
+/// build as [`DeviceError::Backend`] because no bus is bound in it. A
+/// hardware-bound kind is never silently substituted by simulation in
+/// any of the three.
 pub const ETHERCAT_KIND: &str = dcs_ethercat::DEVICE_KIND;
 
 /// One `io_point` bound to a channel on the device under construction.
@@ -551,8 +557,12 @@ impl DriverRegistry {
     /// (`sim-cyclic`) served by the cyclic register-image driver,
     /// [`SIM_SCRIPTED_KIND`]
     /// (`sim-scripted`) served by the scripted playback driver, and
-    /// [`ETHERCAT_KIND`] (`ethercat`) served by the hardware-bound
-    /// field-bus contract.
+    /// [`ETHERCAT_KIND`] (`ethercat`) served by the validating stub
+    /// that fails the build with a named backend error — the honest
+    /// answer for a registry that carries no deployment binding. A
+    /// deployment's run resolves it through
+    /// [`with_ethercat_buses`](Self::with_ethercat_buses) and a
+    /// compile-check through [`for_check`](Self::for_check).
     pub fn standard() -> Self {
         Self::new()
             .with(SIM_TCP_KIND, sim_tcp_device)
@@ -608,12 +618,6 @@ impl DriverRegistry {
         self
     }
 
-    /// Binds [`ETHERCAT_KIND`] to this deployment's EtherCAT buses —
-    /// replaces the validating stub [`standard`](Self::standard)
-    /// installs. `buses` carries the deployment's logical-bus →
-    /// host-interface bindings (the model names the bus, the deployment
-    /// names the NIC); a deployment without EtherCAT hardware keeps the
-    /// stub and its honest startup failure.
     /// The compile-check registry: the standard kinds with every
     /// hardware-bound kind resolved by its declaration-only factory, so
     /// `--check` assembles a hardware-bound model without the
@@ -626,7 +630,14 @@ impl DriverRegistry {
         Self::standard().with(ETHERCAT_KIND, ethercat_declared_device)
     }
 
-    /// The deployment-bound registry: the standard kinds with
+    /// Binds [`ETHERCAT_KIND`] to this deployment's EtherCAT buses —
+    /// replaces the honest stub [`standard`](Self::standard) installs.
+    /// `buses` carries the deployment's logical-bus → host-interface
+    /// bindings (the model names the bus, the deployment names the NIC);
+    /// a deployment without EtherCAT hardware keeps the stub and its
+    /// honest startup failure.
+    ///
+    /// This is the deployment-bound registry: the standard kinds with
     /// [`ETHERCAT_KIND`] resolved through `buses`, so each hardware-bound
     /// device attaches to its logical bus over the deployment's
     /// bindings. A model with no hardware-bound device resolves through
@@ -1316,36 +1327,39 @@ fn sim_cyclic_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError>
     }))
 }
 
-/// The [`ETHERCAT_KIND`] factory: validates the field-bus declaration —
-/// the `hardware` marker plus the `dcs-ethercat` parameter grammar —
-/// then fails the build because this image carries no EtherCAT master.
+/// The bus-less [`ETHERCAT_KIND`] factory
+/// [`standard`](DriverRegistry::standard) installs: validates the
+/// field-bus declaration — the `hardware` marker plus the
+/// `dcs-ethercat` parameter grammar — then fails the build, because a
+/// registry with no deployment binding carries no segment to open.
 ///
 /// Both halves are deliberate: a model declaring a hardware kind must
-/// fail startup when the hardware cannot initialize (no silent
-/// simulation fallback), and a declaration's shape must be a named
-/// parameter error before that backend check is even reached — exactly
-/// what the master integration's own startup sequence will enforce
-/// against the answering station's identity and layout.
+/// fail startup when no segment can serve it (no silent simulation
+/// fallback), and a declaration's shape must be a named parameter error
+/// before that backend check is even reached — what the
+/// deployment-bound factory's own startup sequence enforces against the
+/// answering station's identity and layout.
 fn ethercat_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
     let declaration = ethercat_declaration(spec)?;
     Err(DeviceError::backend(format!(
-        "logical bus {:?} cannot initialize: no EtherCAT master is available in this build — \
-         a hardware-bound kind is never silently substituted by simulation",
+        "logical bus {:?} cannot initialize: this registry carries no deployment binding for \
+         it — a deployment run resolves the kind through its --bus bindings, and a \
+         hardware-bound kind is never silently substituted by simulation",
         declaration.bus
     )))
 }
 
 /// The compile-check registry's [`ETHERCAT_KIND`] factory
 /// [`for_check`](DriverRegistry::for_check) installs: the same
-/// declaration checks as the stub, then a driver that opens no
+/// declaration checks as the bus-less stub, then a driver that opens no
 /// segment and answers no point.
 ///
 /// `--check` is the engineering compile-check — load, validate,
 /// resolve kinds, construct components — and it must reach that far on
 /// a hardware-bound model *without* the deployment's bus binding,
 /// which is the whole point of checking a document before a segment
-/// exists. The stub's honest "no master is available" failure is right
-/// for a run and wrong here: it would make every hardware document
+/// exists. The stub's honest "no binding here" failure is right for a
+/// run and wrong here: it would make every hardware document
 /// uncheckable off-rig. So the declaration is validated in full — the
 /// `hardware` marker, the parameter grammar, the channel map — and
 /// the bus is left unopened, with every read an explicit
@@ -1401,10 +1415,11 @@ impl std::fmt::Debug for UnopenedBus {
     }
 }
 
-/// The [`ETHERCAT_KIND`] validation both factories share: the
+/// The [`ETHERCAT_KIND`] validation every factory shares: the
 /// `hardware` marker plus the `dcs-ethercat` parameter grammar against
 /// the device's declared channels — a declaration's shape is a named
-/// parameter error before any backend check is reached.
+/// parameter error before any backend check is reached, so a check-mode
+/// document and a running one agree on what a valid declaration is.
 fn ethercat_declaration(
     spec: &DeviceSpec<'_>,
 ) -> Result<dcs_ethercat::DeviceParameters, DeviceError> {
@@ -2949,5 +2964,115 @@ mod tests {
         let last_error = fanout.diagnostics().unwrap().last_error.unwrap();
         assert!(last_error.contains("device 1"), "{last_error}");
         assert!(last_error.contains("device 2"), "{last_error}");
+    }
+
+    /// The Wago rig's field-bus declaration, as the parameters and
+    /// channels a device under construction carries: one logical bus,
+    /// the coupler identity, the two-input/two-output image mapping, the
+    /// declared safe outputs, and the miss threshold.
+    fn rig_declaration() -> (
+        BTreeMap<String, serde_json::Value>,
+        BTreeMap<String, Channel>,
+    ) {
+        let parameters = serde_json::from_value(serde_json::json!({
+            "bus": "ecat0",
+            "exchange_miss_threshold": 3,
+            "identity": {"vendor": 33, "product": 750354, "revision": 1},
+            "mapping": {
+                "inputs": {"di1": {"byte": 0, "bit": 0}, "di2": {"byte": 0, "bit": 1}},
+                "outputs": {"do1": {"byte": 0, "bit": 0}, "do2": {"byte": 0, "bit": 1}}
+            },
+            "safe_outputs": {"do1": {"bool": false}, "do2": {"bool": false}},
+            "startup": {"on_mismatch": "fail"}
+        }))
+        .unwrap();
+        let channel = |direction| Channel {
+            direction,
+            value_type: ValueKind::Bool,
+        };
+        let channels = BTreeMap::from([
+            ("di1".to_string(), channel(Direction::In)),
+            ("di2".to_string(), channel(Direction::In)),
+            ("do1".to_string(), channel(Direction::Out)),
+            ("do2".to_string(), channel(Direction::Out)),
+        ]);
+        (parameters, channels)
+    }
+
+    /// The compile-check registry's promise at the registry seam: a
+    /// hardware-bound declaration resolves with no deployment binding
+    /// and without opening a segment, while the very same declaration
+    /// through the bus-less run registry still fails by name — so a
+    /// deployment that forgot its binding is never silently served, and
+    /// a hardware document is checkable on a host with no NIC.
+    #[test]
+    fn the_check_registry_resolves_a_hardware_declaration_without_opening_a_segment() {
+        let (parameters, channels) = rig_declaration();
+        let spec = DeviceSpec {
+            id: DeviceId(1),
+            kind: ETHERCAT_KIND,
+            hardware: true,
+            parameters: &parameters,
+            channels: &channels,
+            points: Vec::new(),
+        };
+
+        let check = DriverRegistry::for_check();
+        let factory = check
+            .factory(ETHERCAT_KIND)
+            .expect("the compile-check registry serves the hardware kind");
+        let DeviceDriver::Backend(backend) =
+            factory(&spec).expect("a hardware declaration assembles in check mode")
+        else {
+            panic!("the declaration-only factory must build a backend, not a simulated fragment");
+        };
+
+        // Nothing was opened. The three surfaces a run could reach a
+        // segment through all answer honestly instead: the read, the
+        // staged write, and the cyclic exchange.
+        assert!(matches!(
+            backend.io.read(PointId(1)),
+            Err(IoError::UnknownPoint(PointId(1)))
+        ));
+        assert!(matches!(
+            backend.io.write(PointId(3), Value::Bool(true)),
+            Err(IoError::UnknownPoint(PointId(3)))
+        ));
+        assert!(
+            backend.io.cyclic().is_none(),
+            "an unopened segment offers no cyclic surface to exchange on"
+        );
+        // The placeholder keeps the kind's `field_facing` honesty: it is
+        // a field device, so promotion fencing counts it and no
+        // single-writer arbitration is invented for it.
+        assert!(backend.field_facing);
+        assert!(backend.claim.is_none());
+
+        // The bus-less run registry refuses the same declaration by
+        // name — check mode is the only registry that assembles it.
+        let standard = DriverRegistry::standard();
+        let Err(error) =
+            standard
+                .factory(ETHERCAT_KIND)
+                .expect("the standard registry serves the hardware kind")(&spec)
+        else {
+            panic!("a bus-less registry must not assemble a hardware device");
+        };
+        assert!(matches!(error, DeviceError::Backend(_)), "{error}");
+        assert!(error.to_string().contains("ecat0"), "{error}");
+
+        // And check mode still refuses what a run would refuse: a
+        // declaration without the `hardware` marker is a named
+        // parameter error there too, never a quietly served device.
+        let mut unmarked = spec;
+        unmarked.hardware = false;
+        let Err(error) = check
+            .factory(ETHERCAT_KIND)
+            .expect("the compile-check registry serves the hardware kind")(
+            &unmarked
+        ) else {
+            panic!("a declaration without the hardware marker must be refused");
+        };
+        assert!(matches!(error, DeviceError::Parameters(_)), "{error}");
     }
 }

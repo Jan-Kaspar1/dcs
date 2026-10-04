@@ -1669,6 +1669,131 @@ Implementation order: second, after [daily architecture review](daily-architectu
   run carrying no born staging lever, no per-seat journal file, or no
   settled pair reports inconclusive.
 
+### Landed 2026-10-04 (cyclic-exchange failure-legs scenario, #1473 consolidating #408)
+
+- The four failure legs decision 78's exchange contract names above the
+  register protocol, on the rig's own cyclic device, through the
+  documented monitor endpoints and the shipped `dcs-sim-bus-ctl` the
+  revision under test carries. Every scripted outcome is queued at the
+  device server and read off the served snapshot, so the leg is
+  per-revision evidence for the contract the hardware leg will rely on
+  and no hardware dependency exists: an **aged, not aborted** miss (the
+  scan's output image does not move, the held input image still answers
+  at its own acquisition stamp, and both counter halves advance — a
+  driver that dropped the scan or published a zeroed image fails here),
+  **threshold escalation** at the fixture's declared
+  `exchange_miss_threshold` (reads escalate to Bad with the
+  communication-fault reason past it, still serving the held image
+  before it), **per-station attribution** of a `short-station` to the
+  named station's points alone, and **recovery re-entry** on the
+  exchange boundary with the counters accounting for exactly the queued
+  misses and the one shortfall.
+- Counters are read as *differences* across each window rather than as
+  absolutes, so a busy rig cannot pass the leg by accident and a driver
+  that double-counts a boundary shows up as drift; the leg also reads
+  the per-bus rows `ExchangeDiagnostics.buses` added, so a counter stays
+  attributable to the bus that moved it.
+- The attribution leg needs two stations, because one station cannot
+  express the distinction — every point would belong to it. The second
+  station arrives as a lane-owned per-run variant
+  (`qa_lane/rig_model.py`'s `two_station_cyclic`) rather than a fixture
+  edit: the rig fixtures are byte-pinned emitted artifacts, and the
+  variant is re-checked against the revision recipe's structural rules
+  before it is staged. A device declaring fewer stations reports
+  inconclusive.
+- Named diagnostics are `cyclic-exchange-legs-failed` (a missed
+  exchange that moved the outputs or was not counted, a threshold that
+  escalated early, partially, or not at all, a shortfall that degraded
+  the wrong points or never counted, a recovery that did not re-enter, a
+  stuck failure streak, counter drift, an accumulated mismatch, or
+  recovery leaving points degraded), `cyclic-exchange-legs-nondeterministic`
+  (a refused staging, launch, or control-tool call, a seat that never
+  settled, a starved or unread monitor, a device server that stopped
+  answering, a moved or wedged deployed pair, a rig the sweep did not
+  restore, and two passes whose digests diverge), and the self-check's
+  `cyclic-exchange-legs-unchecked` covering every planted negative.
+  Two consecutive passes produce identical digests; a run with no device
+  server, no derivable document, or an unsettled seat reports
+  inconclusive.
+
+### Landed 2026-10-04 (cyclic-failover settle scenario, #1473 consolidating #413)
+
+- Demote/promote over the rig's cyclic device — the transition the
+  hardware leg's evidence rests on, read across a role change rather
+  than across a fault. A born pair on the rig's `sim-cyclic` document,
+  driven through the documented `POST /demote` and `POST /promote`:
+  the promoted peer's exchange counters advance once per boundary from
+  its promotion on, its field claim reads held, and the field's own
+  register census advances over the same window, so what the field holds
+  is being republished by the new active rather than ageing at the frame
+  the ex-owner left behind. `attempted - succeeded` and
+  `failed_exchanges` are unchanged across the window — the switchover
+  costs no exchange and invents none — every field input the promoted
+  peer serves keeps a Good quality and an advancing acquisition stamp
+  across the transition, and the demoted peer's role walks to standby,
+  its claim releases, and its exchanges keep advancing census-only.
+- What the rig cannot observe is recorded rather than glossed: whether
+  the *first* post-promotion exchange carries the first active scan's
+  staged image rather than a stale pre-promotion seed is a question
+  about bytes on the wire, downstream of the field census. That half is
+  pinned deterministically at the driver seam in
+  `crates/dcs-controller/tests/cyclic_lifecycle.rs`, where a scripted
+  cyclic backend records every published image against the peer that
+  published it. This leg is the field-observable continuation of the
+  same contract.
+- Named diagnostics are `cyclic-failover-settle-failed` (a promotion
+  that took no field or no claim, a promoted peer that published
+  nothing, left the link, skipped or double-counted a boundary, or
+  stopped latching inputs, a demotion that never landed or kept its
+  claim, a demoted peer that stopped latching or wrote behind a fence, an
+  unstamped latched sample, a frozen field, and an unjournaled or
+  unattributed switch), `cyclic-failover-settle-nondeterministic` (a
+  refused switch or staging call, a starved window, an unreadable field
+  or journal, an unrestored pair, and divergent digests), and the
+  self-check's `cyclic-failover-settle-unchecked`. Two consecutive passes
+  produce identical digests; a point-wise field, an output-less field, an
+  absent device server, or an unsettled pair reports inconclusive.
+
+### Landed 2026-10-04 (writable field-point settle scenario, #1473 consolidating #699)
+
+- The command-writable **field** point the QA capability finding records
+  as unexercisable on this plant: every command-writable point the
+  mounted fixture declares is internal and channel-less, so a receipted
+  `write_value` on one lands in the image and never reaches a driver
+  write — leaving the applied-mint path and the `DriverRejected` verdict
+  path, which every later leg asserting how a receipted command's driver
+  write behaves under field contention must read, unreachable on the rig.
+- The point lands as a lane-owned per-run variant rather than a fixture
+  edit: `qa_lane/rig_model.py`'s `writable_field_point` derives one from
+  the document the run mounted — a channel of its own on a device the
+  pair already scans, one writable `In` point bound to it, one signal for
+  it — and the leg stages that *same* document on both ends, the scratch
+  field serving it and the born seat mounting it, so the remote driver's
+  correspondence probe reads one declaration. The derivation is additive,
+  keeps the point `In`-only (a writable `Out` point has no field side to
+  observe a driver write on), is re-checked against the revision recipe's
+  structural rules, and never writes the pinned fixtures.
+- Three legs over the served receipted command path, each verdict read at
+  the submission index taken *before* the post so the receipt is provably
+  its own command's: **applied, field-side** (a receipted `write_value`
+  settles `applied` at a scan boundary and the field's own served read
+  carries the written value — a settlement into the image alone leaves
+  the field reading what it held, which is the defect this leg exists to
+  exclude), **rejected, named** (with the field side denying the write
+  through the shipped tool's own fault injection, the receipt settles
+  `rejected:driver_rejected` naming the driver's refusal — `applied`
+  would be a phantom settlement, a receipt stuck at `accepted` a silent
+  one), and **re-entry** (clearing the injected fault returns the point
+  to a writable field input whose next write settles applied again, so
+  the rejection was the contention rather than a point that can never be
+  written).
+- No product crate's contract or wire vocabulary changes for this: the
+  lane owns the derivation, the staging, and the judge. Named diagnostics
+  are `writable-field-point-failed`, `writable-field-point-nondeterministic`,
+  and the self-check's `writable-field-point-unchecked`. Two consecutive
+  passes produce identical digests; a run that cannot derive the
+  document, cannot stage it, or never settles reports inconclusive.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,

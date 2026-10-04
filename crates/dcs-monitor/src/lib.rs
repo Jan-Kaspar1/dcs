@@ -706,10 +706,12 @@ pub struct HealthReport {
 /// could supply one.
 ///
 /// `git_sha` is absent rather than invented when the build did not carry
-/// one — a `vergen`-style revision embedded at compile time, or the
-/// controller's own `--build-sha` arm for a container whose binary
-/// came from a prebuilt image. An absent revision reports as absent, so
-/// a consumer can tell "not recorded" from "recorded, and here it is".
+/// one: the monitor does not invent a revision, and the hosting process
+/// decides — `dcs-controller` reads `DCS_BUILD_SHA` from its own
+/// environment, so a deployment or image that supplies the revision
+/// serves it and one that does not serves an absent field. An absent
+/// revision reports as absent, so a consumer can tell "not recorded"
+/// from "recorded, and here it is".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuildIdentity {
     /// The crate version this process was compiled from.

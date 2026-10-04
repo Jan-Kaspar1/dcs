@@ -46,7 +46,6 @@ rather than shipping a document the controller would reject at load.
 point has no field side to observe a driver write on.
 """
 import copy
-import json
 
 from . import revision
 
