@@ -545,8 +545,20 @@ class LagStagingTests(unittest.TestCase):
         self.assertEqual(
             order.index(scenarios.scenario_source_failover) + 1,
             order.index(scenarios.scenario_lag_staging))
+        # The station's acceptance legs — the running-pump handover,
+        # the manual takeover, and the cutoff clamp — share this
+        # restored window ahead of standby-loss.
         self.assertEqual(
             order.index(scenarios.scenario_lag_staging) + 1,
+            order.index(scenarios.scenario_duty_handover))
+        self.assertEqual(
+            order.index(scenarios.scenario_duty_handover) + 1,
+            order.index(scenarios.scenario_manual_takeover))
+        self.assertEqual(
+            order.index(scenarios.scenario_manual_takeover) + 1,
+            order.index(scenarios.scenario_low_level_cutoff))
+        self.assertEqual(
+            order.index(scenarios.scenario_low_level_cutoff) + 1,
             order.index(scenarios.scenario_standby_loss))
         # The standby-loss, demote-settle, demote-carry, and
         # repromote-suspended-settle legs share the same restored
@@ -580,13 +592,20 @@ class LagStagingTests(unittest.TestCase):
         self.assertEqual(
             order.index(scenarios.scenario_peer_announce) + 1,
             order.index(scenarios.scenario_demote_forged_standby_source))
+        # The announced-source-verify leg shares the forged-standby
+        # leg's announced-only window: the same unconfigured field
+        # owner, the same stopped tracking peer, the same restored
+        # launch roles.
+        self.assertEqual(
+            order.index(scenarios.scenario_demote_forged_standby_source)
+            + 1,
+            order.index(scenarios.scenario_announced_source_verify))
         # The stale-island leg's driven third controller shares the
         # same restored window and still clears before the tune case's
         # a->b switch — the journal-boundary flood and suspended-alias
         # legs run between them in the same launch-layout window.
         self.assertEqual(
-            order.index(scenarios.scenario_demote_forged_standby_source)
-            + 1,
+            order.index(scenarios.scenario_announced_source_verify) + 1,
             order.index(scenarios.scenario_stale_island_resolution))
         self.assertEqual(
             order.index(scenarios.scenario_stale_island_resolution)
