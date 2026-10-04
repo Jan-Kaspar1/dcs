@@ -117,7 +117,6 @@ assertions fire rather than passing an unexercised contract.
 """
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -328,6 +327,30 @@ def sync_word(report):
     if isinstance(sync, dict):
         return next(iter(sync), None)
     return sync
+
+
+def role_word(report):
+    """The served RoleReport as the digest's own record of it: the
+    role, the sync verdict as its named word, and the field's claim as
+    served — nothing else.
+
+    A served RoleReport also carries the run's own `tick` and its
+    `failover` miss count, and a `degraded` sync carries the transport
+    error text naming the address it failed against. None of those are
+    the same on every pass: the miss count accrues against the pair's
+    own scan cadence and a failed pull reports the ephemeral port that
+    pass happened to bind, so hashing the served document verbatim
+    makes two identical runs disagree
+    (`incumbent-consultation-nondeterministic`). The three facts this
+    leg asserts on are the contract's, and the whole served document
+    stays in `evidence` for the run's report."""
+    if not isinstance(report, dict):
+        return {"role": None, "sync": None, "field_claim": None}
+    return {
+        "role": report.get("role"),
+        "sync": sync_word(report),
+        "field_claim": report.get("field_claim"),
+    }
 
 
 def latest_lifetime(entries):
@@ -712,8 +735,8 @@ def incumbent_consultation_pass(args, tamper):
             {
                 "phase": "converge",
                 "ticks": converged["ticks"],
-                "duty_role": converged["duty_role"],
-                "standby_role": converged["standby_role"],
+                "duty_role": role_word(converged["duty_role"]),
+                "standby_role": role_word(converged["standby_role"]),
             }
         )
 
@@ -854,7 +877,7 @@ def incumbent_consultation_pass(args, tamper):
                 "baseline": baseline["tick"],
                 "high_water": baseline["high_water"],
                 "incumbent_tick": owner["tick"],
-                "duty_role": incumbent_report,
+                "duty_role": role_word(incumbent_report),
             }
         )
 
@@ -1006,8 +1029,8 @@ def incumbent_consultation_pass(args, tamper):
             {
                 "phase": "rejoin",
                 "sync": reconvergence,
-                "duty_role": pair.get(
-                    f"{duty_url}/role", "GET /role", failures
+                "duty_role": role_word(
+                    pair.get(f"{duty_url}/role", "GET /role", failures)
                 ),
             }
         )
@@ -1208,7 +1231,7 @@ def incumbent_consultation_pass(args, tamper):
                 "phase": "restore",
                 "rejoin": rejoin,
                 "seated": seated,
-                "duty_role": final_role,
+                "duty_role": role_word(final_role),
                 "final_tick": final["tick"],
             }
         )
@@ -1285,9 +1308,7 @@ def main():
         return 1
     if failures:
         return 1
-    digest = hashlib.sha256(
-        json.dumps(digest_entries, sort_keys=True).encode()
-    ).hexdigest()
+    digest = simulate.stable_digest(digest_entries)
     print(
         f"incumbent-consultation-digest {digest} — converged at tick "
         f"{evidence['converged']} with the incumbent's receipted tune "
