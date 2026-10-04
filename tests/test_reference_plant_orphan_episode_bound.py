@@ -91,7 +91,7 @@ class Registration(unittest.TestCase):
         }
         record = discovered["orphan_episode_bound.py"]
         self.assertEqual(record["stem"], "orphan-episode-bound")
-        self.assertEqual(record["order"], 860)
+        self.assertEqual(record["order"], 880)
         orders = [
             item["order"]
             for item in legs.discover(str(_CI_DIR / "legs"))
