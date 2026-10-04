@@ -96,7 +96,10 @@ import simulate
 # override is declared: the stem `responsiveness` is the diagnostic
 # prefix this leg's failures share.
 LEG = {
-    "order": 830,
+    # Past every order the directory already holds: the pair stage
+    # refuses two legs sharing one, so the leg that joins last takes
+    # the first free slot rather than displacing another's.
+    "order": 860,
     "title": "the bounded-responsiveness leg",
     "passes": "responsiveness-leg",
     "tampers": [

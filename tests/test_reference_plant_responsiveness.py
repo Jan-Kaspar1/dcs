@@ -86,7 +86,7 @@ class Registration(unittest.TestCase):
         ]
         self.assertEqual(len(record), 1)
         # The slot the leg declared, past every order already taken.
-        self.assertEqual(record[0]["order"], 830)
+        self.assertEqual(record[0]["order"], 860)
         orders = [leg["order"] for leg in discovered]
         self.assertEqual(len(orders), len(set(orders)))
 
