@@ -82,7 +82,7 @@ import takeover
 # annunciate, must surface the named diagnostic — never a silently
 # wrong pass.
 LEG = {
-    "order": 830,
+    "order": 850,
     "title": "the low-level cutoff leg",
     "passes": "cutoff-leg",
     "tampers": [
