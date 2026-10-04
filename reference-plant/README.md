@@ -169,6 +169,16 @@ dcs-build = { git = "https://github.com/Jan-Kaspar1/dcs.git", tag = "v0.10.0" }
 dcs-model = { git = "https://github.com/Jan-Kaspar1/dcs.git", tag = "v0.10.0" }
 ```
 
+Only the `dcs-build` line carries the pin every stage holds to:
+`dcs-core` and `dcs-model` resolve with it at the same tag or `rev`, and
+the second line above is this tree's optional direct declaration — the
+release contract lets a consumer name them directly, e.g. to assert
+`dcs_model::MODEL_VERSION` in `src/main.rs`. Dropping it resolves no
+crate differently, and the `lockfile` stage records the pin from the
+`dcs-build` declaration alone while holding the committed `Cargo.lock`'s
+record of all three release crates to it. Whichever of the three you do
+declare must name the identical tag or `rev`.
+
 `rev = "<commit>"` names the identical immutable commit — the recorded
 commit `docs/releases/v0.10.0/record.md` carries — and is always
 supported. `Cargo.lock` is committed so every build resolves the same

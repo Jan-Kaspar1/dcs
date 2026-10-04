@@ -419,6 +419,16 @@ LOCK_DIGEST="$(sha256sum Cargo.lock | cut -d' ' -f1)"
 # substitution — so the comparison holds in the shipped check. The
 # tooling stage reuses this fetch's FETCH_HEAD for the schema
 # artifacts it pins the tooling's emissions against.
+#
+# The leg's declared-pin census requires one release crate declared
+# directly — `dcs-build`, the crate every consumer composes with.
+# `dcs-core` and `dcs-model` are the contract's optional direct
+# declarations (`docs/release-contract.md`: "a consumer may also declare
+# them directly"), so a manifest that drops the direct `dcs-model` line
+# this template happens to carry still resolves it through `dcs-build`
+# at the same pin: the committed lockfile's own record of all three
+# release crates is what this stage holds to the declared pin, and a
+# manifest's spelling of the optional two is not a correctness gate.
 SCRATCH="$(mktemp -d)"
 DCS_RELEASE="$(python3 -c 'import json; print(json.load(open("deploy/manifest.json"))["dcs_release"])')"
 git -C "$SCRATCH" init -q -b main

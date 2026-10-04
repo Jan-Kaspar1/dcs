@@ -10,7 +10,10 @@
 //! end to end: the committed lockfile's agreement with the declared
 //! pin — every `dcs-*` record of a released crate carried by a git
 //! source, a path package's sourceless record named
-//! `path-dependency-leak`, and a tag re-pointed after the cut with
+//! `path-dependency-leak`, a manifest declaring only `dcs-build`
+//! directly — the contract's optional direct `dcs-core`, `dcs-model`
+//! declarations omitted — passing on the lockfile recording all three
+//! release crates at that pin, and a tag re-pointed after the cut with
 //! the lockfile regenerated to follow it named `lockfile-stale`
 //! against the release record's `Commit` field — `cargo fetch
 //! --locked` resolving without a
@@ -2072,6 +2075,164 @@ fn toml_equivalent_respellings_pass_the_lockfile_leg() {
         !String::from_utf8_lossy(&refused.stdout).contains("== resolve =="),
         "the leaked path source was caught only after the resolve stage:\n{stderr}"
     );
+}
+
+/// The release contract's `dcs-core`, `dcs-model` direct declarations
+/// are optional — `docs/release-contract.md`: "a consumer may also
+/// declare them directly — e.g. to assert
+/// `dcs_model::MODEL_VERSION` — under the same pin". A manifest
+/// naming neither resolves both through `dcs-build` at that one pin,
+/// and the committed lockfile's record of all three release crates is
+/// what the lockfile leg holds to it.
+///
+/// The reported defect (`lockfile-leg-misdiagnoses-omitted-direct-
+/// dep`): the leg's manifest census required both `dcs-build` *and*
+/// `dcs-model` as direct dependencies, turning this template's own
+/// declaration shape into a correctness gate — a consumer that dropped
+/// the direct `dcs-model` line was reported `lockfile-stale` (exit 1,
+/// "dcs-model declares no `git = ..., tag|rev = ...` pin in
+/// Cargo.toml") over a lockfile recording all three crates correctly
+/// at the declared pin. The reproduction is the reported one: the
+/// direct `dcs-model` dependency line deleted from the materialized
+/// manifest, the committed lockfile untouched. The leg must record the
+/// pin — on that committed artifact and on the lockfile `cargo update`
+/// writes for the doctored manifest alike.
+#[test]
+fn an_omitted_optional_direct_release_dep_passes_the_lockfile_leg() {
+    let copy = Materialized::new();
+    let manifest = copy.dir.join("Cargo.toml");
+    let lock = copy.dir.join("Cargo.lock");
+    let committed_manifest = std::fs::read_to_string(&manifest).unwrap();
+    let committed_lock = std::fs::read_to_string(&lock).unwrap();
+
+    let declared = committed_manifest
+        .lines()
+        .find(|line| line.starts_with("dcs-model = {"))
+        .unwrap_or_else(|| {
+            panic!("the materialized manifest declares no direct dcs-model dependency")
+        })
+        .to_owned();
+    let omitted = committed_manifest.replace(&format!("{declared}\n"), "");
+    assert_ne!(
+        omitted, committed_manifest,
+        "the doctor left the direct dcs-model dependency in place"
+    );
+    assert!(
+        !omitted.contains("dcs-model = {"),
+        "the doctored manifest still declares dcs-model directly"
+    );
+    // The lockfile the omitted declaration must still satisfy: all
+    // three release crates recorded, each from the manifest's own pin —
+    // the condition the leg holds to, and the one `cargo fetch
+    // --locked` later re-checks.
+    let pin = pinned_release(&copy.dir);
+    let precise = committed_lock_rev(&copy.dir);
+    for name in ["dcs-build", "dcs-core", "dcs-model"] {
+        assert!(
+            committed_lock.contains(&format!("[[package]]\nname = \"{name}\"\n")),
+            "the committed lockfile records no {name} package block"
+        );
+    }
+    assert_eq!(
+        committed_lock
+            .matches(&format!("?tag={pin}#{precise}"))
+            .count()
+            + committed_lock
+                .matches(&format!("?rev={pin}#{precise}"))
+                .count(),
+        3,
+        "the committed lockfile does not record all three release crates at {pin}#{precise}"
+    );
+    std::fs::write(&manifest, &omitted).unwrap();
+
+    // The leg's own verdict: exit status 0 records the declared pin.
+    let passes_the_leg = |case: &str| {
+        let output = Command::new("python3")
+            .arg("ci/lockfile.py")
+            .arg("Cargo.lock")
+            .arg(&copy.remote)
+            .arg("")
+            .current_dir(&copy.dir)
+            .output()
+            .expect("python3 runs the lockfile leg");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "{case}: a manifest omitting the contract-optional direct dcs-model \
+             declaration was refused on a lockfile recording all three release \
+             crates at the declared pin:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("declares no"),
+            "{case}: the omitted optional declaration was diagnosed as a missing pin:\n{stderr}"
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains(&precise),
+            "{case}: the leg recorded no revision the lockfile carries: {stdout}"
+        );
+    };
+    // The reported reproduction, verbatim: the committed lockfile
+    // untouched.
+    passes_the_leg("the committed lockfile, untouched");
+
+    // The same lockfile still satisfies that manifest once the file is
+    // the one `cargo update` writes for it: Cargo records the consumer
+    // package's own dependency list, so a consumer that drops the line
+    // regenerates the file — that one entry drops, every `[[package]]`
+    // record stays — and no re-resolve is needed afterwards, because the
+    // omitted declaration removes no resolved package. What the leg
+    // refused was therefore a shape, not a disagreement.
+    let root_start = committed_lock
+        .find("[[package]]\nname = \"pump-station\"\n")
+        .expect("the committed lockfile records the consumer package");
+    let root_end = committed_lock[root_start..]
+        .find("\n[[package]]")
+        .map(|at| root_start + at)
+        .unwrap_or(committed_lock.len());
+    let regenerated = format!(
+        "{}{}{}",
+        &committed_lock[..root_start],
+        committed_lock[root_start..root_end].replacen(" \"dcs-model\",\n", "", 1),
+        &committed_lock[root_end..],
+    );
+    assert_ne!(
+        regenerated, committed_lock,
+        "the doctor left the consumer package's own dcs-model dependency entry in place"
+    );
+    std::fs::write(&lock, &regenerated).unwrap();
+    passes_the_leg("the regenerated lockfile");
+    let before = std::fs::read(&lock).unwrap();
+    let metadata = Command::new(CARGO)
+        .args(["metadata", "--locked", "--format-version", "1"])
+        .current_dir(&copy.dir)
+        .env("CARGO_TARGET_DIR", copy.dir.join("target"))
+        .output()
+        .expect("cargo metadata runs");
+    assert!(
+        metadata.status.success(),
+        "the regenerated Cargo.lock does not satisfy a manifest without the direct \
+         dcs-model declaration: {}",
+        String::from_utf8_lossy(&metadata.stderr)
+    );
+    assert_eq!(
+        std::fs::read(&lock).unwrap(),
+        before,
+        "the locked resolve rewrote the regenerated Cargo.lock"
+    );
+    let graph = String::from_utf8_lossy(&metadata.stdout);
+    for name in ["dcs-build", "dcs-core", "dcs-model"] {
+        assert!(
+            graph.contains(&format!("\"name\":\"{name}\"")),
+            "{name} is absent from the resolved graph of a manifest declaring only \
+             dcs-build directly"
+        );
+    }
+    assert!(
+        graph.contains(&format!("git+{}?", copy.remote)),
+        "the resolved graph carries no release crate from the pinned remote"
+    );
+    std::fs::write(&manifest, &committed_manifest).unwrap();
 }
 
 /// The `upgrade` stage is the executable assertion of the documented
