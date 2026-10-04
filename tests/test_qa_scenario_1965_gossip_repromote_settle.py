@@ -332,14 +332,15 @@ class GossipRepromoteSettleTests(unittest.TestCase):
     def test_registered(self):
         order = list(scenarios.SCENARIOS)
         # The same restored window as the repromote leg, ahead of the
-        # command-across-promotion case and the peer-announce leg.
+        # settled-receipt-arbitration case and the tune case's a->b
+        # switch.
         self.assertEqual(
             order.index(
                 scenarios.scenario_repromote_suspended_settle) + 1,
             order.index(scenarios.scenario_gossip_repromote_settle))
         self.assertEqual(
             order.index(scenarios.scenario_gossip_repromote_settle) + 1,
-            order.index(scenarios.scenario_command_across_promotion))
+            order.index(scenarios.scenario_settled_receipt_arbitration))
         self.assertIs(
             verify.case_function('gossip-repromote-settle'),
             scenarios.scenario_gossip_repromote_settle)

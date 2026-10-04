@@ -1,7 +1,6 @@
-"""The 1970_command_across_promotion leg's scenario unit coverage — the
-feed fakes and TestCase classes for
-scenario_command_across_promotion, split per the one-module-per-leg
-convention (#940). The shared fakes and helpers live in
+"""The 1980_command_across_promotion leg's scenario unit coverage — the
+feed fakes and TestCase classes for scenario_command_across_promotion,
+split per the one-module-per-leg convention (#940). The shared fakes and helpers live in
 tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
 contribution to the suite's case coverage so a dropped case fails the
 discovery check in tests/test_qa_scenario_modules.py.
@@ -299,10 +298,12 @@ class CommandAcrossPromotionTests(unittest.TestCase):
 
     def test_registered(self):
         order = list(scenarios.SCENARIOS)
-        # The same restored window as the gossip leg, ahead of the
-        # peer-announce case and the tune case's a->b switch.
+        # The same restored window as the gossip and
+        # settled-receipt-arbitration legs, ahead of the peer-announce
+        # case and the tune case's a->b switch.
         self.assertEqual(
-            order.index(scenarios.scenario_gossip_repromote_settle) + 1,
+            order.index(scenarios.scenario_settled_receipt_arbitration)
+            + 1,
             order.index(
                 scenarios.scenario_command_across_promotion))
         self.assertEqual(

@@ -545,14 +545,29 @@ class LagStagingTests(unittest.TestCase):
         self.assertEqual(
             order.index(scenarios.scenario_source_failover) + 1,
             order.index(scenarios.scenario_lag_staging))
+        # The station's acceptance legs — the running-pump handover,
+        # the manual takeover, and the cutoff clamp — share this
+        # restored window ahead of standby-loss.
         self.assertEqual(
             order.index(scenarios.scenario_lag_staging) + 1,
+            order.index(scenarios.scenario_duty_handover))
+        self.assertEqual(
+            order.index(scenarios.scenario_duty_handover) + 1,
+            order.index(scenarios.scenario_manual_takeover))
+        self.assertEqual(
+            order.index(scenarios.scenario_manual_takeover) + 1,
+            order.index(scenarios.scenario_low_level_cutoff))
+        self.assertEqual(
+            order.index(scenarios.scenario_low_level_cutoff) + 1,
             order.index(scenarios.scenario_standby_loss))
         # The standby-loss, demote-settle, demote-carry, and
         # repromote-suspended-settle legs share the same restored
         # window and still run ahead of the tune case's a->b switch —
         # the quiesced-standby settle leg runs between standby-loss
-        # and demote-settle in that same launch-layout window.
+        # and demote-settle, and the gossip-repromote-settle,
+        # settled-receipt-arbitration, and command-across-promotion
+        # legs run between repromote-suspended-settle and
+        # peer-announce, in that same launch-layout window.
         self.assertEqual(
             order.index(scenarios.scenario_standby_loss) + 1,
             order.index(scenarios.scenario_quiesced_standby_settle))
@@ -573,6 +588,10 @@ class LagStagingTests(unittest.TestCase):
             order.index(scenarios.scenario_gossip_repromote_settle))
         self.assertEqual(
             order.index(scenarios.scenario_gossip_repromote_settle) + 1,
+            order.index(scenarios.scenario_settled_receipt_arbitration))
+        self.assertEqual(
+            order.index(scenarios.scenario_settled_receipt_arbitration)
+            + 1,
             order.index(scenarios.scenario_command_across_promotion))
         self.assertEqual(
             order.index(

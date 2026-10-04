@@ -4,8 +4,12 @@ from .common import *
 # Ordering: the command-across-promotion leg shares the launch-layout
 # window behind the demote legs — it needs the settled tracking pair
 # and the durable journals, it moves the field writer twice, and it
-# restores the launch roles before the tune case's a->b switch.
-RUNS_AFTER = frozenset({'scenario_gossip_repromote_settle'})
+# restores the launch roles before the tune case's a->b switch. It
+# follows the gossip-window and settled-receipt-arbitration legs, the
+# pair's own receipt audit this leg's cross-peer settlement count
+# reads behind it.
+RUNS_AFTER = frozenset({'scenario_gossip_repromote_settle',
+                        'scenario_settled_receipt_arbitration'})
 RUNS_BEFORE = frozenset({'scenario_parameter_tune_carryover'})
 
 

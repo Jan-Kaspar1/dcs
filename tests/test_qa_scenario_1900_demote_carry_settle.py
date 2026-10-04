@@ -310,8 +310,10 @@ class DemoteCarrySettleTests(unittest.TestCase):
     def test_registered(self):
         order = list(scenarios.SCENARIOS)
         # The same restored window as the demote-settle-uniqueness
-        # leg — the repromote-suspended-settle leg runs in it too —
-        # ahead of the peer-announce case and the tune case's
+        # leg — the repromote-suspended-settle and
+        # settled-receipt-arbitration legs run in it too, with the
+        # gossip-window and command-across-promotion legs between
+        # them — ahead of the peer-announce case and the tune case's
         # a->b switch.
         self.assertEqual(
             order.index(scenarios.scenario_demote_settle_uniqueness)
@@ -326,6 +328,10 @@ class DemoteCarrySettleTests(unittest.TestCase):
             order.index(scenarios.scenario_gossip_repromote_settle))
         self.assertEqual(
             order.index(scenarios.scenario_gossip_repromote_settle) + 1,
+            order.index(scenarios.scenario_settled_receipt_arbitration))
+        self.assertEqual(
+            order.index(scenarios.scenario_settled_receipt_arbitration)
+            + 1,
             order.index(scenarios.scenario_command_across_promotion))
         self.assertEqual(
             order.index(

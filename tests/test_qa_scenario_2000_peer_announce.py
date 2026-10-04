@@ -272,9 +272,11 @@ class PeerAnnounceTests(unittest.TestCase):
 
     def test_registered(self):
         order = list(scenarios.SCENARIOS)
-        # The restored pre-switch window behind the demote-carry and
-        # repromote-suspended-settle cases — the settled tracking
-        # pair ahead of the tune case's a->b switch.
+        # The restored pre-switch window behind the demote-carry,
+        # repromote-suspended-settle, gossip-repromote-settle,
+        # settled-receipt-arbitration, and command-across-promotion
+        # cases — the settled tracking pair ahead of the tune case's
+        # a->b switch.
         self.assertLess(
             order.index(scenarios.scenario_demote_settle_uniqueness),
             order.index(scenarios.scenario_peer_announce))
@@ -287,6 +289,10 @@ class PeerAnnounceTests(unittest.TestCase):
             order.index(scenarios.scenario_gossip_repromote_settle))
         self.assertEqual(
             order.index(scenarios.scenario_gossip_repromote_settle) + 1,
+            order.index(scenarios.scenario_settled_receipt_arbitration))
+        self.assertEqual(
+            order.index(scenarios.scenario_settled_receipt_arbitration)
+            + 1,
             order.index(scenarios.scenario_command_across_promotion))
         self.assertEqual(
             order.index(
