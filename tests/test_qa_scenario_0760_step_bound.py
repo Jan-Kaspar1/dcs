@@ -37,6 +37,8 @@ EXPECTED_CASES = frozenset({
     'StepBoundTests.test_fenced_probes_are_inconclusive',
     'StepBoundTests.test_the_refusal_classification_names_the_bound',
     'StepBoundTests.test_the_float_payload_scans',
+    'StepBoundTests.test_unchecked_self_check_fails',
+    'StepBoundTests.test_self_check_is_complete',
 })
 
 
@@ -693,6 +695,23 @@ class StepBoundTests(unittest.TestCase):
         self.assertEqual(leg.STEP_BOUND, 1.0e6)
         self.assertGreater(leg.OVER_BOUND_DT, leg.STEP_BOUND)
         self.assertGreater(leg.HUGE_DT, leg.OVER_BOUND_DT)
+
+    def test_unchecked_self_check_fails(self):
+        # An audit that names nothing slips every planted negative — the
+        # leg reports itself unchecked rather than passing a rig it can
+        # no longer trust to catch what it names.
+        with patch.object(scenarios, '_step_bound_violation',
+                          lambda record, phase: None):
+            record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('step-bound-unchecked', record['detail'])
+        self.assertIn('read-moved', record['detail'])
+        report.validate_scenario(record)
+
+    def test_self_check_is_complete(self):
+        # Every planted negative the leg can stage names the diagnostic
+        # it must — the self-check slips nothing.
+        self.assertEqual(scenarios._step_bound_self_check(), [])
 
 
 if __name__ == '__main__':

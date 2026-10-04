@@ -1718,10 +1718,14 @@ Implementation order: second, after [daily architecture review](daily-architectu
   refused after the refusals, a baseline that never restored, a moved
   role, or a stalled scan) and `step-bound-nondeterministic` (a
   refusal whose stored value moved, or a finite step whose tick never
-  advanced past the pre-probe canary). A run with no settled pair, no
-  published plant endpoint, no pinned owner token, a claim refused
-  under that token, a census serving no finite float input, or a rig
-  that applied an over-bound advance reports inconclusive.
+  advanced past the pre-probe canary), with the self-check's
+  `step-bound-unchecked` covering every planted negative — the
+  refused-probe clauses are pure predicates over one observation
+  record, replayed over each named class before the leg trusts itself
+  on the rig. A run with no settled pair, no published plant endpoint,
+  no pinned owner token, a claim refused under that token, a census
+  serving no finite float input, or a rig that applied an over-bound
+  advance reports inconclusive.
 
 ## Outcome
 

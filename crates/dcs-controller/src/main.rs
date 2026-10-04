@@ -3420,6 +3420,49 @@ mod tests {
         }
     }
 
+    /// Finding `huge-step-dt-poisons-plant-state`: a scan period is
+    /// the `dt` every plant step carries, and the field bounds it at
+    /// `dcs_sim::MAX_STEP_DT` — one accepted request above that bound
+    /// wound an element's accumulator past the `f64` range for every
+    /// attachment until the plant restarted. A run declaring such a
+    /// period would die on its first scan with a wire diagnostic, so
+    /// `Options::parse` refuses it where it is configured, naming the
+    /// bound, while an ordinary period still parses.
+    #[test]
+    fn an_over_bound_scan_period_fails_option_parsing() {
+        let base = [
+            "model.json".to_string(),
+            "--scan-ms".to_string(),
+            "100".to_string(),
+        ];
+        let parse = |dt: &str| {
+            Options::parse(
+                base.iter()
+                    .cloned()
+                    .chain(["--dt".to_string(), dt.to_string()]),
+            )
+        };
+
+        for over in ["1e7", "1e308"] {
+            let error = match parse(over) {
+                Ok(_) => panic!("--dt {over} is above the step bound and must fail parsing"),
+                Err(error) => error,
+            };
+            assert!(
+                error.contains("--dt") && error.contains(&dcs_sim::MAX_STEP_DT.to_string()),
+                "--dt {over}: {error}"
+            );
+        }
+
+        // The bound is a usable ceiling: an ordinary scan period and the
+        // bound itself both parse.
+        for legal in ["0.1", &dcs_sim::MAX_STEP_DT.to_string()] {
+            if let Err(error) = parse(legal) {
+                panic!("--dt {legal} must parse: {error}");
+            }
+        }
+    }
+
     #[test]
     fn a_stalled_consumer_drops_under_the_named_counter_without_blocking() {
         let (report, collected) = collector();

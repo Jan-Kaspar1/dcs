@@ -52,6 +52,13 @@ RUNS_BEFORE = frozenset({'scenario_fenced_writer_degrade'})
 # path's continued liveness, and the pair's own posture. Contract
 # violations name step-bound-failed; answers that disagree with the
 # field state they report name step-bound-nondeterministic.
+#
+# The refused-probe clauses are pure predicates over one observation
+# record (`_step_bound_violation`), and `_step_bound_self_check`
+# replays them over every planted negative the contract names before
+# the leg trusts itself on the rig — a self-check that stayed silent on,
+# or wrongly named, one reports step-bound-unchecked rather than
+# passing.
 
 STEP_BOUND_DEADLINE = 30   # bound on each settle/growth watch
 STEP_BOUND = 1.0e6         # dcs_sim::MAX_STEP_DT — the documented
@@ -140,6 +147,289 @@ def _ctl_decodes(response, want):
     back error-shaped; a poisoned `{"float":null}` frame is the decode
     failure its nonzero exit carries."""
     return isinstance(response, dict) and response.get('result') == want
+
+
+def _served_active(roles):
+    """The peer whose served role report names it active, or None — the
+    pure form of `_settled_active` over reports already gathered, so the
+    audit reaches the pair's posture without polling again."""
+    for name in sorted(roles or {}):
+        report = roles[name]
+        if isinstance(report, dict) and report.get('role') == 'active':
+            return name
+    return None
+
+
+# The record keys the audit reads, per phase: what must be gathered
+# before the phase's clauses can hold.
+_PHASE_KEYS = {
+    'refusals': ('point', 'baseline', 'undriven', 'answers', 'canary',
+                 'read', 'census'),
+    'followup': ('point', 'baseline', 'undriven', 'canary', 'follow',
+                 'landed', 'census2'),
+    'restored': ('point', 'baseline', 'undriven', 'restored', 'final'),
+    'pair': ('point', 'baseline', 'undriven', 'active', 'tracking',
+             'roles1', 'snaps0', 'grown', 'image'),
+}
+
+
+def _step_bound_violation(record, phase):
+    """The refused-probe contract's clauses as pure predicates over the
+    observations the leg has gathered by `phase` — the phase decides
+    which clauses are live, so the audit never judges state it has not
+    seen while the leg still stops at the first clause it catches.
+    Returns `(key, diagnostic, detail)` for the first clause `record`
+    violates in contract order, or None while the record holds it.
+
+    `record` carries what each phase needs: the driven `point`, its
+    `baseline` Value dict, whether it is `undriven` (element-free, so
+    its stored value is comparable across the probes), the `answers` the
+    probes got, the `canary` `dt:0` step, the shipped client's answers
+    (`read`/`census` after the refusals, `landed`/`census2` after the
+    finite step, `restored`/`final` after the restore), and the pair's
+    own posture (`active`, `tracking`, `roles1`, `snaps0`, `grown`,
+    `image`). A missing key means the phase has not reached it, which is
+    why the live clauses guard on the value being there at all."""
+    for key in _PHASE_KEYS.get(phase, ()):
+        if record.get(key) is None:
+            return None
+    point = record.get('point')
+    baseline = record.get('baseline')
+    undriven = record.get('undriven')
+
+    if phase == 'refusals':
+        read_back = record.get('read')
+        census = record.get('census')
+        if not _ctl_decodes(read_back, 'sample'):
+            return ('read-undecodable', 'step-bound-failed',
+                    'the refused steps left state the shipped client '
+                    'cannot deserialize — read on point ' + str(point)
+                    + ' answered ' + json.dumps(read_back)[:300])
+        served = (read_back.get('sample') or {}).get('value')
+        if _float_payload(served)[0] and _finite_float(served) is None:
+            return ('read-non-finite', 'step-bound-failed',
+                    'the driven point serves a non-finite float — the '
+                    '{"float":null} poisoning the bound exists to '
+                    'prevent: ' + json.dumps(served)[:300])
+        if undriven and served != baseline:
+            return ('read-moved', 'step-bound-nondeterministic',
+                    'the steps answered ' + json.dumps(record.get(
+                        'answers')) + ' yet the driven point\'s stored '
+                    'value moved — ' + json.dumps(baseline) + ' -> '
+                    + json.dumps(served)[:300])
+        if not _ctl_decodes(census, 'points'):
+            return ('census-undecodable', 'step-bound-failed',
+                    'the post-refusal census no longer deserializes for '
+                    'the shipped client: ' + json.dumps(census)[:300])
+        poisoned = _poisoned_entry((census or {}).get('points') or [])
+        if poisoned is not None:
+            return ('census-poisoned', 'step-bound-failed',
+                    'point ' + str(poisoned.get('point')) + ' serves a '
+                    'non-finite sample the wire cannot spell — an '
+                    'over-bound step still poisoned the field: '
+                    + json.dumps(poisoned.get('sample'))[:300])
+
+    elif phase == 'followup':
+        follow = record.get('follow')
+        landed = record.get('landed')
+        census2 = record.get('census2')
+        if follow.get('result') != 'stepped':
+            return ('follow-refused', 'step-bound-failed',
+                    'a finite step under the same claim was refused '
+                    'after the bound refusals — the probes wedged the '
+                    'step path: ' + json.dumps(follow)[:300])
+        if not isinstance(follow.get('tick'), int) \
+                or follow['tick'] <= ((record.get('canary') or {}).get(
+                    'tick') or 0):
+            return ('follow-static', 'step-bound-nondeterministic',
+                    'the finite step answered stepped but the plant tick '
+                    'never advanced past the pre-probe canary — '
+                    + json.dumps((record.get('canary') or {}).get('tick'))
+                    + ' -> ' + json.dumps(follow.get('tick')))
+        if not _ctl_decodes(landed, 'sample'):
+            return ('landed-undecodable', 'step-bound-failed',
+                    'the post-step read no longer deserializes for the '
+                    'shipped client: ' + json.dumps(landed)[:300])
+        poisoned = _poisoned_entry((census2 or {}).get('points') or [])
+        if not _ctl_decodes(census2, 'points') or poisoned is not None:
+            return ('follow-census', 'step-bound-failed',
+                    'the finite step left a census the shipped client '
+                    'cannot read finite — ' + json.dumps(census2)[:300])
+
+    elif phase == 'restored':
+        restored = record.get('restored')
+        final = record.get('final')
+        if restored.get('result') != 'done':
+            return ('restore-refused', 'step-bound-failed',
+                    'the restore write was refused — the field did not '
+                    'come back: ' + json.dumps(restored)[:300])
+        if not _ctl_decodes(final, 'sample'):
+            return ('restored-undecodable', 'step-bound-failed',
+                    'the restored point no longer deserializes for the '
+                    'shipped client: ' + json.dumps(final)[:300])
+        served = (final.get('sample') or {}).get('value')
+        if undriven and served != baseline:
+            return ('restore-moved', 'step-bound-nondeterministic',
+                    'the restore write answered done but the point '
+                    'reads ' + json.dumps(served)[:300] + ', not the '
+                    'baseline ' + json.dumps(baseline))
+
+    elif phase == 'pair':
+        roles1 = record.get('roles1') or {}
+        active = record.get('active')
+        tracking = record.get('tracking')
+        if (roles1.get(active) or {}).get('role') != 'active' \
+                or _served_active(roles1) != active:
+            return ('active-moved', 'step-bound-failed',
+                    'the refused steps moved the active role: '
+                    + json.dumps(roles1)[:300])
+        if (roles1.get(tracking) or {}).get('role') != 'standby':
+            return ('peer-moved', 'step-bound-failed',
+                    'the refused steps moved the tracking peer\'s role: '
+                    + json.dumps(roles1)[:300])
+        snaps0 = record.get('snaps0') or {}
+        grown = record.get('grown') or {}
+        for name in ('active', 'standby'):
+            if grown.get(name) is None:
+                return ('scan-stalled-' + name, 'step-bound-failed',
+                        name + '\'s scans stalled under the refused '
+                        'steps — tick ' + json.dumps((snaps0.get(name)
+                                                     or {}).get('tick'))
+                        + ' never advanced')
+        health0 = (snaps0.get(active) or {}).get('io_health') or {}
+        health1 = (record.get('image') or {}).get('io_health') or {}
+        for counter in ('failed_reads', 'failed_writes'):
+            if (health1.get(counter) or 0) > (health0.get(counter) or 0):
+                return ('io-health-' + counter, 'step-bound-failed',
+                        'the refused steps counted against the owner\'s '
+                        'io_health: ' + json.dumps(health1)[:300])
+        if undriven:
+            image = _point_value(record.get('image') or {}, point)
+            if image != _finite_float(baseline):
+                return ('image-moved', 'step-bound-failed',
+                        'the field image did not restore — the active '
+                        'serves ' + json.dumps(image)[:300]
+                        + ' for point ' + str(point) + ', not the '
+                        'baseline ' + json.dumps(_finite_float(baseline)))
+    return None
+
+
+def _step_bound_self_check():
+    """The leg's unchecked-diagnostic self-test: replay the audit over
+    each planted negative the contract names — an off-contract answer
+    where the bound refusal stands, an undecodable or poisoned read and
+    census, a driven point that moved despite the refusal, a refused
+    finite step, a static follow-up tick, a poisoned post-step census, a
+    refused restore, a restored point that did not return, a moved role,
+    a stalled scan, a counted refusal, and an unrestored field image —
+    and require each to trip the diagnostic its class names, while the
+    clean record trips nothing. Returns the planted case names the audit
+    let through or wrongly named."""
+    baseline = {'float': 0.0}
+
+    def record(**over):
+        """A held contract up to `phase`, with the phase's clean
+        answers filled in."""
+        clean = {
+            'point': 12,
+            'baseline': baseline,
+            'undriven': True,
+            'answers': {'the over-bound step': 'bound'},
+            'canary': {'result': 'stepped', 'tick': 4},
+            'read': {'result': 'sample',
+                     'sample': {'value': baseline}},
+            'census': {'result': 'points', 'points': [
+                 {'point': 12, 'sample': {'value': baseline}},
+                 {'point': 10, 'sample': {'value': {'float': 0.8}}}]},
+            'follow': {'result': 'stepped', 'tick': 5},
+            'landed': {'result': 'sample',
+                       'sample': {'value': {'float': 0.1}}},
+            'census2': {'result': 'points', 'points': [
+                {'point': 12, 'sample': {'value': {'float': 0.1}}}]},
+            'restored': {'result': 'done'},
+            'final': {'result': 'sample', 'sample': {'value': baseline}},
+            'active': 'ctrl-a',
+            'tracking': 'ctrl-b',
+            'roles1': {'ctrl-a': {'role': 'active'},
+                       'ctrl-b': {'role': 'standby'}},
+            'snaps0': {'ctrl-a': {'tick': 20, 'io_health': {
+                          'failed_reads': 0, 'failed_writes': 0}},
+                       'ctrl-b': {'tick': 20}},
+            'grown': {'ctrl-a': {'tick': 24}, 'ctrl-b': {'tick': 24}},
+            'image': {'points': [{'point': 12,
+                                  'sample': {'value': baseline}}],
+                      'io_health': {'failed_reads': 0, 'failed_writes': 0}},
+        }
+        clean.update(over)
+        return clean
+
+    def moved(point=12):
+        return [{'point': point, 'sample': {'value': {'float': 4.75}}}]
+
+    def poisoned(point=12):
+        return [{'point': point, 'sample': {'value': {'float': None}}}]
+
+    plants = (
+        ('clean', 'refusals', record(), None),
+        ('off-contract', 'refusals', record(
+            answers={'the over-bound step': 'stepped'}), None),
+        ('read-undecodable', 'refusals', record(
+            read={'result': 'error'}), 'step-bound-failed'),
+        ('read-non-finite', 'refusals', record(
+            read={'result': 'sample',
+                  'sample': {'value': {'float': None}}}),
+         'step-bound-failed'),
+        ('read-moved', 'refusals', record(
+            read={'result': 'sample',
+                  'sample': {'value': {'float': 4.75}}}),
+         'step-bound-nondeterministic'),
+        ('census-undecodable', 'refusals', record(
+            census={'result': 'error'}), 'step-bound-failed'),
+        ('census-poisoned', 'refusals', record(
+            census={'result': 'points', 'points': poisoned()}),
+         'step-bound-failed'),
+        ('follow-refused', 'followup', record(
+            follow={'result': 'error'}), 'step-bound-failed'),
+        ('follow-static', 'followup', record(
+            follow={'result': 'stepped', 'tick': 4}),
+         'step-bound-nondeterministic'),
+        ('landed-undecodable', 'followup', record(
+            landed={'result': 'error'}), 'step-bound-failed'),
+        ('follow-census', 'followup', record(
+            census2={'result': 'points', 'points': poisoned(10)}),
+         'step-bound-failed'),
+        ('restore-refused', 'restored', record(
+            restored={'result': 'error'}), 'step-bound-failed'),
+        ('restored-undecodable', 'restored', record(
+            final={'result': 'error'}), 'step-bound-failed'),
+        ('restore-moved', 'restored', record(
+            final={'result': 'sample',
+                   'sample': {'value': {'float': 1.25}}}),
+         'step-bound-nondeterministic'),
+        ('active-moved', 'pair', record(
+            roles1={'ctrl-a': {'role': 'standby'},
+                    'ctrl-b': {'role': 'standby'}}),
+         'step-bound-failed'),
+        ('peer-moved', 'pair', record(
+            roles1={'ctrl-a': {'role': 'active'},
+                    'ctrl-b': {'role': 'active'}}),
+         'step-bound-failed'),
+        ('scan-stalled', 'pair', record(grown={'ctrl-a': {'tick': 24}}),
+         'step-bound-failed'),
+        ('io-health', 'pair', record(image={
+            'points': [{'point': 12, 'sample': {'value': baseline}}],
+            'io_health': {'failed_reads': 3, 'failed_writes': 0}}),
+         'step-bound-failed'),
+        ('image-moved', 'pair', record(image={
+            'points': moved(), 'io_health': {}}), 'step-bound-failed'),
+    )
+    slipped = []
+    for name, phase, held, expect in plants:
+        _key, diagnostic, _detail = _step_bound_violation(held, phase) \
+            or (None, None, None)
+        if diagnostic != expect:
+            slipped.append(name)
+    return slipped
 
 
 def scenario_step_bound(ctx):
@@ -288,6 +578,28 @@ def scenario_step_bound(ctx):
                                'step path is not live for the leg: '
                                + json.dumps(tick0)[:300])
 
+        # The leg's own unchecked-diagnostic self-test: an audit that
+        # stayed silent on — or wrongly named — a planted negative could
+        # report this contract held while catching nothing, so the leg
+        # proves it catches each named class before it trusts itself on
+        # the rig.
+        slipped = _step_bound_self_check()
+        if slipped:
+            return case.finish(
+                'failed', 'step-bound-unchecked: the refused-probe '
+                'audit stayed silent on, or wrongly named, the planted '
+                'negatives: ' + ', '.join(slipped))
+        case.observe('the self-check leg\'s planted negatives each named '
+                     'their diagnostic')
+
+        # The observation record the audit judges, gathered phase by
+        # phase — the driven point, its baseline, whether it is
+        # element-undriven, the pair's pre-probe posture.
+        record = {'point': point, 'baseline': baseline,
+                  'undriven': undriven, 'active': active,
+                  'tracking': tracking, 'canary': tick0,
+                  'snaps0': snaps0}
+
         # The probes under test, in the order the contract needs: the
         # ordinary over-bound advance first, so a rig predating the
         # bound absorbs this one and never sees the finding's vector.
@@ -327,6 +639,7 @@ def scenario_step_bound(ctx):
                     'the named bound refusal: '
                     + json.dumps(answer)[:300])
             answers[label] = name
+        record['answers'] = answers
         case.observe('refused by name: '
                      + ', '.join(label + ' -> ' + name
                                  for label, name in answers.items()))
@@ -347,38 +660,12 @@ def scenario_step_bound(ctx):
         case.evidence('file', ref, 'post-refusal deserialization: '
                       'the driven point\'s read and the census scan '
                       'for {"float":null} frames')
-        if not _ctl_decodes(read_back, 'sample'):
-            return case.finish(
-                'failed', 'step-bound-failed: the refused steps left '
-                'state the shipped client cannot deserialize — read '
-                'on point ' + str(point) + ' answered '
-                + json.dumps(read_back)[:300])
-        served = (read_back.get('sample') or {}).get('value')
-        if _float_payload(served)[0] and _finite_float(served) is None:
-            return case.finish(
-                'failed', 'step-bound-failed: the driven point serves '
-                'a non-finite float — the {"float":null} poisoning '
-                'the bound exists to prevent: '
-                + json.dumps(served)[:300])
-        if undriven and served != baseline:
-            return case.finish(
-                'failed', 'step-bound-nondeterministic: the steps '
-                'answered ' + json.dumps(answers) + ' yet the driven '
-                'point\'s stored value moved — '
-                + json.dumps(baseline) + ' -> '
-                + json.dumps(served)[:300])
-        if not _ctl_decodes(census, 'points'):
-            return case.finish(
-                'failed', 'step-bound-failed: the post-refusal census '
-                'no longer deserializes for the shipped client: '
-                + json.dumps(census)[:300])
-        if poisoned is not None:
-            return case.finish(
-                'failed', 'step-bound-failed: point '
-                + str(poisoned.get('point')) + ' serves a non-finite '
-                'sample the wire cannot spell — an over-bound step '
-                'still poisoned the field: '
-                + json.dumps(poisoned.get('sample'))[:300])
+        record['read'] = read_back
+        record['census'] = census
+        _key, diagnostic, detail = _step_bound_violation(
+            record, 'refusals') or (None, None, None)
+        if diagnostic is not None:
+            return case.finish('failed', diagnostic + ': ' + detail)
         case.observe('post-refusal reads decode finite — no '
                      '{"float":null} frame in the census, the driven '
                      'point unmoved')
@@ -401,31 +688,13 @@ def scenario_step_bound(ctx):
                                  (census2 or {}).get('points') or [])})
         case.evidence('file', ref, 'the finite step after the refused '
                       'probes')
-        if follow.get('result') != 'stepped':
-            return case.finish(
-                'failed', 'step-bound-failed: a finite step under the '
-                'same claim was refused after the bound refusals — '
-                'the probes wedged the step path: '
-                + json.dumps(follow)[:300])
-        if not isinstance(follow.get('tick'), int) \
-                or follow['tick'] <= (tick0.get('tick') or 0):
-            return case.finish(
-                'failed', 'step-bound-nondeterministic: the finite '
-                'step answered stepped but the plant tick never '
-                'advanced past the pre-probe canary — '
-                + json.dumps(tick0.get('tick')) + ' -> '
-                + json.dumps(follow.get('tick')))
-        if not _ctl_decodes(landed, 'sample'):
-            return case.finish(
-                'failed', 'step-bound-failed: the post-step read no '
-                'longer deserializes for the shipped client: '
-                + json.dumps(landed)[:300])
-        poisoned = _poisoned_entry((census2 or {}).get('points') or [])
-        if not _ctl_decodes(census2, 'points') or poisoned is not None:
-            return case.finish(
-                'failed', 'step-bound-failed: the finite step left a '
-                'census the shipped client cannot read finite — '
-                + json.dumps(census2)[:300])
+        record['follow'] = follow
+        record['landed'] = landed
+        record['census2'] = census2
+        _key, diagnostic, detail = _step_bound_violation(
+            record, 'followup') or (None, None, None)
+        if diagnostic is not None:
+            return case.finish('failed', diagnostic + ': ' + detail)
         case.observe('finite step landed — plant tick '
                      + json.dumps(tick0.get('tick')) + ' -> '
                      + json.dumps(follow.get('tick'))
@@ -442,26 +711,13 @@ def scenario_step_bound(ctx):
                             'step-bound-restored.json',
                             {'write': restored, 'read': final})
         case.evidence('file', ref, 'the restored driven point')
-        if restored.get('result') != 'done':
-            return case.finish(
-                'failed', 'step-bound-failed: the restore write was '
-                'refused — the field did not come back: '
-                + json.dumps(restored)[:300])
+        record['restored'] = restored
+        record['final'] = final
+        _key, diagnostic, detail = _step_bound_violation(
+            record, 'restored') or (None, None, None)
+        if diagnostic is not None:
+            return case.finish('failed', diagnostic + ': ' + detail)
         restore = None
-        if not _ctl_decodes(final, 'sample'):
-            return case.finish(
-                'failed', 'step-bound-failed: the restored point no '
-                'longer deserializes for the shipped client: '
-                + json.dumps(final)[:300])
-        if undriven \
-                and (final.get('sample') or {}).get('value') \
-                != baseline:
-            return case.finish(
-                'failed', 'step-bound-nondeterministic: the restore '
-                'write answered done but the point reads '
-                + json.dumps(
-                    (final.get('sample') or {}).get('value'))[:300]
-                + ', not the baseline ' + json.dumps(baseline))
         case.observe('driven point restored to ' + json.dumps(baseline))
 
         # The pair must be untouched: roles unmoved, both scans still
@@ -500,39 +756,13 @@ def scenario_step_bound(ctx):
                              'driven': _point_sample(final_image or {},
                                                      point)})
         case.evidence('file', ref, 'the pair across the refused steps')
-        if (roles1.get(active) or {}).get('role') != 'active' \
-                or _settled_active(ctx) != active:
-            return case.finish(
-                'failed', 'step-bound-failed: the refused steps moved '
-                'the active role: ' + json.dumps(roles1)[:300])
-        if (roles1.get(tracking) or {}).get('role') != 'standby':
-            return case.finish(
-                'failed', 'step-bound-failed: the refused steps moved '
-                'the tracking peer\'s role: ' + json.dumps(roles1)[:300])
-        for name in ('active', 'standby'):
-            if grown.get(name) is None:
-                return case.finish(
-                    'failed', 'step-bound-failed: ' + name + '\'s '
-                    'scans stalled under the refused steps — tick '
-                    + json.dumps((snaps0.get(name) or {}).get('tick'))
-                    + ' never advanced')
-        health0 = (snaps0.get(active) or {}).get('io_health') or {}
-        health1 = (final_image or {}).get('io_health') or {}
-        for key in ('failed_reads', 'failed_writes'):
-            if (health1.get(key) or 0) > (health0.get(key) or 0):
-                return case.finish(
-                    'failed', 'step-bound-failed: the refused steps '
-                    'counted against the owner\'s io_health: '
-                    + json.dumps(health1)[:300])
-        if undriven:
-            image = _point_value(final_image or {}, point)
-            if image != baseline_value:
-                return case.finish(
-                    'failed', 'step-bound-failed: the field image did '
-                    'not restore — the active serves '
-                    + json.dumps(image)[:300] + ' for point '
-                    + str(point) + ', not the baseline '
-                    + json.dumps(baseline_value))
+        record['roles1'] = roles1
+        record['grown'] = grown
+        record['image'] = final_image
+        _key, diagnostic, detail = _step_bound_violation(
+            record, 'pair') or (None, None, None)
+        if diagnostic is not None:
+            return case.finish('failed', diagnostic + ': ' + detail)
         case.observe('the pair undisturbed — ' + active + ' active, '
                      + tracking + ' tracking, both scans advancing, '
                      'io_health clean, the field image restored')
