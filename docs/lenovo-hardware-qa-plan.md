@@ -1834,6 +1834,78 @@ Implementation order: second, after [daily architecture review](daily-architectu
   declared pair is driven and therefore stages the contradiction with
   no freeze and no timing race.
 
+
+### Landed 2026-10-04 (quality-aware cause-alarm leg, #827/#871/#1134/#1424)
+
+- The contract #827's fix establishes — a protection contact degraded
+  enough to trip the pump's fail-safe protection annunciates its own
+  cause alarm, because a protective stop that annunciates nothing
+  withholds the operator's evidence of the cause (decision 88's per-pump
+  cause guards, WW-ALM-001's annunciation clause, WW-OPS-003's
+  signal-confidence clause) — is now exercised on the lane by scenario
+  leg `3960_cause_alarm_quality`, filed between the consumed-edge
+  lifecycle leg and the schedule's closing `dcs-ctl` case. The leg
+  resolves `p101-thermal` and `p101-moisture` by signal name, reads each
+  cause alarm's declared port binding out of the served descriptors, and
+  refuses to pass vacuously: an `in` bound to the raw contact is the
+  pre-#827 shape and fails by name rather than reporting an absent
+  surface inconclusive.
+- The rig's pump-station model declares both contacts as journaled field
+  inputs wired two ways — into the protection aggregator's trip ports and
+  into one single-trip `interlock` cause guard each — so the leg drives
+  the field through the shipped `dcs-plant-ctl` fault surface
+  (`inject_fault` `{quality: {bad: device_fault}}`, `clear-fault`) under
+  the settled active's pinned writer claim, and the value-trip arms ride
+  the raw attachment the power-trip and ack-edge legs use. The pump is
+  hand-held under receipted `mode`/`hand` writes until the field's own
+  stored `p101-cmd` reads energized: a protective stop that annunciates
+  nothing is only a defect over a pump that was actually running.
+- Four drives on one pump. The degraded thermal contact and the degraded
+  moisture contact each assert the whole contract — the substituted
+  quality over the standing stored field value, the trip
+  (`protect-tripped` standing, `protections-ok` dropped, availability no
+  longer proven at Good), the named alarm's condition/`alarm`/
+  `unacknowledged` with `shelved`/`suppressed`/`out-of-service` down, the
+  field command cut, and the sibling cause alarm and the motor-fault
+  alarm clean — then clear it and prove the declared recovery through the
+  receipted ack press on the consumed edge. A Good-quality value trip
+  annunciates identically with no quality transition beside it in the
+  record, and a degraded contact on the stopped pump annunciates its own
+  cause alarm while the pump neither starts nor plants anything beyond
+  the declared contract.
+- The durable half is the record the defect was recorded against: each
+  declared-journaled point's transition sequence exactly, each contact's
+  `quality_changed` pairs exactly, each drive's annunciation ordered
+  beside its own trip within the guard's declared one-hop carrier
+  crossing, the receipted writes settled applied and attributed, no role
+  change, and nothing recorded on the carriers, ack inputs, inverted
+  servings or the field output the model leaves unjournaled. Named
+  diagnostics are `cause-alarm-quality-failed` (a degraded contact that
+  never annunciates its cause alarm, a protection that fails to cut the
+  field, a latch the ack never clears, a planted journal the record does
+  not carry) and `cause-alarm-quality-nondeterministic` (a duplicate or
+  missing transition, an annunciation outside its trip's reading, a
+  journaled role change or unjournaled point, a declared-quiet managed
+  flag that stands). Two consecutive passes produce identical evidence;
+  a rig whose model declares none of the surface reports inconclusive,
+  and the leg's restore clears every injected quality, releases the
+  manual selection and the hand request, re-arms every ack input and
+  acknowledges any standing latch for the legs that follow.
+- The consumer-boundary mirror is `reference-plant/ci/legs/
+  cause_alarm_quality.py` — one new file under `ci/legs/`, discovered by
+  the file-named convention, needing no `check.sh`, boundary-lint or
+  harness edit. It resolves the same seam out of the consumer's own
+  emitted artifact (the managed alarm whose `alarm` output binds the
+  contact's alarm point, whose `in` binds a port-to-port wire out of an
+  `interlock` guard's `tripped`, whose own `trip_1` binds the contact),
+  probes the pinned release's served registry for that guard — a release
+  predating the contract reports inconclusive, never a product failure —
+  and runs the same four drives on the manifest-declared pair, with the
+  same managed-lifecycle, value-trip and stopped-pump halves. Its two
+  doctored cases require the cause alarm to stay silent over the
+  degraded contact and the field command to stand through the trip; both
+  must fail naming the annunciation and the stop the honest run saw.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,
