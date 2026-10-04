@@ -688,7 +688,9 @@ crossing it proves is always "this source, unchanged, across the
 repin".
 
 An **incompatible** crossing fails with named diagnostics, never
-silently: a pin that resolves no release crates is `pin-unresolvable`;
+silently: a pin that resolves no release crates — or a remote the
+`lockfile` stage cannot query for the declared tag's target, which is
+unverifiable rather than absent — is `pin-unresolvable`;
 a committed `Cargo.lock` that records another remote, another
 `rev`/`tag`, or another revision than the manifest declares is
 `lockfile-stale`; a release crate recorded from a `path` into a
