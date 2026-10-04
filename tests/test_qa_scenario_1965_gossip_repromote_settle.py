@@ -1,9 +1,9 @@
-"""The 1960_repromote_suspended_settle leg's scenario unit coverage — the feed fakes
-and TestCase classes for scenario_repromote_suspended_settle, split per the
-one-module-per-leg convention (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
+"""The 1965_gossip_repromote_settle leg's scenario unit coverage — the
+feed fakes and TestCase classes for scenario_gossip_repromote_settle,
+split per the one-module-per-leg convention (#940). The shared fakes
+and helpers live in tests/qa_scenario_support.py; EXPECTED_CASES pins
+this module's contribution to the suite's case coverage so a dropped
+case fails the discovery check in
 tests/test_qa_scenario_modules.py.
 """
 import unittest
@@ -14,51 +14,47 @@ from test_qa_scenario_1900_demote_carry_settle import (
 
 
 EXPECTED_CASES = frozenset({
-    'RepromoteSuspendedSettleTests.test_registered',
-    'RepromoteSuspendedSettleTests.test_clean_pair_passes_and_validates',
-    'RepromoteSuspendedSettleTests.test_parked_receipt_reports_failed',
-    'RepromoteSuspendedSettleTests.test_double_settle_reports_nondeterministic',
-    'RepromoteSuspendedSettleTests.test_settle_without_apply_reports_failed',
-    'RepromoteSuspendedSettleTests.test_divergent_verdict_reports_nondeterministic',
-    'RepromoteSuspendedSettleTests.test_owner_never_demotes_reports_failed',
-    'RepromoteSuspendedSettleTests.test_never_reconverges_reports_failed',
-    'RepromoteSuspendedSettleTests.test_refused_repromote_reports_failed',
-    'RepromoteSuspendedSettleTests.test_refused_preempt_reports_failed',
-    'RepromoteSuspendedSettleTests.test_missed_window_restages_and_passes',
-    'RepromoteSuspendedSettleTests.test_no_active_reports_failed',
-    'RepromoteSuspendedSettleTests.test_unconverged_pair_reports_inconclusive',
-    'RepromoteSuspendedSettleTests.test_unreachable_peer_reports_inconclusive',
-    'RepromoteSuspendedSettleTests.test_diverging_digests_report_nondeterministic',
-    'RepromoteSuspendedSettleTests.test_silent_judge_reports_unchecked',
-    'RepromoteSuspendedSettleTests.test_two_runs_produce_identical_evidence',
+    'GossipRepromoteSettleTests.test_registered',
+    'GossipRepromoteSettleTests.test_clean_pair_passes_and_validates',
+    'GossipRepromoteSettleTests.test_parked_receipt_reports_failed',
+    'GossipRepromoteSettleTests.test_double_settle_reports_nondeterministic',
+    'GossipRepromoteSettleTests.test_settle_without_apply_reports_failed',
+    'GossipRepromoteSettleTests.test_divergent_verdict_reports_nondeterministic',
+    'GossipRepromoteSettleTests.test_never_reconverges_reports_failed',
+    'GossipRepromoteSettleTests.test_refused_repromote_reports_failed',
+    'GossipRepromoteSettleTests.test_zombie_resurrection_reports_failed',
+    'GossipRepromoteSettleTests.test_closed_window_still_resolves_once',
+    'GossipRepromoteSettleTests.test_missed_window_restages_and_passes',
+    'GossipRepromoteSettleTests.test_no_active_reports_failed',
+    'GossipRepromoteSettleTests.test_unconverged_pair_reports_inconclusive',
+    'GossipRepromoteSettleTests.test_unreachable_peer_reports_inconclusive',
+    'GossipRepromoteSettleTests.test_diverging_digests_report_nondeterministic',
+    'GossipRepromoteSettleTests.test_silent_judge_reports_unchecked',
+    'GossipRepromoteSettleTests.test_two_runs_produce_identical_evidence',
 })
 
 
-class RepromoteFeed(DemoteCarryFeed):
-    """A stubbed pair for the repromote-suspended-settle leg,
-    arbitrating the field claim through a real ClaimPlantPeer:
-    ctrl-a owns the field under TOKEN_A at launch, ctrl-b tracks.
-    Every endpoint call is one scan on the called peer except POST
-    /command, whose admission lands pending between scans. The
-    sibling's promote claims the field mid-run — its final-sync
-    adoption meets only the pre-admission document, so its served
-    window can never cover the submission the leg lands inside the
-    incumbent's fenced-reporting window; the detection scan demotes
-    the holder in place with the receipt suspended Accepted; the
-    demoted peer's pulls adopt the promoted peer's stream — the
-    unreached tail stays suspended — and the reconverged holder's
-    re-promote re-queues the tail at its own boundary, settling it
-    applied once while the demoted sibling journals the adopted
-    record. Doctor flags stage each named defect the issue calls
-    out. An optional `journal_files` mapping mirrors every
-    journaled event into real --journal-file records for the leg's
-    durable audit."""
+class GossipFeed(DemoteCarryFeed):
+    """A stubbed pair for the gossip-repromote-settle leg,
+    arbitrating the field claim through a real ClaimPlantPeer: ctrl-a
+    owns the field under TOKEN_A at launch, ctrl-b tracks. Every
+    endpoint call is one scan on the called peer except POST
+    /command, whose admission lands pending between scans.
+
+    The leg's staging is the #708 reproduction on the rig's own scans:
+    the receipted write and the holder's own demote land back to back,
+    so the demote's boundary suspends the still-pending receipt
+    `Accepted` — the peer never scans a command boundary in between.
+    The gossip window is the sibling's next tracking pull: with
+    `hold_peer_pull` the sibling's reads settle its sync posture but
+    do not merge the demoted holder's post-admission log, so no
+    covering adoption ever reaches the index before the in-window
+    re-promote; clearing it stages the covered variant, where the
+    sibling's pull lands first and the re-promote is no longer what
+    settles the admission. Doctor flags stage each named defect."""
 
     def __init__(self, plant, journal_files=None):
         super().__init__(plant)
-        # The leg's durable audit reads each endpoint's
-        # --journal-file: peer 'a' serves ctx key 'active', peer 'b'
-        # ctx key 'standby'.
         for peer, key in ((self.a, 'active'), (self.b, 'standby')):
             path = (journal_files or {}).get(key)
             if path is not None:
@@ -67,6 +63,10 @@ class RepromoteFeed(DemoteCarryFeed):
                     json.dumps({'run_boundary': {'run': 1,
                                                  'tick': 0}}) + '\n')
                 self.journal_paths[peer.name] = path
+        self.a.sync = 'tracking'
+        # The gossip window: the sibling has not yet run the pull that
+        # would carry the admission back covered.
+        self.hold_peer_pull = True
         # The doctors staging each named defect.
         self.park_suspended = False    # the re-promoted holder never
                                        # re-queues the tail — parked
@@ -74,31 +74,48 @@ class RepromoteFeed(DemoteCarryFeed):
         self.settle_no_apply = False   # the settle journals without
                                        # the write landing
         self.divergent = False         # the adopted record mints the
-                                       # wrong verdict beside the
-                                       # applied settle
+                                       # wrong verdict beside it
         self.no_reconverge = False     # the demoted holder never
-                                       # reaches a promotable verdict
-        self.repromote_refused = False # the reconverged holder's
-                                       # promote is refused once
-        self.miss_first_window = False # the first staged submission
-                                       # lands past the detection
-                                       # scan — the restage path
+                                       # reports promotable
+        self.repromote_refused = False  # the in-window promote refused
+        self.zombie_resurrect = False  # the successor re-applies the
+                                       # stale suspended write
+        self.miss_first_demote = False  # the first staged admission is
+                                       # applied before the demote —
+                                       # the restage path
         self._miss_armed = False
         self._doubled = False
         self._diverged = False
 
+    @staticmethod
+    def _staged(receipt):
+        """Whether a receipt is one of the leg's staged suspended
+        admissions — the exact reason the pass declares, never the
+        contract probe's `-contract` sibling."""
+        return receipt.get('reason') == 'gossip-repromote-settle'
+
     def _adopt(self, peer, other):
         """The tracking pull: the sync posture follows the source's
-        field-ownership stamp — active or the still-settling
-        promoting state `owns_field` covers — while a source whose
-        submission high-water sits behind this run's cannot regress
-        its log: the suspended tail past the adopted window stays
-        suspended."""
+        field ownership, but while `hold_peer_pull` stands and the
+        source's log still carries the staged admission suspended, the
+        sibling's pull has not yet run — the gossip window the
+        re-promote lands in. Once the source's own boundary settles the
+        admission, the next pull carries the line's verdict across.
+        Otherwise the source's log replaces the peer's own, the
+        unreached suspended tail rides past the adopted window, and a
+        source whose submission high-water sits behind this run's
+        cannot regress the log."""
         if not self.no_tracking \
                 and not (self.no_reconverge and peer.name == 'a'):
             peer.sync = 'tracking' \
                 if other.role in ('active', 'promoting') \
                 else 'orphaned'
+        if self.hold_peer_pull and peer.name == 'b':
+            staged = [receipt for receipt in other.receipts
+                      if receipt.get('reason') == 'gossip-repromote-settle']
+            if any('accepted' in receipt['outcome']
+                   for receipt in staged):
+                return
         if other.attempts < peer.attempts:
             return
         suspended = [receipt for receipt in peer.receipts
@@ -120,8 +137,7 @@ class RepromoteFeed(DemoteCarryFeed):
                 and not self._diverged:
             raced = [receipt for receipt in peer.receipts
                      if 'applied' in receipt['outcome']
-                     and receipt.get('reason')
-                     == 'repromote-suspended-settle']
+                     and self._staged(receipt)]
             if raced:
                 self._diverged = True
                 # The defect: the adopted record mints a second,
@@ -136,23 +152,28 @@ class RepromoteFeed(DemoteCarryFeed):
             if 'accepted' not in receipt['outcome']:
                 continue
             write = receipt['command']['write_value']
-            if receipt.get('reason') == 'repromote-suspended-settle':
-                if self.park_suspended:
-                    continue        # the defect: the tail never
-                                    # re-queued, parked Accepted
-                receipt['outcome'] = {'applied': {'tick': peer.tick}}
-                self._settle(peer, receipt)
-                if not self.settle_no_apply:
-                    peer.image[write['point']] = \
-                        write['value']['bool']
-                if self.double_settle and not self._doubled:
-                    self._doubled = True
-                    self._mark(peer, {'command_settled': {
-                        'receipt': dict(receipt)}})
-            else:
-                receipt['outcome'] = {'applied': {'tick': peer.tick}}
+            if self.park_suspended and self._staged(receipt):
+                continue        # the defect: the tail never re-queued,
+                                # parked Accepted on the live active
+            receipt['outcome'] = {'applied': {'tick': peer.tick}}
+            self._settle(peer, receipt)
+            if not self.settle_no_apply:
                 peer.image[write['point']] = write['value']['bool']
-                self._settle(peer, receipt)
+            if self.double_settle and not self._doubled \
+                    and self._staged(receipt):
+                self._doubled = True
+                self._mark(peer, {'command_settled': {
+                    'receipt': dict(receipt)}})
+
+    def _zombie(self, peer):
+        """The finding's zombie half: the successor the switch promotes
+        re-opens the settled admission as pending, so its first
+        field-owning scan writes the older value over the newer one."""
+        for receipt in peer.receipts:
+            if self._staged(receipt) and 'accepted' not in receipt[
+                    'outcome']:
+                receipt['outcome'] = {'accepted': {
+                    'apply_tick': peer.tick + 1}}
 
     def http_json(self, method, url, body=None, timeout=10):
         host = url.split('://', 1)[1].split(':')[0]
@@ -162,12 +183,14 @@ class RepromoteFeed(DemoteCarryFeed):
         path = '/' + url.split('/', 3)[3]
         route, _, query = path.partition('?')
         if (method, route) == ('POST', '/command'):
-            if self._miss_armed and peer.name == 'a':
-                # The window closed first: the detection scan
-                # demotes the holder ahead of the submission —
-                # the fenced-but-still-reporting race's losing side.
-                self._miss_armed = False
-                self._advance(peer)
+            if self.miss_first_demote and peer.name == 'a' \
+                    and not self._miss_armed \
+                    and (body or {}).get('reason') \
+                    == 'gossip-repromote-settle':
+                # The one-scan window is the staging race: arm the
+                # holder's own scan to beat the demote that follows.
+                self.miss_first_demote = False
+                self._miss_armed = True
             receipt = {'command': (body or {}).get('command'),
                        'actor': (body or {}).get('actor'),
                        'reason': (body or {}).get('reason'),
@@ -184,23 +207,62 @@ class RepromoteFeed(DemoteCarryFeed):
             # The wire answer is the admission's snapshot — later
             # scans settling the logged receipt do not rewrite it.
             return 200, copy.deepcopy(receipt)
-        self._advance(
-            peer,
-            adopt=not (method == 'POST' and route == '/promote'))
         if (method, route) == ('POST', '/demote'):
+            # The gate closes at the request boundary: the demote
+            # suspends the still-pending queue before the quiesced
+            # scans that follow it.
             if peer.role != 'active':
                 self._raise(409, {'not_active': {}})
+            if self._miss_armed and peer.name == 'a':
+                # The window closed first: the holder's own scan
+                # applied the admission before the demote landed.
+                self._miss_armed = False
+                self._advance(peer)
             peer.role = 'demoting'
             self._advance(peer, adopt=False)
             return 200, {'role': 'demoting'}
+        if (method, route) == ('POST', '/promote'):
+            if peer.role == 'active':
+                self._raise(409, {'already_active': {}})
+            if peer.sync not in ('tracking', 'orphaned') \
+                    or (self.repromote_refused and peer.name == 'a'):
+                self.repromote_refused = False
+                self._raise(409, {'not_converged': {
+                    'sync': {'unsynchronized': {}}}})
+            other = self._other(peer)
+            # The promotion boundary's final-sync transfer — the
+            # sibling's log lands, while suspended receipts its window
+            # never covered stay on this run's log, the unreached tail
+            # the re-promoted holder re-queues at its own boundary —
+            # and the claim preempts the standing owner.
+            suspended = [receipt for receipt in peer.receipts
+                         if 'accepted' in receipt['outcome']
+                         and receipt['index'] >= other.attempts
+                         and not any(
+                             self._key(carried) == self._key(receipt)
+                             for carried in other.receipts)]
+            peer.receipts = copy.deepcopy(other.receipts) + [
+                copy.deepcopy(receipt) for receipt in suspended]
+            peer.attempts = max(peer.attempts, other.attempts)
+            peer.image = dict(other.image)
+            self._wire_claim(peer.token)
+            if self.zombie_resurrect and peer.name == 'b':
+                self._zombie(peer)
+            peer.role = 'promoting'
+            return 200, {'role': 'promoting'}
+        self._advance(
+            peer,
+            adopt=not (method == 'POST' and route == '/promote'))
         if (method, route) == ('GET', '/role'):
             role = 'standby' if peer.name == 'a' and self.no_active \
                 else peer.role
             report = {'role': role, 'tick': peer.tick}
             if role == 'standby':
-                report['sync'] = {'unsynchronized': {}} \
-                    if peer.sync == 'unsynchronized' \
-                    else {peer.sync: {'aligned': peer.tick}}
+                sync = 'unsynchronized' \
+                    if peer.sync == 'unsynchronized' or (
+                        self.no_reconverge and peer.name == 'a') \
+                    else peer.sync
+                report['sync'] = {sync: {'aligned': peer.tick}}
             return 200, report
         if (method, route) == ('GET', '/signals'):
             return 200, {'points': list(self.SIGNALS),
@@ -222,50 +284,18 @@ class RepromoteFeed(DemoteCarryFeed):
             since = int(query.split('=', 1)[1]) if '=' in query else 0
             return 200, [dict(entry) for entry in peer.journal
                          if entry['seq'] > since]
-        if (method, route) == ('POST', '/promote'):
-            if peer.role == 'active':
-                self._raise(409, {'already_active': {}})
-            if self.repromote_refused and peer.name == 'a':
-                self.repromote_refused = False
-                self._raise(409, {'not_converged': {
-                    'sync': {'unsynchronized': {}}}})
-            if peer.sync not in ('tracking', 'orphaned') \
-                    or self.promote_refused:
-                self._raise(409, {'not_converged': {
-                    'sync': {'unsynchronized': {}}}})
-            other = self._other(peer)
-            # The promotion boundary's final-sync transfer: the
-            # source's log lands — but suspended receipts the
-            # source's window never covered stay on the log, the
-            # unreached tail the re-promoted holder re-queues at its
-            # own boundary — and the claim preempts the incumbent.
-            suspended = [receipt for receipt in peer.receipts
-                         if 'accepted' in receipt['outcome']
-                         and receipt['index'] >= other.attempts
-                         and not any(
-                             self._key(carried) == self._key(receipt)
-                             for carried in other.receipts)]
-            peer.receipts = copy.deepcopy(other.receipts) + [
-                copy.deepcopy(receipt) for receipt in suspended]
-            peer.attempts = max(peer.attempts, other.attempts)
-            peer.image = dict(other.image)
-            self._wire_claim(peer.token)
-            if self.miss_first_window and peer.name == 'b':
-                self.miss_first_window = False
-                self._miss_armed = True
-            peer.role = 'promoting'
-            return 200, {'role': 'promoting'}
         raise AssertionError('unexpected request %s %s'
                              % (method, url))
 
 
-class RepromoteSuspendedSettleTests(unittest.TestCase):
-    """The re-promote suspended-settle leg against the stubbed pair
-    over a real claim-arbitrating plant: a clean rig passes with
-    identical digests and evidence — the restored suspended receipt
-    re-queued and settled applied exactly once on each peer — each
-    doctored defect reports the named diagnostic, and an
-    unreachable or unconverged rig reports inconclusive."""
+class GossipRepromoteSettleTests(unittest.TestCase):
+    """The gossip-window re-promote settle leg against the stubbed
+    pair: a clean rig passes with identical digests and evidence — the
+    admission suspended `Accepted` at its own holder's demote settles
+    applied exactly once on each peer, a newer write on the same point
+    settles after it, and the successor applies nothing — each
+    doctored defect reports the named diagnostic, and an unreachable
+    or unconverged rig reports inconclusive."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -275,7 +305,7 @@ class RepromoteSuspendedSettleTests(unittest.TestCase):
             'active': str(Path(self.tmp.name) / 'a-journal.jsonl'),
             'standby': str(Path(self.tmp.name) / 'b-journal.jsonl')}
         self.plant = ClaimPlantPeer()
-        self.feed = RepromoteFeed(self.plant, self.journal_files)
+        self.feed = GossipFeed(self.plant, self.journal_files)
 
     def tearDown(self):
         self.plant.close()
@@ -292,57 +322,53 @@ class RepromoteSuspendedSettleTests(unittest.TestCase):
         feed = feed or self.feed
         with patch.object(scenarios, 'http_json', feed.http_json), \
                 patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
-                patch.object(scenarios, 'REPROMOTE_SETTLE', 2.0), \
-                patch.object(scenarios, 'REPROMOTE_AUDIT', 2.0), \
-                patch.object(scenarios, 'REPROMOTE_POLL', 0.001), \
-                patch.object(scenarios, 'REPROMOTE_WATCH', 0.001):
-            return scenarios.scenario_repromote_suspended_settle(
+                patch.object(scenarios, 'GOSSIP_SETTLE', 2.0), \
+                patch.object(scenarios, 'GOSSIP_AUDIT', 2.0), \
+                patch.object(scenarios, 'GOSSIP_POLL', 0.001), \
+                patch.object(scenarios, 'GOSSIP_WATCH', 0.001):
+            return scenarios.scenario_gossip_repromote_settle(
                 ctx or self._ctx())
 
     def test_registered(self):
         order = list(scenarios.SCENARIOS)
-        # The same restored window as the demote-carry leg — the
-        # gossip-window and command-across-promotion legs follow it,
-        # ahead of the peer-announce case and the tune case's a->b
-        # switch.
-        self.assertEqual(
-            order.index(scenarios.scenario_demote_carry_settle) + 1,
-            order.index(scenarios.scenario_repromote_suspended_settle))
+        # The same restored window as the repromote leg, ahead of the
+        # command-across-promotion case and the peer-announce leg.
         self.assertEqual(
             order.index(
                 scenarios.scenario_repromote_suspended_settle) + 1,
             order.index(scenarios.scenario_gossip_repromote_settle))
         self.assertEqual(
             order.index(scenarios.scenario_gossip_repromote_settle) + 1,
-            order.index(
-                scenarios.scenario_command_across_promotion))
-        self.assertEqual(
-            order.index(
-                scenarios.scenario_command_across_promotion) + 1,
-            order.index(scenarios.scenario_peer_announce))
+            order.index(scenarios.scenario_command_across_promotion))
         self.assertIs(
-            verify.case_function('repromote-suspended-settle'),
-            scenarios.scenario_repromote_suspended_settle)
+            verify.case_function('gossip-repromote-settle'),
+            scenarios.scenario_gossip_repromote_settle)
 
     def test_clean_pair_passes_and_validates(self):
         record = self.run_scenario()
         self.assertEqual(record['outcome'], 'passed', record)
-        for name in ('repromote-settle-signals.json',
-                     'repromote-settle-pass-1.json',
-                     'repromote-settle-pass-2.json'):
+        for name in ('gossip-settle-signals.json',
+                     'gossip-settle-pass-1.json',
+                     'gossip-settle-pass-2.json'):
             self.assertTrue((self.evidence / name).is_file(), name)
         passes = [json.loads((self.evidence / name).read_text())
-                  for name in ('repromote-settle-pass-1.json',
-                               'repromote-settle-pass-2.json')]
+                  for name in ('gossip-settle-pass-1.json',
+                               'gossip-settle-pass-2.json')]
         self.assertEqual(passes[0]['digest'], passes[1]['digest'])
+        self.assertEqual(passes[0]['digest']['suspended'], 'accepted')
         self.assertEqual(passes[0]['digest']['settle'], 'single')
-        self.assertEqual(passes[0]['digest']['window'], 'uncovered')
+        self.assertEqual(passes[0]['digest']['newer'], 'single')
+        self.assertEqual(passes[0]['digest']['order'], 'ordered')
+        self.assertEqual(passes[0]['digest']['successor'], 'single')
         self.assertEqual(passes[0]['digest']['roles'], 'restored')
-        # The restored admission settled applied exactly once on
-        # each peer — the re-promoted holder's own boundary plus
-        # the adopted record on the demoted sibling — through the
-        # serving monitors and the durable journals alike.
+        # The window stood open on the clean rig: the sibling's pull
+        # had not covered the admission when the re-promote landed.
+        self.assertEqual(passes[0]['pre_repromote']['window'], 'open')
         for passed in passes:
+            # The suspended admission settled applied exactly once on
+            # each peer — the re-promoted boundary plus the adopted
+            # record — through the serving monitors and the durable
+            # journals alike.
             window = passed['window']
             for name in ('active', 'standby'):
                 self.assertEqual(
@@ -357,10 +383,10 @@ class RepromoteSuspendedSettleTests(unittest.TestCase):
                     window)
                 self.assertEqual(1, len(passed['durable'][name]),
                                  passed['durable'])
-        # The preempting promote and the re-promote each claimed
-        # the field through the real wire protocol.
+        # The re-promote claimed the field through the real wire
+        # protocol.
         self.assertGreaterEqual(
-            self.plant.requests.count('claim_writer'), 4)
+            self.plant.requests.count('claim_writer'), 3)
         report.validate_scenario(record)
 
     def test_parked_receipt_reports_failed(self):
@@ -368,7 +394,7 @@ class RepromoteSuspendedSettleTests(unittest.TestCase):
         record = self.run_scenario()
         self.assertEqual(record['outcome'], 'failed', record)
         self.assertTrue(record['detail'].startswith(
-            'repromote-suspended-settle-failed'), record['detail'])
+            'gossip-repromote-settle-failed'), record['detail'])
         self.assertIn('parked Accepted', record['detail'])
         report.validate_scenario(record)
 
@@ -377,8 +403,7 @@ class RepromoteSuspendedSettleTests(unittest.TestCase):
         record = self.run_scenario()
         self.assertEqual(record['outcome'], 'failed', record)
         self.assertTrue(record['detail'].startswith(
-            'repromote-suspended-settle-nondeterministic'),
-            record['detail'])
+            'gossip-repromote-settle-nondeterministic'), record['detail'])
         report.validate_scenario(record)
 
     def test_settle_without_apply_reports_failed(self):
@@ -386,7 +411,7 @@ class RepromoteSuspendedSettleTests(unittest.TestCase):
         record = self.run_scenario()
         self.assertEqual(record['outcome'], 'failed', record)
         self.assertTrue(record['detail'].startswith(
-            'repromote-suspended-settle-failed'), record['detail'])
+            'gossip-repromote-settle-failed'), record['detail'])
         self.assertIn('application', record['detail'])
         report.validate_scenario(record)
 
@@ -395,17 +420,7 @@ class RepromoteSuspendedSettleTests(unittest.TestCase):
         record = self.run_scenario()
         self.assertEqual(record['outcome'], 'failed', record)
         self.assertTrue(record['detail'].startswith(
-            'repromote-suspended-settle-nondeterministic'),
-            record['detail'])
-        report.validate_scenario(record)
-
-    def test_owner_never_demotes_reports_failed(self):
-        self.feed.no_demote = True
-        record = self.run_scenario()
-        self.assertEqual(record['outcome'], 'failed', record)
-        self.assertTrue(record['detail'].startswith(
-            'repromote-suspended-settle-failed'), record['detail'])
-        self.assertIn('never demoted', record['detail'])
+            'gossip-repromote-settle-nondeterministic'), record['detail'])
         report.validate_scenario(record)
 
     def test_never_reconverges_reports_failed(self):
@@ -413,8 +428,9 @@ class RepromoteSuspendedSettleTests(unittest.TestCase):
         record = self.run_scenario()
         self.assertEqual(record['outcome'], 'failed', record)
         self.assertTrue(record['detail'].startswith(
-            'repromote-suspended-settle-failed'), record['detail'])
-        self.assertIn('never reconverged', record['detail'])
+            'gossip-repromote-settle-failed'), record['detail'])
+        self.assertIn('never reached a promotable verdict',
+                      record['detail'])
         report.validate_scenario(record)
 
     def test_refused_repromote_reports_failed(self):
@@ -422,28 +438,49 @@ class RepromoteSuspendedSettleTests(unittest.TestCase):
         record = self.run_scenario()
         self.assertEqual(record['outcome'], 'failed', record)
         self.assertTrue(record['detail'].startswith(
-            'repromote-suspended-settle-failed'), record['detail'])
+            'gossip-repromote-settle-failed'), record['detail'])
         self.assertIn('promote', record['detail'])
         report.validate_scenario(record)
 
-    def test_refused_preempt_reports_failed(self):
-        self.feed.promote_refused = True
+    def test_zombie_resurrection_reports_failed(self):
+        # The finding's zombie half: the successor the switch promotes
+        # re-applies the stale suspended write over the newer value.
+        self.feed.zombie_resurrect = True
         record = self.run_scenario()
         self.assertEqual(record['outcome'], 'failed', record)
         self.assertTrue(record['detail'].startswith(
-            'repromote-suspended-settle-failed'), record['detail'])
+            'gossip-repromote-settle-failed'), record['detail'])
+        self.assertIn('stale suspended write', record['detail'])
         report.validate_scenario(record)
 
-    def test_missed_window_restages_and_passes(self):
-        self.feed.miss_first_window = True
+    def test_closed_window_still_resolves_once(self):
+        # The peer's pull closed the gossip window before the
+        # re-promote: the admission is carried covered, so the settle
+        # rides the carry rather than the re-promoted boundary. The
+        # exactly-once contract stands either way — which window the
+        # rig admitted is evidence, never the verdict — and the case
+        # says so.
+        self.feed.hold_peer_pull = False
         record = self.run_scenario()
         self.assertEqual(record['outcome'], 'passed', record)
         passed = json.loads(
-            (self.evidence / 'repromote-settle-pass-1.json')
-            .read_text())
+            (self.evidence / 'gossip-settle-pass-1.json').read_text())
+        self.assertEqual(passed['pre_repromote']['window'], 'closed')
+        self.assertEqual(passed['digest']['settle'], 'single')
+        self.assertEqual(passed['digest']['successor'], 'single')
+        self.assertIn('gossip window in 0 of 2 passes',
+                      ' '.join(record['observations']))
+        report.validate_scenario(record)
+
+    def test_missed_window_restages_and_passes(self):
+        self.feed.miss_first_demote = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        passed = json.loads(
+            (self.evidence / 'gossip-settle-pass-1.json').read_text())
         self.assertGreaterEqual(len(passed['attempts']), 2)
         self.assertEqual(passed['attempts'][0]['missed'],
-                         'window closed')
+                         'applied before the demote')
         report.validate_scenario(record)
 
     def test_no_active_reports_failed(self):
@@ -470,37 +507,35 @@ class RepromoteSuspendedSettleTests(unittest.TestCase):
     def test_diverging_digests_report_nondeterministic(self):
         passes = iter([({'settle': 'single'}, {}, {'pass': 1}),
                        ({'settle': 'diverged'}, {}, {'pass': 2})])
-        with patch.object(scenarios, '_repromote_pass',
+        with patch.object(scenarios, '_gossip_pass',
                           lambda *a: next(passes)):
             record = self.run_scenario()
         self.assertEqual(record['outcome'], 'failed', record)
         self.assertTrue(record['detail'].startswith(
-            'repromote-suspended-settle-nondeterministic'),
-            record['detail'])
+            'gossip-repromote-settle-nondeterministic'), record['detail'])
         self.assertIn('digests diverged', record['detail'])
         report.validate_scenario(record)
 
     def test_silent_judge_reports_unchecked(self):
-        with patch.object(scenarios, '_repromote_judge',
+        with patch.object(scenarios, '_gossip_judge',
                           lambda *a, **k: 'single'):
             record = self.run_scenario()
         self.assertEqual(record['outcome'], 'failed', record)
         self.assertTrue(record['detail'].startswith(
-            'repromote-suspended-settle-unchecked'),
-            record['detail'])
+            'gossip-repromote-settle-unchecked'), record['detail'])
         report.validate_scenario(record)
 
     def test_two_runs_produce_identical_evidence(self):
         runs = []
-        for _ in range(2):
+        for index in (0, 1):
             plant = ClaimPlantPeer()
             journal_files = {
                 'active': str(Path(self.tmp.name)
-                              / ('a-' + str(len(runs)) + '.jsonl')),
+                              / ('a-' + str(index) + '.jsonl')),
                 'standby': str(Path(self.tmp.name)
-                               / ('b-' + str(len(runs)) + '.jsonl'))}
-            feed = RepromoteFeed(plant, journal_files)
-            evidence = Path(self.tmp.name) / ('run' + str(len(runs)))
+                               / ('b-' + str(index) + '.jsonl'))}
+            feed = GossipFeed(plant, journal_files)
+            evidence = Path(self.tmp.name) / ('run' + str(index))
             evidence.mkdir()
             ctx = {'active': 'http://ctrl-a:1',
                    'standby': 'http://ctrl-b:2',

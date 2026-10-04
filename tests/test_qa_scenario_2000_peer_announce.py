@@ -284,6 +284,13 @@ class PeerAnnounceTests(unittest.TestCase):
         self.assertEqual(
             order.index(scenarios.scenario_repromote_suspended_settle)
             + 1,
+            order.index(scenarios.scenario_gossip_repromote_settle))
+        self.assertEqual(
+            order.index(scenarios.scenario_gossip_repromote_settle) + 1,
+            order.index(scenarios.scenario_command_across_promotion))
+        self.assertEqual(
+            order.index(
+                scenarios.scenario_command_across_promotion) + 1,
             order.index(scenarios.scenario_peer_announce))
         # The forged-standby, announced-source-verify, stale-island,
         # journal-boundary, and suspended-alias legs share the same
