@@ -640,7 +640,7 @@ impl BusMaster {
                     bus: Some(self.bus.clone()),
                     binding: Some(state.binding.clone()),
                     state: Some(state.transport.state()),
-                    link: link,
+                    link,
                     attempted: state.attempted,
                     succeeded: state.succeeded,
                     working_counter_mismatches: state.wkc_mismatches,

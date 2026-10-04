@@ -205,26 +205,6 @@ struct PairDigest {
     journal: Vec<String>,
 }
 
-/// Polls `/role` on both peers until the roles move off `(Active,
-/// Standby)`, driving one paired scan per poll, and returns the walk.
-fn role_walk(
-    active: &MonitorClient,
-    standby: &MonitorClient,
-    from: (Role, Role),
-) -> Vec<(Role, Role)> {
-    let mut trace = vec![from];
-    for _ in 0..200 {
-        active.advance(1).unwrap();
-        standby.advance(1).unwrap();
-        let roles = (active.role().unwrap().role, standby.role().unwrap().role);
-        if roles == *trace.last().unwrap() {
-            continue;
-        }
-        trace.push(roles);
-    }
-    trace
-}
-
 /// Drives the already-promoted standby until its role walk reports
 /// `Active`, returning its snapshot.
 ///
@@ -393,8 +373,8 @@ fn a_demoted_peer_stops_publishing_while_its_exchanges_keep_latching() {
         &["--standby".to_string(), active_process.addr.to_string()],
         DT,
     );
-    let mut active = MonitorClient::new(active_process.addr);
-    let mut standby = MonitorClient::new(standby_process.addr);
+    let active = MonitorClient::new(active_process.addr);
+    let standby = MonitorClient::new(standby_process.addr);
     converge(&active, &standby);
 
     // The active hands the field over and steps down.
@@ -543,7 +523,7 @@ fn an_unconverged_standby_refuses_promotion_by_name() {
         &["--standby".to_string(), active_process.addr.to_string()],
         DT,
     );
-    let active = MonitorClient::new(active_process.addr);
+    let _active = MonitorClient::new(active_process.addr);
     let standby = MonitorClient::new(standby_process.addr);
 
     // One scan, and the active is killed: the standby has never
@@ -743,7 +723,6 @@ fn a_command_through_the_transition_stays_receipted_and_attributed() {
     let dir = rig_dir("command");
     let (devices, model) = rig(&dir);
     let ai = attach(devices[&AI_DEVICE].addr, AI_POINTS);
-    let ao = attach(devices[&AO_DEVICE].addr, AO_POINTS);
     ai.write(SETPOINT, Value::Float(50.0)).unwrap();
     ai.write(LEVEL, Value::Float(7.0)).unwrap();
 

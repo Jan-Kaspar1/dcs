@@ -348,7 +348,7 @@ fn parse_cycle(value: &serde_json::Value, input_len: usize) -> Result<CycleRecor
 /// A hex byte string into the image bytes it spells.
 fn parse_image(text: &str, input_len: usize) -> Result<Vec<u8>, CaptureError> {
     let trimmed = text.strip_prefix("0x").unwrap_or(text);
-    if trimmed.len() % 2 != 0 {
+    if !trimmed.len().is_multiple_of(2) {
         return Err(CaptureError::Image(format!(
             "`{text}` has an odd number of hex digits"
         )));

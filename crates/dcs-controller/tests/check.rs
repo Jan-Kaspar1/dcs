@@ -279,3 +279,77 @@ fn check_without_a_model_file_is_a_usage_error() {
     let output = run(&["--check"]);
     assert_eq!(output.status.code(), Some(2));
 }
+
+/// The lane-owned per-run model variant's shape: the rig fixtures are
+/// byte-pinned emitted artifacts, so the QA lane derives a document
+/// from the one its run mounted rather than editing it — a channel of
+/// its own on a device the run already scans, one command-writable
+/// field `In` point bound to that channel, and one signal for it
+/// (`qa_lane/rig_model.py`). These two checks pin the model contract
+/// that shape depends on, so a derived document is known to assemble
+/// before a rig run ever mounts it: the writable field point rides a
+/// declared channel and is served like any other input, which is what
+/// makes a receipted write on it reach the driver — and a channel bound
+/// twice, the shape a derivation reusing a mounted channel would
+/// produce, is still refused by name.
+fn writable_field_document(duplicate_channel: bool) -> String {
+    let mut points = String::from(
+        r#"{"id": 300, "direction": "in", "value_type": "bool",
+             "channel": {"device": 1, "name": "p101-run"}}"#,
+    );
+    if duplicate_channel {
+        points.push_str(
+            r#", {"id": 301, "direction": "in", "value_type": "bool",
+                 "channel": {"device": 1, "name": "qa-writable-write-back"}}"#,
+        );
+    }
+    format!(
+        r#"{{
+  "version": 1,
+  "devices": [{{"id": 1, "kind": "sim-di", "channels": {{
+    "p101-run": {{"direction": "in", "value_type": "bool"}},
+    "qa-writable-write-back": {{"direction": "in", "value_type": "bool"}}}}}}],
+  "io_points": [{points},
+    {{"id": 400, "direction": "in", "value_type": "bool", "writable": true,
+     "channel": {{"device": 1, "name": "qa-writable-write-back"}}}}],
+  "signals": [{{"id": 10400, "name": "qa-writable-write-back", "source": 400,
+    "unit": "", "group": "qa-lane"}}],
+  "components": [],
+  "connections": []
+}}"#
+    )
+}
+
+#[test]
+fn check_assembles_a_channel_bound_writable_field_input_point() {
+    let path = std::env::temp_dir().join(format!("dcs-check-writable-{}.json", std::process::id()));
+    std::fs::write(&path, writable_field_document(false)).unwrap();
+    let output = run(&[path.to_str().unwrap(), "--check"]);
+    let _ = std::fs::remove_file(&path);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let stdout = stdout(&output);
+    // Both declared points are served: a writable field input is
+    // served like any other input, which is what lets a receipted write
+    // on it reach the driver and be read back in the same scan.
+    assert!(
+        stdout.contains("io_points: 2 declared, 2 served"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn check_refuses_a_channel_bound_twice() {
+    let path = std::env::temp_dir().join(format!(
+        "dcs-check-double-bound-{}.json",
+        std::process::id()
+    ));
+    std::fs::write(&path, writable_field_document(true)).unwrap();
+    let output = run(&[path.to_str().unwrap(), "--check"]);
+    let _ = std::fs::remove_file(&path);
+    assert!(!output.status.success());
+    let stderr = stderr(&output);
+    assert!(
+        stderr.contains("qa-writable-write-back") && stderr.contains("bound more than once"),
+        "{stderr}"
+    );
+}

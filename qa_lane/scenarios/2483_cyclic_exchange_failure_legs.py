@@ -68,27 +68,27 @@ RUNS_BEFORE = frozenset({'scenario_reclaim_convergence_gate'})
 # judge over planted negatives and reports
 # cyclic-exchange-legs-unchecked for any that slip through.
 
-SEAT = 'driven'                 # the born seat the leg launches
-CYCLIC_KIND = 'sim-cyclic'      # the device kind the exchange rides
+LEGS_SEAT = 'driven'                 # the born seat the leg launches
+LEGS_CYCLIC_KIND = 'sim-cyclic'      # the device kind the exchange rides
 STATION = '750-354'             # the coupler station the fixture declares
-DERIVED_STATION = rig_model.DERIVED_STATION
+LEGS_DERIVED_STATION = rig_model.DERIVED_STATION
 #: The rig's coupler-station input point — the point a station-attributed
 #: shortfall must leave fresh.
-COUPLER_INPUT = 1
+LEGS_COUPLER_INPUT = 1
 #: The declared `exchange_miss_threshold` in the rig's cyclic fixture.
-MISS_THRESHOLD = 3
+LEGS_MISS_THRESHOLD = 3
 
-SETTLE_BOUND = 90.0
-LEG_BOUND = 45.0
-SETTLE_POLL = 0.5
-LEG_POLL = 0.2
+LEGS_SETTLE_BOUND = 90.0
+LEGS_BOUND = 45.0
+LEGS_SETTLE_POLL = 0.5
+LEGS_POLL = 0.2
 
-CLAUSE = 'cyclic-exchange-legs-failed'
-NONDET = 'cyclic-exchange-legs-nondeterministic'
-UNCHECKED = 'cyclic-exchange-legs-unchecked'
+LEGS_CLAUSE = 'cyclic-exchange-legs-failed'
+LEGS_NONDET = 'cyclic-exchange-legs-nondeterministic'
+LEGS_UNCHECKED = 'cyclic-exchange-legs-unchecked'
 
 
-def _count(value):
+def _legs_count(value):
     """A served counter as an int, or None — a payload carrying no
     integer where the contract reads one is a shape the judge reports,
     never a comparison that silently passes."""
@@ -96,7 +96,7 @@ def _count(value):
         else None
 
 
-def _io(snapshot):
+def _legs_io(snapshot):
     """The io_health half this contract reads, normalized: the boundary
     counters, the transport's link verdict, the cyclic exchange
     counters including the working-counter mismatches and the missed
@@ -123,7 +123,7 @@ def _io(snapshot):
         'buses': buses if isinstance(buses, list) else None}
 
 
-def _point(snapshot, point):
+def _legs_point(snapshot, point):
     """One served point's sample — value, quality, reason, and the tick
     it was acquired at. None when the snapshot carries no sample for it,
     which the judge reports as an unread surface rather than as a good
@@ -145,7 +145,7 @@ def _point(snapshot, point):
     return None
 
 
-def _degraded(sample):
+def _legs_degraded(sample):
     """How one point's served quality reads: `good`, `bad`, or
     `unknown` for a shape this contract cannot read."""
     if not isinstance(sample, dict):
@@ -162,7 +162,7 @@ def _degraded(sample):
     return 'unknown'
 
 
-def _view(ctx, seat):
+def _legs_view(ctx, seat):
     """One normalized read of the seat's role and run tick, or None when
     the read dropped."""
     base = ctx.get(seat)
@@ -175,7 +175,7 @@ def _view(ctx, seat):
             'claim': report.get('field_claim')}
 
 
-def _pair(ctx, name):
+def _legs_pair(ctx, name):
     """The deployed pair's normalized role evidence for one member."""
     report = _try_role(ctx, ctx.get(name))
     if not isinstance(report, dict):
@@ -184,7 +184,7 @@ def _pair(ctx, name):
             'tracking': 'tracking' in (report.get('sync') or {})}
 
 
-def _pair_held(record):
+def _legs_pair_held(record):
     """The deployed pair's undisturbed verdict across the leg's own
     staging — the owner still active and advancing, the peer still a
     tracking standby, in every framing the record carries."""
@@ -201,14 +201,14 @@ def _pair_held(record):
         seen = view.get(peer) or {}
         if seen.get('role') != 'standby' or seen.get('tracking') is not True:
             return False
-        seen_tick = _count((view.get(owner) or {}).get('tick'))
+        seen_tick = _legs_count((view.get(owner) or {}).get('tick'))
         if seen_tick is None or (tick is not None and seen_tick <= tick):
             return False
         tick = seen_tick
     return tick is not None
 
 
-def _derive(ctx, document_path):
+def _legs_derive(ctx, document_path):
     """The lane-derived two-station cyclic document, written beside the
     run's evidence so the device server can mount it.
 
@@ -234,7 +234,7 @@ def _derive(ctx, document_path):
             'description': rig_model.describe(derivation)}
 
 
-def _stage(ctx):
+def _legs_stage(ctx):
     """Stage the lane's device server on the derived two-station cyclic
     document and prove the field is the one this contract is about: a
     `sim-cyclic` device whose station map carries at least two stations,
@@ -249,7 +249,7 @@ def _stage(ctx):
     cyclic = spec.get('cyclic_model')
     if not cyclic:
         return ("the run config's sim_bus_device block stages no "
-                'cyclic_model — the fixture declaring the ' + CYCLIC_KIND
+                'cyclic_model — the fixture declaring the ' + LEGS_CYCLIC_KIND
                 + ' device whose exchange consumes the scripted queue')
     src = Path(ctx.get('src_dir', ''))
     source = None
@@ -260,7 +260,7 @@ def _stage(ctx):
             break
     if source is None:
         return ('the revision tree carries no cyclic fixture at ' + cyclic)
-    derived = _derive(ctx, source)
+    derived = _legs_derive(ctx, source)
     if isinstance(derived, str):
         return derived
     field = ctx['start_sim_bus_device'](fixture=derived['path'])
@@ -272,7 +272,7 @@ def _stage(ctx):
     for declared in document.get('devices') or []:
         if declared.get('id') != spec.get('device'):
             continue
-        if declared.get('kind') != CYCLIC_KIND:
+        if declared.get('kind') != LEGS_CYCLIC_KIND:
             return ('the staged field serves device '
                     + str(spec.get('device')) + ' as '
                     + repr(declared.get('kind')) + ' — a point-wise '
@@ -281,15 +281,15 @@ def _stage(ctx):
         stations = ((declared.get('parameters') or {}).get('stations')
                     or {})
         if len(stations) < 2:
-            return ('the staged ' + CYCLIC_KIND + ' device declares '
+            return ('the staged ' + LEGS_CYCLIC_KIND + ' device declares '
                     + str(len(stations)) + ' station(s) — a '
                     'station-attributed shortfall on a single station is '
                     'indistinguishable from a whole-bus one')
-        if STATION not in stations or DERIVED_STATION not in stations:
+        if STATION not in stations or LEGS_DERIVED_STATION not in stations:
             return ('the staged device declares stations '
                     + json.dumps(sorted(stations))
                     + ' where this leg reads ' + STATION + ' and '
-                    + DERIVED_STATION)
+                    + LEGS_DERIVED_STATION)
         field['stations'] = sorted(stations)
         field['derived'] = derived['description']
         return field
@@ -297,36 +297,36 @@ def _stage(ctx):
             + str(spec.get('device')))
 
 
-def _settle(ctx):
+def _legs_settle(ctx):
     """Wait for the documented settle: the seat reporting `active` with
     its device claim held and exchange counters already moving. A seat
     that never exchanged has no scripted outcome to consume."""
-    deadline = time.monotonic() + SETTLE_BOUND
+    deadline = time.monotonic() + LEGS_SETTLE_BOUND
     view = wait_for(
         lambda: (lambda seen: seen if seen is not None
                  and seen.get('role') == 'active'
                  and seen.get('claim') == 'held' else None)(
-                     _view(ctx, SEAT)),
-        deadline, interval=SETTLE_POLL)
+                     _legs_view(ctx, LEGS_SEAT)),
+        deadline, interval=LEGS_SETTLE_POLL)
     if view is None:
         return ('the born seat never settled as the device\'s claim '
-                'holder: ' + json.dumps(_view(ctx, SEAT))[:200])
+                'holder: ' + json.dumps(_legs_view(ctx, LEGS_SEAT))[:200])
     settled = wait_for(
         lambda: (lambda seen: seen if seen is not None
-                 and _count(_io(seen).get('attempted')) is not None
-                 and _io(seen)['attempted'] >= MISS_THRESHOLD else None)(
-                     _try_snapshot(ctx, ctx[SEAT])),
-        deadline, interval=SETTLE_POLL)
+                 and _legs_count(_legs_io(seen).get('attempted')) is not None
+                 and _legs_io(seen)['attempted'] >= LEGS_MISS_THRESHOLD else None)(
+                     _try_snapshot(ctx, ctx[LEGS_SEAT])),
+        deadline, interval=LEGS_SETTLE_POLL)
     if settled is None:
         return ('the seat\'s io_health never reported '
-                + str(MISS_THRESHOLD) + ' exchanges — the scripted queue '
+                + str(LEGS_MISS_THRESHOLD) + ' exchanges — the scripted queue '
                 'has no scans to consume it on this rig')
-    return {'view': view, 'io': _io(settled),
-            'points': _points(settled),
-            'held': _point(settled, COUPLER_INPUT)}
+    return {'view': view, 'io': _legs_io(settled),
+            'points': _legs_points(settled),
+            'held': _legs_point(settled, LEGS_COUPLER_INPUT)}
 
 
-def _script(ctx, *outcomes):
+def _legs_script(ctx, *outcomes):
     """One shipped-control-tool invocation: the queued outcomes and the
     tool's own verdict — the documented `done` answer, or the nonzero
     exit and stderr the caller classifies as a refused tool call."""
@@ -344,7 +344,7 @@ def _script(ctx, *outcomes):
             'detail': str(getattr(result, 'stderr', '') or '').strip()[-200:]}
 
 
-def _registers(ctx):
+def _legs_registers(ctx):
     """The field's own served register bank through the shipped control
     tool — the scan's output image as the device actually holds it. A
     tool that answered nothing is a device no longer serving."""
@@ -360,7 +360,7 @@ def _registers(ctx):
             'exit': code, 'answer': answer[-400:]}
 
 
-def _window(ctx, key, floors, accept=None):
+def _legs_window(ctx, key, floors, accept=None):
     """Read the next window the leg waits for.
 
     `key` names the counter that must move; `floors` is the previous
@@ -373,40 +373,40 @@ def _window(ctx, key, floors, accept=None):
     `read` says whether the monitor answered at all inside the window,
     which separates a starved surface from a device that answered
     nothing."""
-    deadline = time.monotonic() + LEG_BOUND
+    deadline = time.monotonic() + LEGS_BOUND
     seen, points, answered = None, None, False
     while time.monotonic() < deadline:
-        snapshot = _try_snapshot(ctx, ctx[SEAT])
-        io = _io(snapshot)
+        snapshot = _try_snapshot(ctx, ctx[LEGS_SEAT])
+        io = _legs_io(snapshot)
         if io is not None:
             answered = True
-            count = _count(io.get(key))
-            before = _count((floors or {}).get(key))
+            count = _legs_count(io.get(key))
+            before = _legs_count((floors or {}).get(key))
             if count is not None and (before is None or count > before):
                 if accept is None or accept(io):
                     seen = io
-                    points = _points(snapshot)
+                    points = _legs_points(snapshot)
                     break
-        time.sleep(LEG_POLL)
+        time.sleep(LEGS_POLL)
     return {'io': seen, 'read': answered, 'points': points}
 
 
-def _delta(after, before, key):
+def _legs_delta(after, before, key):
     """`after[key] - before[key]` when both are readable counters, else
     None — a window the judge reports as an unread difference rather
     than as a zero drift."""
-    left, right = _count((after or {}).get(key)), _count((before or {}).get(key))
+    left, right = _legs_count((after or {}).get(key)), _legs_count((before or {}).get(key))
     if left is None or right is None:
         return None
     return left - right
 
 
-def _teardown(ctx):
+def _legs_teardown(ctx):
     """Best-effort teardown: the leg's seat and the device server."""
     lever = ctx.get('stop_born_controller')
     if lever is not None:
         try:
-            lever(SEAT)
+            lever(LEGS_SEAT)
         except Exception:
             pass
     try:
@@ -418,26 +418,26 @@ def _teardown(ctx):
     return None
 
 
-def _rig_state(ctx, device_error):
+def _legs_rig_state(ctx, device_error):
     """The rig's claim state after the sweep."""
     state = ctx.get('born_controller_state')
     present = None
     if state is not None:
         try:
-            present = (state(SEAT) or {}).get('absent')
+            present = (state(LEGS_SEAT) or {}).get('absent')
         except Exception:
             present = None
     return {'seat': present, 'device_error': device_error}
 
 
-def _judge(record, note):
+def _judge_legs(record, note):
     """Replay one pass's record — runnable against planted negatives in
     the self-check."""
     def failed(key, detail):
-        note(key, CLAUSE, detail)
+        note(key, LEGS_CLAUSE, detail)
 
     def nondet(key, detail):
-        note(key, NONDET, detail)
+        note(key, LEGS_NONDET, detail)
 
     if record.get('stage_error') is not None:
         nondet('stage', 'the device server, the launch, or a control-tool '
@@ -457,7 +457,7 @@ def _judge(record, note):
                'io_health read inside the aged window: '
                + json.dumps(ages)[:200])
     else:
-        if _delta(ages.get('io'), settled.get('io'), 'failed_exchanges') != 1:
+        if _legs_delta(ages.get('io'), settled.get('io'), 'failed_exchanges') != 1:
             failed('aged-count', 'the queued miss must count exactly one '
                    'failed exchange at the boundary, and the counters '
                    'read: ' + json.dumps({
@@ -465,7 +465,7 @@ def _judge(record, note):
                            'failed_exchanges'),
                        'aged': (ages.get('io') or {}).get(
                            'failed_exchanges')})[:300])
-        if _delta(ages.get('io'), settled.get('io'), 'attempted') != 1:
+        if _legs_delta(ages.get('io'), settled.get('io'), 'attempted') != 1:
             failed('aged-not-attempted', 'the scan must still attempt its '
                    'exchange across a missed cycle — a driver that '
                    'skipped the boundary is not ageing anything: '
@@ -482,11 +482,11 @@ def _judge(record, note):
                    'nothing — the field\'s register bank moved from '
                    + json.dumps(outputs.get('before'))[:200] + ' to '
                    + json.dumps(outputs.get('after'))[:200])
-        held = (ages.get('points') or {}).get(str(COUPLER_INPUT)) or {}
-        if _degraded(held) != 'good':
+        held = (ages.get('points') or {}).get(str(LEGS_COUPLER_INPUT)) or {}
+        if _legs_degraded(held) != 'good':
             failed('aged-hold', 'below the declared threshold the held '
                    'input image must still serve Good — the point reads '
-                   + _degraded(held) + ': ' + json.dumps(held)[:200])
+                   + _legs_degraded(held) + ': ' + json.dumps(held)[:200])
         elif held.get('tick') != (ages.get('before_point') or {}).get('tick'):
             failed('aged-restamped', 'the held sample must keep its own '
                    'acquisition stamp rather than being restamped by the '
@@ -502,7 +502,7 @@ def _judge(record, note):
     else:
         missed_total = record.get('missed_total')
         if missed_total is not None \
-                and _delta(escalated.get('io'), settled.get('io'),
+                and _legs_delta(escalated.get('io'), settled.get('io'),
                            'failed_exchanges') != missed_total:
             failed('escalation-count', 'every queued miss must count once '
                    'at the boundary — the leg queued '
@@ -518,10 +518,10 @@ def _judge(record, note):
                    'window: ' + json.dumps(escalated)[:200])
         else:
             degraded = sorted(name for name, sample in points.items()
-                              if _degraded(sample) != 'good')
+                              if _legs_degraded(sample) != 'good')
             if not degraded:
                 failed('no-escalation', 'past the declared '
-                       + str(MISS_THRESHOLD) + '-miss threshold every '
+                       + str(LEGS_MISS_THRESHOLD) + '-miss threshold every '
                        'field input must escalate — none did: '
                        + json.dumps(points, sort_keys=True)[:400])
             elif len(degraded) < len(points):
@@ -542,7 +542,7 @@ def _judge(record, note):
                'io_health read inside the shortfall window: '
                + json.dumps(attributed)[:200])
     else:
-        if _delta(attributed.get('io'), escalated.get('io'),
+        if _legs_delta(attributed.get('io'), escalated.get('io'),
                   'working_counter_mismatches') != 1:
             failed('attribution-count', 'a completed-but-short exchange '
                    'must count exactly one working-counter mismatch — the '
@@ -552,7 +552,7 @@ def _judge(record, note):
                        'attributed': (attributed.get('io') or {}).get(
                            'working_counter_mismatches')})[:300])
         points = attributed.get('points') or {}
-        coupler = points.get(str(COUPLER_INPUT))
+        coupler = points.get(str(LEGS_COUPLER_INPUT))
         derived = points.get(str(record.get('derived_point')))
         if coupler is None or derived is None:
             nondet('attribution-points-unreadable',
@@ -560,15 +560,15 @@ def _judge(record, note):
                    'coupler station\'s point and the derived station\'s: '
                    + json.dumps(sorted(points)))
         else:
-            if _degraded(derived) == 'good':
+            if _legs_degraded(derived) == 'good':
                 failed('station-not-degraded', 'the shortfall named the '
                        'derived station, so its point must degrade — it '
                        'reads Good: ' + json.dumps(points)[:300])
-            if _degraded(coupler) != 'good':
+            if _legs_degraded(coupler) != 'good':
                 failed('station-misattributed', 'the shortfall must '
                        'degrade only the station it names — the coupler '
                        'station\'s point reads '
-                       + _degraded(coupler) + ': '
+                       + _legs_degraded(coupler) + ': '
                        + json.dumps(points)[:300])
 
     # Leg 4 — recovery re-enters on the exchange boundary alone, and the
@@ -585,8 +585,8 @@ def _judge(record, note):
         if io.get('consecutive_failures') != 0:
             failed('streak-not-cleared', 'a clean exchange resets the '
                    'boundary\'s failure streak: ' + json.dumps(io)[:300])
-        gaps = _delta(io, settled.get('io'), 'attempted')
-        shortfalls = _delta(io, settled.get('io'), 'succeeded')
+        gaps = _legs_delta(io, settled.get('io'), 'attempted')
+        shortfalls = _legs_delta(io, settled.get('io'), 'succeeded')
         if gaps is None or shortfalls is None:
             nondet('recovery-counts-unreadable',
                    'the exchange counters the recovery window compares '
@@ -598,7 +598,7 @@ def _judge(record, note):
                    'against ' + str(record.get('missed_total'))
                    + ' misses: ' + json.dumps({'attempted': gaps,
                                                'succeeded': shortfalls})[:300])
-        if _delta(io, attributed.get('io'),
+        if _legs_delta(io, attributed.get('io'),
                   'working_counter_mismatches') != 0:
             failed('mismatch-accumulated', 'the clean exchange must clear '
                    'the station attribution, not accumulate another '
@@ -609,7 +609,7 @@ def _judge(record, note):
                            'working_counter_mismatches')})[:300])
         points = recovered.get('points') or {}
         stale = sorted(name for name, sample in points.items()
-                       if _degraded(sample) != 'good')
+                       if _legs_degraded(sample) != 'good')
         if stale:
             failed('recovery-degraded', 'every field input must serve '
                    'Good again after the recovery, but '
@@ -621,7 +621,7 @@ def _judge(record, note):
                'served read after the recovery — the field the contract '
                'asks to still be serving cannot be reached: '
                + json.dumps(record.get('device'), sort_keys=True)[:300])
-    if not _pair_held(record):
+    if not _legs_pair_held(record):
         nondet('pair-disturbed', 'the deployed pair moved or wedged across '
                "the leg's own field staging: "
                + json.dumps(record.get('roles'), sort_keys=True)[:300])
@@ -633,7 +633,7 @@ def _judge(record, note):
                + json.dumps(rig, sort_keys=True)[:300])
 
 
-def _digest(record, violations):
+def _legs_digest(record, violations):
     """The pass's normalized verdict record — identical digests across
     two consecutive passes is the determinism contract."""
     def clean(*keys):
@@ -670,7 +670,7 @@ def _digest(record, violations):
         'rig': 'restored' if clean('rig-not-restored') else 'dirty'}
 
 
-def _points(snapshot):
+def _legs_points(snapshot):
     """Every field input's served sample out of one snapshot, keyed by
     point id — the per-point half each leg reads."""
     if not isinstance(snapshot, dict):
@@ -679,13 +679,13 @@ def _points(snapshot):
     for entry in snapshot.get('points') or []:
         if not isinstance(entry, dict):
             continue
-        sample = _point(snapshot, entry.get('point'))
+        sample = _legs_point(snapshot, entry.get('point'))
         if sample is not None:
             out[str(entry.get('point'))] = sample
     return out
 
 
-def _pass(ctx, number, launch):
+def _legs_pass(ctx, number, launch):
     """One pass over the four legs: stage the two-station cyclic field,
     launch one born-active controller onto the staged document, let it
     settle, then queue one miss and read the aged-but-not-aborted
@@ -696,10 +696,10 @@ def _pass(ctx, number, launch):
               'settled': {}, 'aged': {}, 'escalated': {},
               'attributed': {}, 'recovered': {}}
     record['roles']['before'] = {
-        name: _pair(ctx, name) for name in (launch['owner'], launch['peer'])}
+        name: _legs_pair(ctx, name) for name in (launch['owner'], launch['peer'])}
     try:
         try:
-            field = _stage(ctx)
+            field = _legs_stage(ctx)
         except Exception as exc:
             record['stage_error'] = ('the field never staged: '
                                      + str(exc)[:250])
@@ -710,7 +710,7 @@ def _pass(ctx, number, launch):
         record['field'] = dict(field)
         try:
             record['launch'] = ctx['start_born_controller'](
-                SEAT, None, document=field['model'])
+                LEGS_SEAT, None, document=field['model'])
         except Exception as exc:
             record['stage_error'] = ('the controller launch never ran: '
                                      + str(exc)[:250])
@@ -720,19 +720,19 @@ def _pass(ctx, number, launch):
         record['field']['mounted'] = (record['launch'] or {}).get('model')
         record['derived_point'] = (field.get('derived') or {}).get(
             'station_point')
-        settled = _settle(ctx)
+        settled = _legs_settle(ctx)
         if isinstance(settled, str):
             record['inconclusive'] = settled
             return record
         record['settled'] = settled
 
         # Leg 1 — one miss, aged not aborted.
-        record['script_miss'] = _script(ctx, 'miss')
+        record['script_miss'] = _legs_script(ctx, 'miss')
         if record['script_miss'].get('ok') is not True:
             return record
-        before_registers = _registers(ctx)
-        after_registers = _registers(ctx)
-        aged = _window(ctx, 'failed_exchanges', settled.get('io'))
+        before_registers = _legs_registers(ctx)
+        after_registers = _legs_registers(ctx)
+        aged = _legs_window(ctx, 'failed_exchanges', settled.get('io'))
         # The pre-queue sample is the settle's own: the exchange the
         # miss replaced is the one that latched it.
         aged['before_point'] = settled.get('held')
@@ -745,42 +745,42 @@ def _pass(ctx, number, launch):
                 'answer')}
 
         # Leg 2 — two more misses, reaching the declared threshold.
-        record['script_escalate'] = _script(ctx, 'miss', 'miss')
+        record['script_escalate'] = _legs_script(ctx, 'miss', 'miss')
         if record['script_escalate'].get('ok') is not True:
             return record
-        record['missed_total'] = MISS_THRESHOLD
-        escalated = _window(
+        record['missed_total'] = LEGS_MISS_THRESHOLD
+        escalated = _legs_window(
             ctx, 'failed_exchanges', aged.get('io'),
             accept=lambda io: io.get('link') == 'disconnected')
         record['escalated'] = escalated
 
         # Leg 3 — a station-attributed shortfall on the derived station.
-        record['script_short'] = _script(
-            ctx, 'short-station:' + DERIVED_STATION)
+        record['script_short'] = _legs_script(
+            ctx, 'short-station:' + LEGS_DERIVED_STATION)
         if record['script_short'].get('ok') is not True:
             return record
-        attributed = _window(ctx, 'working_counter_mismatches',
+        attributed = _legs_window(ctx, 'working_counter_mismatches',
                              escalated.get('io'),
                              accept=lambda io: io.get('link') == 'connected')
         record['attributed'] = attributed
 
         # Leg 4 — the clean exchange that re-enters.
-        record['script_complete'] = _script(ctx, 'complete')
+        record['script_complete'] = _legs_script(ctx, 'complete')
         if record['script_complete'].get('ok') is not True:
             return record
-        recovered = _window(ctx, 'succeeded', attributed.get('io'),
+        recovered = _legs_window(ctx, 'succeeded', attributed.get('io'),
                             accept=lambda io: io.get('link') == 'connected'
                             and io.get('consecutive_failures') == 0)
         record['recovered'] = recovered
-        record['device'] = _registers(ctx)
+        record['device'] = _legs_registers(ctx)
         return record
     finally:
         record['roles']['after'] = {
-            name: _pair(ctx, name) for name in (launch['owner'],
+            name: _legs_pair(ctx, name) for name in (launch['owner'],
                                                 launch['peer'])}
 
 
-def _self_check():
+def _legs_self_check():
     """The unchecked-diagnostic guard: replay the judge over planted
     negatives and report each that slipped."""
     def io(attempted, succeeded, failed, mismatches=0, link='connected',
@@ -807,10 +807,10 @@ def _self_check():
             'pass': 1,
             'launch_roles': {'owner': 'active', 'peer': 'standby'},
             'field': {'device': 1, 'port': 9005, 'stations': [STATION,
-                                                               DERIVED_STATION],
+                                                               LEGS_DERIVED_STATION],
                       'derived': {'station_point': derived}},
             'derived_point': derived,
-            'missed_total': MISS_THRESHOLD,
+            'missed_total': LEGS_MISS_THRESHOLD,
             'settled': {'view': {'role': 'active', 'tick': 40,
                                  'claim': 'held'},
                         'io': io(40, 40, 0),
@@ -861,7 +861,7 @@ def _self_check():
 
     def audit(record):
         found = {}
-        _judge(record, lambda key, diagnostic, detail:
+        _judge_legs(record, lambda key, diagnostic, detail:
                found.setdefault(key, diagnostic))
         return found
 
@@ -869,7 +869,7 @@ def _self_check():
     if audit(clean_record()):
         slipped.append('clean-overstrict')
 
-    def expect(name, mutate, diagnostic=CLAUSE):
+    def expect(name, mutate, diagnostic=LEGS_CLAUSE):
         record = clean_record()
         mutate(record)
         if diagnostic not in audit(record).values():
@@ -912,33 +912,33 @@ def _self_check():
     expect('recovery-left-points-degraded',
            lambda r: r['recovered']['points'].update({'1': bad(45)}))
     expect('aged-window-unreadable',
-           lambda r: r['aged'].update(read=False, io=None), NONDET)
+           lambda r: r['aged'].update(read=False, io=None), LEGS_NONDET)
     expect('escalation-window-unreadable',
-           lambda r: r['escalated'].update(read=False, io=None), NONDET)
+           lambda r: r['escalated'].update(read=False, io=None), LEGS_NONDET)
     expect('attribution-window-unreadable',
-           lambda r: r['attributed'].update(read=False, io=None), NONDET)
+           lambda r: r['attributed'].update(read=False, io=None), LEGS_NONDET)
     expect('recovery-window-unreadable',
-           lambda r: r['recovered'].update(read=False, io=None), NONDET)
+           lambda r: r['recovered'].update(read=False, io=None), LEGS_NONDET)
     expect('outputs-unreadable',
-           lambda r: r['aged_outputs'].update(read=False), NONDET)
+           lambda r: r['aged_outputs'].update(read=False), LEGS_NONDET)
     expect('device-stopped-serving',
-           lambda r: r['device'].update(read=False), NONDET)
+           lambda r: r['device'].update(read=False), LEGS_NONDET)
     expect('attribution-points-unreadable',
-           lambda r: r['attributed'].update(points={}), NONDET)
+           lambda r: r['attributed'].update(points={}), LEGS_NONDET)
     expect('pair-owner-moved',
            lambda r: r['roles']['after']['active'].update(role='standby'),
-           NONDET)
+           LEGS_NONDET)
     expect('pair-peer-lost-tracking',
            lambda r: r['roles']['final']['standby'].update(tracking=False),
-           NONDET)
+           LEGS_NONDET)
     expect('pair-scan-wedged',
-           lambda r: r['roles']['after']['active'].update(tick=900), NONDET)
+           lambda r: r['roles']['after']['active'].update(tick=900), LEGS_NONDET)
     expect('rig-left-standing',
-           lambda r: r['rig'].update(seat=False), NONDET)
+           lambda r: r['rig'].update(seat=False), LEGS_NONDET)
     expect('rig-presence-unreadable',
-           lambda r: r['rig'].update(seat=None), NONDET)
+           lambda r: r['rig'].update(seat=None), LEGS_NONDET)
     expect('stage-failed',
-           lambda r: r.update(stage_error='docker run failed'), NONDET)
+           lambda r: r.update(stage_error='docker run failed'), LEGS_NONDET)
     return slipped
 
 
@@ -1001,17 +1001,17 @@ def scenario_cyclic_exchange_failure_legs(ctx):
                 violations.setdefault(key, (diagnostic, detail))
 
             launch = {'owner': owner, 'peer': peer}
-            record = _pass(ctx, number, launch)
-            device_error = _teardown(ctx)
-            record['rig'] = _rig_state(ctx, device_error)
+            record = _legs_pass(ctx, number, launch)
+            device_error = _legs_teardown(ctx)
+            record['rig'] = _legs_rig_state(ctx, device_error)
             record['roles']['final'] = {
-                name: _pair(ctx, name) for name in (owner, peer)}
+                name: _legs_pair(ctx, name) for name in (owner, peer)}
             if not record.get('inconclusive'):
                 # A staging failure is judged too: the judge reports it
                 # under the instability diagnostic rather than leaving a
                 # pass with no verdict behind it.
-                _judge(record, note)
-                digest = _digest(record, violations)
+                _judge_legs(record, note)
+                digest = _legs_digest(record, violations)
                 record['digest'] = dict(digest)
             else:
                 digest = None
@@ -1035,9 +1035,9 @@ def scenario_cyclic_exchange_failure_legs(ctx):
             if record.get('inconclusive'):
                 return case.finish('inconclusive', record['inconclusive'])
             if violations:
-                name = CLAUSE if any(
-                    diagnostic == CLAUSE
-                    for diagnostic, _ in violations.values()) else NONDET
+                name = LEGS_CLAUSE if any(
+                    diagnostic == LEGS_CLAUSE
+                    for diagnostic, _ in violations.values()) else LEGS_NONDET
                 return case.finish(
                     'failed', name + ': ' + '; '.join(
                         detail for _, detail
@@ -1045,14 +1045,14 @@ def scenario_cyclic_exchange_failure_legs(ctx):
             digests.append(digest)
         if digests[0] != digests[1]:
             return case.finish(
-                'failed', NONDET + ': the two passes\' digests diverged: '
+                'failed', LEGS_NONDET + ': the two passes\' digests diverged: '
                 + json.dumps(digests[0], sort_keys=True) + ' vs '
                 + json.dumps(digests[1], sort_keys=True))
         case.observe('two cyclic-exchange failure-legs passes, identical '
                      'digests: ' + json.dumps(digests[0], sort_keys=True))
-        slipped = _self_check()
+        slipped = _legs_self_check()
         if slipped:
-            return case.finish('failed', UNCHECKED + ': planted negatives '
+            return case.finish('failed', LEGS_UNCHECKED + ': planted negatives '
                                'slipped the leg’s own audits: '
                                + ', '.join(slipped))
         return case.finish('passed')

@@ -502,10 +502,10 @@ class CyclicExchangeLegsTests(unittest.TestCase):
         feed = feed or self.feed
         ctx = ctx or self._ctx(feed)
         with patch.object(scenarios, 'http_json', feed.http_json), \
-                patch.object(scenarios, 'SETTLE_BOUND', 1.0), \
-                patch.object(scenarios, 'LEG_BOUND', 1.0), \
-                patch.object(scenarios, 'SETTLE_POLL', 0.001), \
-                patch.object(scenarios, 'LEG_POLL', 0.001):
+                patch.object(scenarios, 'LEGS_SETTLE_BOUND', 1.0), \
+                patch.object(scenarios, 'LEGS_BOUND', 1.0), \
+                patch.object(scenarios, 'LEGS_SETTLE_POLL', 0.001), \
+                patch.object(scenarios, 'LEGS_POLL', 0.001):
             return scenarios.scenario_cyclic_exchange_failure_legs(ctx)
 
     def _pass(self, number):
@@ -752,11 +752,11 @@ class CyclicExchangeLegsTests(unittest.TestCase):
         self.assertIn(record['outcome'], ('failed', 'inconclusive'))
 
     def test_an_unchecked_self_check_fails(self):
-        with patch.object(scenarios, '_self_check',
+        with patch.object(scenarios, '_legs_self_check',
                           lambda: ['planted-negative']):
             record = self.run_scenario()
         self.assertEqual(record['outcome'], 'failed', record)
         self.assertIn('cyclic-exchange-legs-unchecked', record['detail'])
 
     def test_self_check_is_complete(self):
-        self.assertEqual(scenarios._self_check(), [])
+        self.assertEqual(scenarios._legs_self_check(), [])

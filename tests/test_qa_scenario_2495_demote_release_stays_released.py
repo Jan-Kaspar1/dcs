@@ -331,8 +331,11 @@ class DemoteReleaseTests(unittest.TestCase):
 
     def test_registered(self):
         order = list(scenarios.SCENARIOS)
-        self.assertEqual(
-            order.index(scenarios.scenario_claim_skew_bound) + 1,
+        # The skew leg runs before this one — the schedule leaves room
+        # between legs for others, so the pin is the ordering the leg
+        # declares rather than adjacency.
+        self.assertLess(
+            order.index(scenarios.scenario_claim_skew_bound),
             order.index(scenarios.scenario_demote_release_stays_released))
         self.assertIs(
             verify.case_function('demote-release-stays-released'),

@@ -95,8 +95,8 @@ fn an_unbound_hardware_bus_is_a_named_startup_failure() {
     assert!(message.contains("ecat0"), "{message}");
     assert!(message.contains("--bus"), "{message}");
     assert!(
-        !output.stdout.is_empty() == false,
-        "the failed startup served no snapshot: {}",
+        output.stdout.is_empty(),
+        "the failed startup served telemetry as healthy before failing: {}",
         String::from_utf8_lossy(&output.stdout)
     );
 }
@@ -213,8 +213,7 @@ fn the_paced_hardware_run_serves_the_identity_and_health_surface() {
     // section — through the decision-22 diagnostics surface, not a
     // separate hardware-only endpoint.
     let capture = scratch("identity");
-    let mut controller =
-        spawn_controller_paced(Path::new(RIG), &recorded(&capture), 20, "127.0.0.1:0");
+    let controller = spawn_controller_paced(Path::new(RIG), &recorded(&capture), 20, "127.0.0.1:0");
     let client = dcs_monitor::MonitorClient::new(controller.addr);
     let mut health = None;
     for _ in 0..200 {
@@ -231,7 +230,7 @@ fn the_paced_hardware_run_serves_the_identity_and_health_surface() {
     // recorded one — reported absent rather than invented.
     let build = health.build.expect("the run reports its build identity");
     assert_eq!(build.version, env!("CARGO_PKG_VERSION"));
-    assert!(!build.git_sha.as_deref().unwrap_or_default().is_empty() || true);
+    assert!(build.git_sha.as_deref().is_none_or(|sha| !sha.is_empty()));
     let fingerprint = build
         .model_fingerprint
         .expect("the run reports the model it loaded");

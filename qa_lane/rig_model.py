@@ -60,6 +60,30 @@ DERIVED_STATION = '750-354-b'
 #: original station's stay fresh.
 EXTRA_CYCLIC_CHANNEL = 'di3'
 
+#: The prefix a derived writable-field channel carries, so a channel the
+#: lane added is recognizable in a report, in a device server's own
+#: channel map, and in the field-side read the leg audits.
+DERIVED_CHANNEL = 'qa-writable'
+
+
+def _derived_channel(device_id, channels, bound, requested):
+    """A free channel name on `device_id` for the derived writable field
+    point to bind — one no channel declaration and no bound point
+    already carries.
+
+    A driver binds each of its channels at most once, so a derived
+    point can never ride a channel the mounted model already binds:
+    the requested name is only a hint about the device to ride, never
+    the name to write.
+    """
+    stem = DERIVED_CHANNEL + '-' + str(requested)
+    candidate = stem
+    suffix = 1
+    while candidate in channels or (device_id, candidate) in bound:
+        suffix += 1
+        candidate = stem + '-' + str(suffix)
+    return candidate
+
 
 class RigModelError(ValueError):
     """A derivation the lane cannot make from the mounted fixture — the
@@ -191,13 +215,15 @@ def writable_field_point(document, device_id, channel, point_id=None,
     """The mounted document plus one channel-bound writable `In` point.
 
     `device_id`/`channel` name an input channel. When the mounted model
-    declares that channel and nothing binds it, the derivation binds
-    it as it stands. When it is already bound — the pinned fixtures bind
-    every channel their devices declare — the derivation **adds** the
-    channel to the same device instead, so the added point rides the
-    driver the pair already scans rather than a device of its own. A
-    driver rejects a channel bound twice, so a derived point cannot
-    share one.
+    declares that channel and nothing binds it, the derivation binds it
+    as it stands. When the named channel is already bound — the pinned
+    fixtures bind every channel their devices declare, so this is the
+    common case — or is not declared at all, the derivation adds a
+    channel **of its own name** to the same device and binds that, so
+    the added point rides the driver the pair already scans rather than
+    a device of its own. A driver binds each channel at most once, so a
+    derived point can never share one; the derived name is reported back
+    as `channel` with the requested one as `requested_channel`.
 
     The added point is `In`-only: a writable `Out` point has no field
     side to observe a driver write on, and the model's contract writes
@@ -206,6 +232,7 @@ def writable_field_point(document, device_id, channel, point_id=None,
     _require(document)
     device = _device(document, device_id)
     channels = device.get('channels') or {}
+    requested = channel
     bound = set()
     for point in document['io_points']:
         if not isinstance(point, dict):
@@ -224,6 +251,7 @@ def writable_field_point(document, device_id, channel, point_id=None,
                                 'write is observable on')
         value_type = declared.get('value_type')
         if (device_id, channel) in bound:
+            channel = _derived_channel(device_id, channels, bound, channel)
             added_channel = True
     elif channel in channels:
         raise RigModelError('the mounted channel ' + repr(channel)
@@ -233,6 +261,7 @@ def writable_field_point(document, device_id, channel, point_id=None,
         # same value kind the device already carries so the derived
         # document adds nothing the device's own kind does not accept.
         value_type = _input_channel_kind(device)
+        channel = _derived_channel(device_id, channels, bound, channel)
         added_channel = True
     if value_type not in revision._VALUE_KINDS:
         raise RigModelError('the mounted channel ' + repr(channel)
@@ -244,7 +273,11 @@ def writable_field_point(document, device_id, channel, point_id=None,
         raise RigModelError('the derived writable field point id '
                             + str(pid) + ' collides with the mounted model')
     sid = signal_id if signal_id is not None else _max_id(document['signals']) + 1
-    signal_name = name or ('qa-writable-' + str(channel))
+    if sid in {signal.get('id') for signal in document['signals']
+               if isinstance(signal, dict)}:
+        raise RigModelError('the derived signal id ' + str(sid)
+                            + ' collides with the mounted model')
+    signal_name = name or (DERIVED_CHANNEL + '-' + str(requested))
     names = {signal.get('name') for signal in document['signals']
              if isinstance(signal, dict)}
     if signal_name in names:
@@ -268,7 +301,9 @@ def writable_field_point(document, device_id, channel, point_id=None,
         'group': 'qa-lane'})
     _finish(derived)
     return {'document': derived, 'point': pid, 'signal': sid,
-            'name': signal_name, 'channel': channel, 'device': device_id,
+            'name': signal_name, 'channel': channel,
+            'requested_channel': requested,
+            'device': device_id,
             'value_type': value_type, 'added_channel': added_channel}
 
 
