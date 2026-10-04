@@ -1678,6 +1678,20 @@ Implementation order: second, after [daily architecture review](daily-architectu
   actuation, and after which the survivor's next same-tick comparison
   clears it to `tracking` in place with a journaled
   `divergence_resolved`. The pair's launch roles restore either way.
+  The gate is graded on *every* peer while the interposer's claim
+  still stands — the reproduction's "every promote refused" clause:
+  the convergence gate answers a `diverged` peer with
+  `not_converged` carrying the report it declined on, and the field's
+  own arbitration answers a peer whose verdict is promotable but whose
+  conditional orphan claim a live foreign claim refuses (decision 91).
+  Neither hands the field off and neither has an override. Nothing is
+  posted after the release: a free field is the state the remedy
+  needs, and a promotable survivor would take it through the ordinary
+  promote — decision 94's own recorded lighter recovery boundary —
+  instead of the relaunch being graded. The wedge's duration and the
+  field state across it land in the leg's evidence beside the served
+  verdicts, the measure the finding's reproduction reported as minutes
+  of frozen un-commanded actuation.
 - Named diagnostics: `standby-divergence-failed` /
   `-nondeterministic`, `divergence-resolution-failed` /
   `-nondeterministic`, `wedge-recovery-failed` /

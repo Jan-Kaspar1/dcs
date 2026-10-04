@@ -53,6 +53,23 @@ RUNS_BEFORE = frozenset({'scenario_claim_reclaim'})
 #   census before and after and requires the declared image to
 #   overwrite it.
 #
+# The gate is graded on *every* peer while the interposer's claim
+# still stands, the reproduction's "every promote refused" clause: the
+# convergence gate answers a `diverged` peer with `not_converged`
+# carrying the report it declined on, and the field's own arbitration
+# answers a peer whose verdict is promotable but whose conditional
+# orphan claim a live foreign claim refuses (decision 91). Neither
+# hands the field off and neither has an override. No promotion is
+# posted after the release: an unclaimed field is exactly the state
+# decision 94's remedy needs, and a promotable survivor would take it
+# through the ordinary promote — the lighter recovery decision 94
+# records as the boundary — instead of the relaunch being graded.
+#
+# The wedge's own duration and the field state across it are captured
+# as evidence — the finding recorded a wedge standing for minutes
+# before the operator's repair, so the leg measures how long the field
+# held the un-commanded value and records both values beside it.
+#
 # Named diagnostics: wedge-recovery-failed tags the contract clauses,
 # wedge-recovery-nondeterministic the instability the contract does
 # not answer for; two consecutive passes must produce identical
@@ -92,6 +109,28 @@ def _mismatches(report):
     sync = (report or {}).get('sync')
     if isinstance(sync, dict) and isinstance(sync.get('diverged'), dict):
         return sync['diverged'].get('mismatches')
+    return None
+
+
+def _gate_verdict(refused):
+    """The named gate verdict a promote refusal carries, or None when
+    the answer names something else: the convergence gate's
+    `not_converged` on a peer carrying no promotable evidence, and the
+    field's own arbitration's `field_claim_failed` on a peer whose
+    verdict *is* promotable but whose conditional grant a live foreign
+    claim refuses. Both refuse without handing the field off, and
+    neither carries an override."""
+    if not isinstance(refused, dict):
+        return None
+    return next((name for name in ('not_converged', 'field_claim_failed')
+                 if name in refused), None)
+
+
+def _refusal_sync(refused):
+    """The sync report a `not_converged` refusal carries."""
+    if isinstance(refused, dict) \
+            and isinstance(refused.get('not_converged'), dict):
+        return refused['not_converged'].get('sync')
     return None
 
 
@@ -233,17 +272,19 @@ def scenario_diverged_field_recovery(ctx):
                 'with its field_claim_lost journaled naming the '
                 'interposer, the survivor serves a named un-converged '
                 'verdict — naming the skewed point with both sides\' '
-                'values wherever it reads diverged — and refuses '
-                'POST /promote not_converged, the served report carries '
-                'field_claim unclaimed with the pair-health view '
-                'naming the field_unclaimed fault while the skewed '
-                'point still stores the un-commanded value; the '
-                'recorded remedy then relaunches the wedged field '
-                'owner as a fresh active whose conditional startup '
-                'grant takes the free field, its declared image '
-                'overwrites the un-commanded value, exactly one peer '
-                'reports active, and the survivor reconverges to '
-                'tracking in place before the launch roles restore')
+                'values wherever it reads diverged — and while the '
+                'interposer\'s claim fences the field every peer\'s '
+                'POST /promote is refused by name with no field handed '
+                'off, the served report carries field_claim unclaimed '
+                'with the pair-health view naming the field_unclaimed '
+                'fault while the skewed point still stores the '
+                'un-commanded value; the recorded remedy then '
+                'relaunches the wedged field owner as a fresh active '
+                'whose conditional startup grant takes the free field, '
+                'its declared image overwrites the un-commanded value, '
+                'exactly one peer reports active, and the survivor '
+                'reconverges to tracking in place before the launch '
+                'roles restore')
     stream = None
     restore_point = None
     restore_value = None
@@ -324,6 +365,9 @@ def scenario_diverged_field_recovery(ctx):
                 'wedge-recovery-failed: the interposer\'s write left '
                 'point ' + str(point) + ' at ' + json.dumps(landed)
                 + ' — the field never held the un-commanded value')
+        # The wedge's clock: from the un-commanded actuation standing
+        # to the remedy's reconvergence — the finding's wedge duration.
+        wedged_at = time.monotonic()
         case.observe('the interposer preempted the field and wrote '
                      'point ' + str(point) + ' = '
                      + json.dumps(injected) + ' off the staged '
@@ -411,6 +455,57 @@ def scenario_diverged_field_recovery(ctx):
         case.observe('the survivor reported ' + verdict
                      + ' at tick ' + str(served[survivor].get('tick')))
 
+        # The wedge's un-commanded actuation is still standing and the
+        # interposer's claim still fences the field: every peer's
+        # promotion is refused by name — the reproduction's "every
+        # promote refused" clause — and nothing hands the field off.
+        # Which named gate answers depends on the verdict that peer
+        # serves: the convergence gate on a `diverged` peer, carrying
+        # the report it declined on, and the field's own arbitration on
+        # a peer whose verdict is promotable but whose conditional
+        # grant a live foreign claim refuses (decision 91). Neither
+        # has an override.
+        refusals = {}
+        for name in (survivor, owner):
+            status, refused = _settle_call(ctx[name] + '/promote')
+            named = _gate_verdict(refused)
+            if status != 409 or named is None:
+                return case.finish(
+                    'failed',
+                    'wedge-recovery-failed: POST /promote on ' + name
+                    + ' answered ' + str(status) + ' '
+                    + json.dumps(refused)[:300] + ' — the wedge must '
+                    'refuse every promotion by name (not_converged or '
+                    'field_claim_failed), never admit')
+            if named == 'not_converged' \
+                    and _mismatches({'sync': _refusal_sync(refused)}) \
+                    != mismatches:
+                return case.finish(
+                    'failed',
+                    'wedge-recovery-failed: the not_converged refusal on '
+                    + name + ' carries '
+                    + json.dumps(_refusal_sync(refused))[:300]
+                    + ' — the answer must carry the report it declined on')
+            refusals[name] = [status, named]
+        after = {name: _try_role(ctx, ctx[name]) for name in (survivor,
+                                                              owner)}
+        if _pair_active(ctx) is not None \
+                or any(report is None or report.get('role') != 'standby'
+                       for report in after.values()):
+            return case.finish(
+                'failed',
+                'wedge-recovery-failed: the refused promotions moved the '
+                'pair — the gate must hand off no field: '
+                + json.dumps(after, default=str)[:300])
+        ref = save_evidence(ctx['evidence_dir'],
+                            'wedge-recovery-refusals.json',
+                            {'verdict': verdict, 'mismatches': mismatches,
+                             'promotes': refusals, 'after': after})
+        case.evidence('file', ref, 'every peer\'s refused promotion and '
+                      'the pair those refusals left standing by')
+        case.observe('the wedge refused every promotion: '
+                     + json.dumps(refusals))
+
         # --- the recorded remedy's first half: remove the wedged ----
         # field owner. Decision 97's fencing-loss reclaim would take a
         # free field back on its next scan, so the unclaimed-field
@@ -456,31 +551,16 @@ def scenario_diverged_field_recovery(ctx):
                 + json.dumps(stored) + ' on point ' + str(point)
                 + ' — the un-commanded actuation must still stand at '
                 + json.dumps(injected))
-        # The promotion gate, graded on the verdict the contract serves:
-        # a `diverged` peer is refused `not_converged` with the report
-        # attached, and no override admits it.
-        status = None
-        refused = None
-        if verdict == 'diverged':
-            status, refused = _settle_call(ctx[survivor] + '/promote')
-            if status != 409 or not (isinstance(refused, dict)
-                                     and 'not_converged' in refused):
-                return case.finish(
-                    'failed',
-                    'wedge-recovery-failed: POST /promote on the diverged '
-                    'survivor answered ' + str(status) + ' '
-                    + json.dumps(refused)[:300] + ' — the gate must '
-                    'refuse with the named not_converged verdict and '
-                    'carry no override')
         ref = save_evidence(ctx['evidence_dir'],
                             'wedge-recovery-unclaimed.json',
                             {'verdict': verdict, 'report': wedged,
                              'faults': faults, 'actives': actives,
                              'probe': probe, 'stored': stored,
-                             'promote': [status, refused]})
+                             'refused_promotes': refusals})
         case.evidence('file', ref, 'the unclaimed field surface — the '
                       'served claim, the pair-health fault, the '
-                      'fail-closed probe, and the stored value')
+                      'fail-closed probe, the stored value, and the '
+                      'promotions already refused')
         case.observe('the released field is unclaimed and un-commanded '
                      'on point ' + str(point) + ' ('
                      + json.dumps(stored) + '), the pair view naming '
@@ -541,15 +621,27 @@ def scenario_diverged_field_recovery(ctx):
                 'recovery must heal the pair in place')
         resolutions = _journal_events(ctx[survivor], 'divergence_resolved')
         detections = _journal_events(ctx[survivor], 'divergence_detected')
+        # The wedge's evidence: how long the field stood unclaimed and
+        # un-commanded, and the actuation value it held across it.
+        wedge_seconds = round(time.monotonic() - wedged_at, 3)
         ref = save_evidence(ctx['evidence_dir'],
                             'wedge-recovery-reconverged.json',
                             {'report': converged[survivor],
                              'detections': detections,
-                             'resolutions': resolutions})
-        case.evidence('file', ref, 'the survivor\'s reconvergence and '
-                      'its divergence records')
+                             'resolutions': resolutions,
+                             'wedge_seconds': wedge_seconds,
+                             'uncommanded': injected,
+                             'healed': _field_value(ctx, point)})
+        case.evidence('file', ref, 'the survivor\'s reconvergence, its '
+                      'divergence records, and the wedge\'s duration '
+                      'and field state')
         case.observe('the survivor reconverged to tracking at tick '
-                     + str(converged[survivor].get('tick')))
+                     + str(converged[survivor].get('tick'))
+                     + ' after the field stood unclaimed and '
+                       'un-commanded for ' + str(wedge_seconds) + 's on '
+                     'point ' + str(point) + ' (' + json.dumps(injected)
+                     + ' -> ' + json.dumps(_field_value(ctx, point))
+                     + ')')
 
         # --- the launch roles restore -------------------------------
         final = {owner: _try_role(ctx, ctx[owner]),

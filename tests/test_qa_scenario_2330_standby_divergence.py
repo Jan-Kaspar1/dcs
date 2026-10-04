@@ -28,6 +28,7 @@ EXPECTED_CASES = frozenset({
     'StandbyDivergenceTests.test_silent_detection_reports_failed',
     'StandbyDivergenceTests.test_lost_field_restore_reports_failed',
     'StandbyDivergenceTests.test_moved_field_under_a_refusal_reports_failed',
+    'StandbyDivergenceTests.test_unrestored_roles_report_failed',
     'StandbyDivergenceTests.test_refused_claim_reports_inconclusive',
     'StandbyDivergenceTests.test_no_field_output_reports_inconclusive',
     'StandbyDivergenceTests.test_refused_poke_reports_nondeterministic',
@@ -94,6 +95,22 @@ class DivergenceHarness(unittest.TestCase):
         patcher = patch.object(scenarios, 'http_json', guarded)
         patcher.start()
         self.addCleanup(patcher.stop)
+
+    def _strand_the_restored_peer(self):
+        """Doctor the planted pair so the peer the leg promoted never
+        reconverges to tracking once the restore has demoted it — the
+        launch-role restore cannot move the pair back. The doctor arms
+        on the demote, so the leg's own closing promotion still has to
+        be admitted for the strand to be the failing clause."""
+        original = self.pair.report
+
+        def stranded(name):
+            served = original(name)
+            if name == 'standby' and self.pair.demotes >= 1:
+                served = dict(served, sync='unsynchronized')
+            return served
+
+        self.pair.report = stranded
 
     def _reset(self):
         """Return the planted rig to the settled launch shape — a
@@ -223,6 +240,16 @@ class StandbyDivergenceTests(DivergenceHarness):
         record = self._run()
         self.assertEqual(record['outcome'], 'failed')
         self.assertIn('reconverged', record['detail'])
+
+    def test_unrestored_roles_report_failed(self):
+        # The peer the leg promoted never reconverges, so the closing
+        # demote/promote cannot put the launch roles back — a leg that
+        # leaves the pair moved would poison every later case.
+        self._strand_the_restored_peer()
+        record = self._run()
+        self.assertEqual(record['outcome'], 'failed')
+        self.assertIn('could not put the launch roles back',
+                      record['detail'])
 
     def test_moved_field_under_a_refusal_reports_failed(self):
         # The gate refuses but the field still moves: a hand-off behind

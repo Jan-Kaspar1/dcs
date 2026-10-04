@@ -186,6 +186,25 @@ def _pipelined_bodies(raw):
     return bodies
 
 
+class FakeClock:
+    """The scenario `time` module swapped for a deterministic clock:
+    every `sleep` advances `now` by exactly its argument, so a leg
+    that measures how long a state stood records the same elapsed
+    value on two runs and its evidence stays byte-identical."""
+
+    def __init__(self, start=1000.0):
+        self.now = start
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
 class FakeSocket:
     """Just enough of a connected TCP stream for the overlay's held,
     churning, and raw-probe consumers."""
@@ -1423,8 +1442,13 @@ class DivergencePair:
     the mismatched point with both sides' values; a source that has
     demoted stamps `source_owns_field: false`, which supersedes a
     `Diverged` verdict with the named `orphaned` one the wedge leg
-    reads; promotion is admitted on the converged verdicts the promote
-    gate accepts and refused `not_converged` on the rest.
+    reads. Promotion is admitted on the converged verdicts the promote
+    gate accepts and refused `not_converged` on the rest — with the
+    orphan verdict's one exception the wedge stages: its claim is the
+    *conditional* grant, so a live different owner's claim standing on
+    the field refuses the promotion `field_claim_failed` and hands
+    nothing off, while the unconditional claims the other promotable
+    verdicts assert preempt it.
 
     The lifecycle actions are the operator's: `stop`/`start` model the
     recorded remedy's two halves — the wedged field owner removed, then
@@ -1624,6 +1648,28 @@ class DivergencePair:
         return report
 
     # -- the monitoring surface -------------------------------------
+    def _foreign_claim_stands(self, name):
+        """Whether a live different owner's claim stands on the field —
+        the incumbent a conditional claim defers to."""
+        claim = self.plant.claim
+        return (claim is not None and claim['owner'] != self.tokens[name]
+                and bool(claim['holders']))
+
+    def _admit(self, name):
+        """The promotion the gate accepted: the peer walks to `active`
+        and its own claim preempts whatever stood."""
+        self._record(name, 'role_changed',
+                     {'from': 'standby', 'to': 'promoting',
+                      'origin': 'request'})
+        self._record(name, 'role_changed',
+                     {'from': 'promoting', 'to': 'active',
+                      'origin': 'request'})
+        self.owner = name
+        self.demoted = False
+        self.plant.claim = {'owner': self.tokens[name],
+                            'holders': {'promoted'}}
+        return 200, {'role': 'promoting'}
+
     def http_json(self, method, url, body=None, timeout=10):
         path = '/' + url.split('/', 3)[3]
         route, _, query = path.partition('?')
@@ -1661,20 +1707,23 @@ class DivergencePair:
         if verb == 'promote':
             if report['role'] == 'active':
                 return 409, {'already_active': {}}
-            if self.promote_admits or variant_of(
-                    report['sync']) in self.PROMOTABLE:
-                other = 'standby' if name == 'active' else 'active'
-                self._record(name, 'role_changed',
-                             {'from': 'standby', 'to': 'promoting',
-                              'origin': 'request'})
-                self._record(name, 'role_changed',
-                             {'from': 'promoting', 'to': 'active',
-                              'origin': 'request'})
-                self.owner = name
-                self.demoted = False
-                self.plant.claim = {'owner': self.tokens[name],
-                                    'holders': {'promoted'}}
-                return 200, {'role': 'promoting'}
+            if self.promote_admits:
+                return self._admit(name)
+            if self._foreign_claim_stands(name) \
+                    and variant_of(report['sync']) == 'orphaned':
+                # The orphan verdict's claim is the *conditional* grant:
+                # the tracking evidence cannot tell a dead owner from a
+                # live incumbent, so a standing live different-owner
+                # claim refuses the promotion by the field's own
+                # arbitration and no field changes hands. The
+                # unconditional claims the other promotable verdicts
+                # assert preempt it — decision 91's recorded boundary.
+                return 409, {
+                    'field_claim_failed': {
+                        'detail': 'the field stands claimed by owner '
+                                  + str(self.plant.claim['owner'])}}
+            if variant_of(report['sync']) in self.PROMOTABLE:
+                return self._admit(name)
             return 409, {'not_converged': {'sync': report['sync']}}
         # The demote: the owner steps down and the field reverts to the
         # peers' conditional claims.

@@ -23,6 +23,11 @@ EXPECTED_CASES = frozenset({
     'DivergedFieldRecoveryTests.test_clean_recovery_passes_and_validates',
     'DivergedFieldRecoveryTests.test_identical_evidence_across_runs',
     'DivergedFieldRecoveryTests.test_evidence_files_land',
+    'DivergedFieldRecoveryTests.test_every_peer_promotion_is_refused',
+    'DivergedFieldRecoveryTests.test_an_admitted_orphan_promotion_'
+    'reports_failed',
+    'DivergedFieldRecoveryTests.test_the_wedge_duration_and_field_state_'
+    'land_as_evidence',
     'DivergedFieldRecoveryTests.test_never_demotes_reports_failed',
     'DivergedFieldRecoveryTests.test_silent_loss_reports_failed',
     'DivergedFieldRecoveryTests.test_misattributed_loss_reports_failed',
@@ -64,6 +69,11 @@ class WedgeHarness(unittest.TestCase):
         patcher = patch.object(scenarios, 'http_json', self.pair.http_json)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # The deterministic clock: the leg measures how long the wedge
+        # stood, and two runs must record the same elapsed value.
+        clock = patch.object(scenarios, 'time', FakeClock())
+        clock.start()
+        self.addCleanup(clock.stop)
         defaults = {'WEDGE_SETTLE': 2, 'WEDGE_DEADLINE': 2,
                     'WEDGE_POLL': 0.001, 'WEDGE_RECOVER': 2,
                     'WEDGE_HEAL': 2, 'WEDGE_RESTORE': 2}
@@ -150,6 +160,7 @@ class DivergedFieldRecoveryTests(WedgeHarness):
         names = [entry['ref'] for entry in record['evidence']]
         for expected in ('wedge-recovery-image.json',
                          'wedge-recovery-fenced.json',
+                         'wedge-recovery-refusals.json',
                          'wedge-recovery-unclaimed.json',
                          'wedge-recovery-relaunch.json',
                          'wedge-recovery-reconverged.json',
@@ -162,6 +173,50 @@ class DivergedFieldRecoveryTests(WedgeHarness):
             'evidence/wedge-recovery-unclaimed.json').read_text())
         self.assertIn('field_unclaimed', unclaimed['faults'])
         self.assertEqual(unclaimed['probe']['error']['kind'], 'unclaimed')
+
+    def test_the_wedge_duration_and_field_state_land_as_evidence(self):
+        # The finding recorded a wedge standing for minutes before the
+        # operator's repair: the leg captures how long the field held
+        # the un-commanded value and both values across it.
+        record = self._run()
+        self.assertEqual(record['outcome'], 'passed')
+        payload = json.loads(self._path(
+            'evidence/wedge-recovery-reconverged.json').read_text())
+        self.assertIsInstance(payload['wedge_seconds'], (int, float))
+        self.assertGreaterEqual(payload['wedge_seconds'], 0)
+        self.assertEqual(payload['uncommanded'],
+                         {'bool': not DivergencePair.STAGED['bool']})
+        self.assertEqual(payload['healed'], DivergencePair.STAGED)
+        self.assertTrue(
+            any('un-commanded for' in line
+                for line in record['observations']),
+            record['observations'])
+
+    def test_every_peer_promotion_is_refused(self):
+        # The finding's reproduction: while the wedge stands, every
+        # peer's promotion is refused by name and neither hands the
+        # field off — the convergence gate on a diverged peer, the
+        # field's own arbitration on a promotable one.
+        record = self._run()
+        self.assertEqual(record['outcome'], 'passed',
+                         json.dumps(record.get('detail'))[:400])
+        refusals = json.loads(self._path(
+            'evidence/wedge-recovery-refusals.json').read_text())
+        self.assertEqual(sorted(refusals['promotes']), ['active', 'standby'])
+        for status, verdict in refusals['promotes'].values():
+            self.assertEqual(status, 409)
+            self.assertIn(verdict, ('not_converged', 'field_claim_failed'))
+        for report in refusals['after'].values():
+            self.assertEqual(report['role'], 'standby')
+
+    def test_an_admitted_orphan_promotion_reports_failed(self):
+        # A promotable survivor whose conditional grant the field's
+        # arbitration no longer refuses takes the field — the gate
+        # admitting is the defect #730 recorded.
+        self.pair._foreign_claim_stands = lambda name: False
+        record = self._run()
+        self.assertEqual(record['outcome'], 'failed')
+        self.assertIn('refuse every promotion by name', record['detail'])
 
     def test_never_demotes_reports_failed(self):
         # A preempted field owner that keeps its role never observed the

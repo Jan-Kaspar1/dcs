@@ -11,7 +11,8 @@ import importlib.util
 import unittest
 from pathlib import Path
 
-_CI_DIR = Path(__file__).resolve().parents[1] / "reference-plant" / "ci"
+_ROOT = Path(__file__).resolve().parents[1]
+_CI_DIR = _ROOT / "reference-plant" / "ci"
 _LEG_PATH = _CI_DIR / "legs" / "diverged_field_recovery.py"
 
 
@@ -64,6 +65,14 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn("wedge-recovery-digest", prose)
         self.assertIn("wedge-recovery-nondeterministic", prose)
         self.assertIn("predating", prose)
+
+    def test_the_contract_declares_the_emitted_diagnostics(self):
+        contract = (_ROOT / "docs" / "release-contract.md").read_text()
+        for name in (
+                "`wedge-recovery-failed`",
+                "`wedge-recovery-nondeterministic`",
+                "`diverged-field-recovery-unchecked`"):
+            self.assertIn(name, contract)
 
 
 class BoundaryTests(unittest.TestCase):
