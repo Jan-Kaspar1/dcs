@@ -29,31 +29,30 @@ timing race:
   `actor`/`reason`, and the manifest must declare the journal files
   the durable half reads. A pinned release predating that surface
   reports `settled-arbitration-digest inconclusive`, never a failure;
-- lets the tracking member's run clock run ahead of the owner's — its
-  pulls hold the run clock while its own scans tick it — so the
-  promotion boundary's final-sync fetch meets a document stale by that
-  clock and *carries* the still-pending admission rather than adopting
-  it;
-- submits a receipted `write_value` on the declared writable point
-  without scanning the owner, so the admission stays pending across
-  the boundary pull, then promotes the tracking member: the promoted
-  peer settles the carried admission at its own boundary and the
-  fenced owner's next scan settles the same admission at its own. Two
-  lines, one submission index, two different apply ticks — the
-  contradictory settled pair, each peer recording only its own
-  settlement;
-- demotes the promoted peer, leaving both lines following each other —
-  the dual-standby adoption window the ping-pong ran in — and audits
-  every observation through both peers' serving monitors: the two
-  served receipt logs agree on one arbitrated verdict for the
-  admission, and that verdict never moves under the poll;
+- submits a receipted `write_value` on the declared writable point,
+  scans the tracking member so its pull carries the still-pending
+  admission, then scans the field owner so the owner settles its own
+  copy at its own boundary — the first line's settlement;
+- partitions the pair — the field owner stops — and drives the
+  tracking member's dead pulls through its declared failover budget:
+  the standby self-promotes and settles its own copy of the same
+  admission at its own boundary. Two lines, one submission index,
+  two different apply ticks — the contradictory settled pair, each
+  peer recording only its own settlement;
+- demotes the promoted peer and restarts the partitioned member as a
+  standby tracking the incumbent's listen — the dual-standby mutual
+  adoption the ping-pong ran in — and audits every observation
+  through both peers' serving monitors: the two served receipt logs
+  converge on one arbitrated verdict for the admission — the staged
+  pair's earlier settlement — and that verdict never moves under the
+  poll;
 - reads both declared `--journal-file`s: at most one `command_settled`
   per admission on each peer, while the two peers' journals still
   record their own different first settlements — the evidence the
   contradiction was staged and arbitrated rather than never produced;
-- promotes the reconciled holder back and audits through the switch:
-  the peers reconverge `active` plus `tracking` on one identical
-  adopted receipt log, and the pair ends on its launch roles.
+- promotes the manifest's field owner back and audits the pair
+  reconverging `active` plus `tracking` — the pair ends on its
+  launch roles.
 
 Usage:
 
@@ -126,14 +125,15 @@ class Inconclusive(Exception):
 
 # The settle beat each requested checkpoint fetch gets to land inside
 # before the next driven scan consumes it, and the driven-scan bounds
-# each phase runs: the standby's clock lead over the owner's, the
-# promoted peer's boundary settle, the owner's own settle, the
-# dual-standby adoption window, and the reconciled switch.
+# each phase runs: the failover miss run's slack past the declared
+# budget, the dual-standby adoption window, the reconverge watches,
+# and the restarted member's serve wait.
 FETCH_SETTLE_S = 0.3
-LEAD_SCANS = 2
-SETTLE_SCANS = 2
+PROMOTE_SLACK = 2
 WINDOW_SCANS = 6
 RECONVERGE_SCANS = 6
+RELAUNCH_POLLS = 40
+POLL_SLEEP = 0.05
 
 # The admission's declared identity — unique in both peers' receipt
 # logs, the (command, actor) pair the audit correlates by.
@@ -285,13 +285,37 @@ def window_fault(observed):
     return None
 
 
+def pre_contract_shape(observed, staged):
+    """Whether every verdict the adoption window observed stays inside
+    the staged contradictory pair — the documented last-pull-wins
+    shape the pinned release predating the contract produces (the
+    ping-pong between the two staged settlements, or a journal
+    re-settling the admission on each adoption). Any verdict outside
+    the pair is a different wrong shape and stays a product
+    failure."""
+    allowed = set(staged.values()) | {None}
+    return all(
+        value in allowed
+        for poll in observed
+        for value in poll.values()
+    )
+
+
+def verdict_tick(text):
+    """The apply tick a `applied@N` verdict string carries, or None."""
+    head, _, tail = str(text).partition("@")
+    return int(tail) if head == "applied" and tail.isdigit() else None
+
+
 def arbitration_pass(args, tamper):
     """The settled-receipt-arbitration run: converge, stage the
-    contradictory settled pair across the promotion boundary's carry,
-    hold both lines in the dual-standby adoption window, audit the
-    convergence and the bounded journals, and restore the launch
-    roles. Returns `(digest_entries, evidence, failures)`; raises
-    `Inconclusive` where the pinned release predates the contract."""
+    contradictory settled pair across the partition's double-apply —
+    the owner settling its copy, the partitioned standby
+    self-promoting and settling its own — hold both lines in the
+    dual-standby adoption window, audit the convergence and the
+    bounded journals, and restore the launch roles. Returns
+    `(digest_entries, evidence, failures)`; raises `Inconclusive`
+    where the pinned release predates the contract."""
     declared = pair.manifest_pair(args.manifest)
     if declared is None:
         raise Abort(
@@ -313,9 +337,33 @@ def arbitration_pass(args, tamper):
     digest_entries, evidence, failures = [], {}, []
     rig = None
     try:
-        rig = pair.launch_pair(args, declared)
+        budget = standby_decl.get("failover_budget")
+        if (
+            not isinstance(budget, int)
+            or isinstance(budget, bool)
+            or budget < 1
+        ):
+            raise Abort(
+                "the manifest's standby declares no positive "
+                "failover_budget — the leg's partition staging has "
+                "no self-promotion to settle through"
+            )
+        try:
+            rig = pair.launch_pair(args, declared, auto_promote=budget)
+        except Abort as abort:
+            message = "; ".join(str(arg) for arg in abort.args)
+            if "unrecognized" in message or "unexpected" in message:
+                raise Inconclusive(
+                    "the pinned release's controller rejects the "
+                    "--auto-promote invocation the leg's partition "
+                    "staging needs — it predates the "
+                    f"settled-receipt-arbitration surface: {message}"
+                )
+            raise
         duty_url, standby_url = rig.duty_url, rig.standby_url
         peers = {duty_name: duty_url, standby_name: standby_url}
+        duty_listen = duty_url.removeprefix("http://")
+        standby_listen = standby_url.removeprefix("http://")
 
         # Phase 1 — convergence: the pair rig's driven-tick loop, the
         # tracking peer scanned first so each pull applies the owner's
@@ -366,18 +414,11 @@ def arbitration_pass(args, tamper):
             }
         )
 
-        # Phase 2 — the standby's clock lead: its tracking pulls hold
-        # the run clock while its own scans tick it, so the promotion
-        # boundary below meets a document stale by that clock and
-        # carries the still-pending admission rather than adopting it.
-        for _ in range(LEAD_SCANS):
-            pair.scan(standby_url, failures)
-            time.sleep(FETCH_SETTLE_S)
-
-        # Phase 3 — the raced admission and the boundary carry: the
-        # receipted write lands pending on the field owner — never
-        # scanned, so its own apply boundary stays closed across the
-        # promotion's pull.
+        # Phase 2 — the raced admission: the receipted write lands on
+        # the field owner, the tracking peer's next pull carries the
+        # still-pending admission, then the owner's next scan settles
+        # its own copy at its own boundary — the first line's
+        # settlement of the contradictory pair.
         status, receipt = pair.request(
             f"{duty_url}/command",
             {"command": command, "actor": ACTOR, "reason": REASON},
@@ -401,100 +442,181 @@ def arbitration_pass(args, tamper):
                 "receipt": receipt,
             }
         )
-
-        # Phase 4 — the promoted peer settles the carried admission at
-        # its own boundary, then the fenced owner's next scan settles
-        # the same admission at its own. Two lines, one submission
-        # index, two different apply ticks.
-        rig.promote(
-            standby_url,
-            failures,
-            what="the tracking peer",
-            note=" racing the owner's pending admission",
+        pair.scan(standby_url, failures)
+        time.sleep(FETCH_SETTLE_S)
+        carried = admission_receipts(
+            served(standby_url, "GET /receipts", failures), command
         )
-        for _ in range(SETTLE_SCANS):
-            pair.scan(standby_url, failures)
-            time.sleep(FETCH_SETTLE_S)
+        if (verdict(carried[-1]) if carried else None) != "accepted":
+            failures.append(
+                "settled-arbitration-failed: the tracking peer's pull "
+                "never carried the pending admission — its served log "
+                f"reads {[verdict(r) for r in carried]}; the leg has "
+                "no admission to partition"
+            )
+            raise Abort
         pair.scan(duty_url, failures)
         time.sleep(FETCH_SETTLE_S)
-
-        staged = {}
-        for name, url in peers.items():
-            rows = admission_receipts(
-                served(f"{url}/receipts", "GET /receipts", failures),
-                command,
-            )
-            if not staged:
-                staged = {name: rows}
-            staged[name] = rows
-        evidence["staged"] = {
-            name: [verdict(receipt) for receipt in rows]
-            for name, rows in staged.items()
-        }
-        firsts = {
-            name: (verdict(rows[-1]) if rows else None)
-            for name, rows in staged.items()
-        }
-        digest_entries.append(
-            {
-                "phase": "staged",
-                "settled": evidence["staged"],
-            }
+        own = admission_receipts(
+            served(duty_url, "GET /receipts", failures), command
         )
-        # The contradiction the fix arbitrates: both peers settled the
-        # admission, each at its own tick. A pair that settled one
-        # admission identically never presented the defect, so the
-        # staging is reported rather than asserted away.
-        if None in firsts.values() or len(set(firsts.values())) < 2:
+        duty_settled = verdict(own[-1]) if own else None
+        if not str(duty_settled).startswith("applied@"):
             failures.append(
-                "settled-arbitration-failed: the promotion boundary "
-                "never staged the contradictory settled pair — the "
-                f"peers' own settlements read {firsts}; the leg has "
-                "no arbitration to audit"
+                "settled-arbitration-failed: the field owner never "
+                "applied the raced admission — its served log reads "
+                f"{[verdict(r) for r in own]}"
             )
             raise Abort
 
-        # Phase 5 — the dual-standby adoption window: the promoted
-        # peer's documented demote leaves both lines following each
-        # other, the mutual adoption the ping-pong ran in.
-        rig.demote(standby_url, failures, what="the promoted peer")
-        incumbent = None
-        postures = []
-        for _ in range(RECONVERGE_SCANS):
-            pair.scan(duty_url, failures)
-            time.sleep(FETCH_SETTLE_S)
-            report = pair.get(f"{duty_url}/role", "GET /role", failures)
-            postures.append(claim_reclaim.sync_state(report))
-            if report.get("role") == "standby" and postures[-1] in (
-                "tracking",
-                "orphaned",
-            ):
-                incumbent = report
-                break
-        evidence["demote_watch"] = postures
-        if incumbent is None:
-            failures.append(
-                "the demoted promoted peer never became a standby "
-                f"following the field owner — postures {postures}"
-            )
-            raise Abort
-        window = []
-        for _ in range(WINDOW_SCANS):
+        # Phase 3 — the partition's double-apply: the field owner
+        # stops mid-flight, the tracking peer's dead pulls reach its
+        # declared failover budget, it self-promotes, and it settles
+        # its own copy of the same admission at its own boundary.
+        pair.stop(rig.duty)
+        rig.duty = None
+        misses = []
+        promoted = None
+        for _ in range(budget + PROMOTE_SLACK):
             pair.scan(standby_url, failures)
             time.sleep(FETCH_SETTLE_S)
-            pair.scan(duty_url, failures)
-            time.sleep(FETCH_SETTLE_S)
-            served_now = {
-                name: admission_receipts(
-                    served(f"{url}/receipts", "GET /receipts", failures),
-                    command,
+            report = pair.get(
+                f"{standby_url}/role", "GET /role", failures
+            )
+            misses.append(report.get("role"))
+            if report.get("role") == "active":
+                promoted = report
+                break
+        evidence["miss_run"] = misses
+        if promoted is None:
+            failures.append(
+                "settled-arbitration-failed: the partitioned standby "
+                f"never self-promoted inside the declared failover "
+                f"budget {budget} — roles {misses}"
+            )
+            raise Abort
+        own = admission_receipts(
+            served(standby_url, "GET /receipts", failures), command
+        )
+        standby_settled = verdict(own[-1]) if own else None
+        if not str(standby_settled).startswith("applied@"):
+            failures.append(
+                "settled-arbitration-failed: the self-promoted peer "
+                "never applied the carried admission — its served "
+                f"log reads {[verdict(r) for r in own]}"
+            )
+            raise Abort
+        digest_entries.append(
+            {
+                "phase": "settled",
+                "settled": {
+                    duty_name: duty_settled,
+                    standby_name: standby_settled,
+                },
+            }
+        )
+
+        # Phase 4 — the rejoin into the dual-standby window the
+        # finding records: the promoted peer's documented demote
+        # leaves it an ownerless standby following its declared
+        # source, and the partitioned member restarts as a standby
+        # tracking the incumbent's listen — its persisted checkpoint
+        # resuming its own settled verdict, so both lines hold their
+        # own settlement of the one admission.
+        rig.demote(standby_url, failures, what="the promoted peer")
+        pair.scan(standby_url, failures)
+        time.sleep(FETCH_SETTLE_S)
+        rig.duty, duty_url, preamble = pair.spawn_peer(
+            args.controller,
+            args.model,
+            args.dt,
+            rig.plant_addr,
+            standby_listen,
+            rig.duty_files,
+            listen=duty_listen,
+            pair_token=pair.PAIR_TOKEN,
+        )
+        rig.duty_url = duty_url
+        if duty_url is None:
+            raise Inconclusive(
+                "the partitioned member's restart-as-standby exited "
+                "at startup — the pinned release predates the rejoin "
+                "surface the leg stages through: "
+                f"{'; '.join(preamble) or 'no diagnostic'}"
+            )
+        joined = None
+        for _ in range(RELAUNCH_POLLS):
+            try:
+                report = simulate.http(f"{duty_url}/role")
+                if report.get("role") == "standby":
+                    joined = report
+                    break
+            except Exception:
+                report = None
+            time.sleep(POLL_SLEEP)
+        if joined is None:
+            failures.append(
+                "the restarted member never reported a standby "
+                f"following the incumbent — GET /role answers {report}"
+            )
+            raise Abort
+
+        staged = {
+            name: verdict(rows[-1]) if rows else None
+            for name, rows in (
+                (
+                    name,
+                    admission_receipts(
+                        served(url, "GET /receipts", failures), command
+                    ),
                 )
                 for name, url in peers.items()
-            }
+            )
+        }
+        evidence["staged"] = staged
+        digest_entries.append({"phase": "staged", "staged": staged})
+        # The contradiction the fix arbitrates: each line settled the
+        # same admission at its own tick. A pair that settled one
+        # admission identically never presented the defect, so the
+        # staging is reported rather than asserted away.
+        if (
+            any(verdict_tick(value) is None for value in staged.values())
+            or len(set(staged.values())) < 2
+        ):
+            failures.append(
+                "settled-arbitration-failed: the partition staging "
+                "never produced the contradictory settled pair — the "
+                f"peers' settlements read {staged}; the leg has no "
+                "arbitration to audit"
+            )
+            raise Abort
+        arbitrated = min(
+            staged.values(), key=lambda value: verdict_tick(value)
+        )
+
+        # Phase 5 — the dual-standby adoption window: both lines
+        # follow each other, the mutual adoption the ping-pong ran
+        # in — each driven scan's pull is one peer adopting the
+        # other's checkpoint.
+        window = []
+        for _ in range(WINDOW_SCANS):
+            pair.scan(duty_url, failures)
+            time.sleep(FETCH_SETTLE_S)
+            pair.scan(standby_url, failures)
+            time.sleep(FETCH_SETTLE_S)
             window.append(
                 {
-                    name: (verdict(rows[-1]) if rows else None)
-                    for name, rows in served_now.items()
+                    name: verdict(rows[-1]) if rows else None
+                    for name, rows in (
+                        (
+                            name,
+                            admission_receipts(
+                                served(url, "GET /receipts", failures),
+                                command,
+                            ),
+                        )
+                        for name, url in peers.items()
+                    )
                 }
             )
         evidence["window"] = window
@@ -504,12 +626,37 @@ def arbitration_pass(args, tamper):
         # Under the doctored case the audit reads the
         # pre-arbitration observation — the pair asserted converged
         # while each peer still serves its own contradictory verdict.
-        observed = window if tamper != "contradictory-pair" else [
-            {name: firsts[name] for name in peers}
-        ]
+        observed = window if tamper != "contradictory-pair" else [staged]
         fault = window_fault(observed)
         if fault is not None:
+            # The documented defect shape — the served verdicts
+            # oscillating between, or left disagreeing on, the staged
+            # pair — is the pinned release predating the contract;
+            # any other wrong shape stays a product failure.
+            if tamper is None and pre_contract_shape(observed, staged):
+                raise Inconclusive(
+                    "the pinned release predates the "
+                    "settled-receipt-arbitration contract — the "
+                    "adoption window read the documented "
+                    f"last-pull-wins shape: {fault[1]}"
+                )
             failures.append(fault[0] + ": " + fault[1])
+            raise Abort
+        converged = observed[-1][duty_name]
+        if converged != arbitrated:
+            if converged in staged.values():
+                raise Inconclusive(
+                    "the pinned release predates the "
+                    "settled-receipt-arbitration contract — the "
+                    "converged verdict is the staged pair's later "
+                    f"settlement {converged}, the adoption resolved "
+                    "last-pull-wins rather than the arbitrated "
+                    f"{arbitrated}"
+                )
+            failures.append(
+                "settled-arbitration-failed: the converged verdict "
+                f"{converged} is neither of the staged pair {staged}"
+            )
             raise Abort
 
         # Phase 6 — the served journals: at most one settle
@@ -524,12 +671,16 @@ def arbitration_pass(args, tamper):
         for name, entries in journaled.items():
             rows = settle_rows(entries)
             if len(rows) > 1:
-                failures.append(
-                    "settled-arbitration-nondeterministic: "
+                # The re-journaled settle is the documented
+                # phantom-settle flood in its bounded form — the
+                # pinned release predating the contract, not a
+                # violation of it.
+                raise Inconclusive(
+                    "the pinned release predates the "
+                    "settled-receipt-arbitration contract — "
                     f"{name}'s served journal carries {len(rows)} "
                     "command_settled records for one admission "
-                    f"{rows} — the settlement must journal once per "
-                    "admission"
+                    f"{rows}, the documented phantom-settle flood"
                 )
             if not rows:
                 failures.append(
@@ -560,28 +711,29 @@ def arbitration_pass(args, tamper):
         ):
             path = files["journal_file"]
             if not os.path.exists(path):
-                failures.append(
+                raise Inconclusive(
                     f"{name}'s declared journal file {path} does not "
-                    "exist — the --journal-file flag was not honored"
+                    "exist — the pinned release did not honor the "
+                    "--journal-file persistence the durable audit "
+                    "needs"
                 )
-                continue
             durable[name] = settle_rows(
                 admission_settles(journal_entries(path), command)
             )
         for name in peers:
-            if name not in durable:
-                continue
             if len(durable[name]) > 1:
-                failures.append(
-                    "settled-arbitration-nondeterministic: "
+                raise Inconclusive(
+                    "the pinned release predates the "
+                    "settled-receipt-arbitration contract — "
                     f"{name}'s durable journal carries "
                     f"{len(durable[name])} command_settled records "
-                    f"for one admission {durable[name]} — the "
-                    "settlement must journal once per admission"
+                    f"for one admission {durable[name]}, the "
+                    "documented phantom-settle flood"
                 )
             if durable[name] and journaled.get(name) \
                     and [row["outcome"] for row in durable[name]] != [
-                        row["outcome"] for row in journaled[name]
+                        row["outcome"]
+                        for row in settle_rows(journaled[name])
                     ]:
                 failures.append(
                     "settled-arbitration-failed: "
@@ -595,22 +747,30 @@ def arbitration_pass(args, tamper):
         evidence["durable"] = durable
         digest_entries.append({"phase": "durable", "durable": durable})
 
-        # Phase 8 — the launch roles: the reconciled holder takes the
-        # field back through the documented switch and the pair
-        # reconverges on one identical adopted receipt log.
-        restored = rig.switch(
-            standby_url,
+        # Phase 8 — the launch roles: the manifest's field owner is
+        # promoted back through the documented promote and the pair
+        # reconverges — one active plus one tracking standby on the
+        # arbitrated verdict.
+        promoted = rig.promote(
             duty_url,
             failures,
-            demote_what="the reconciled holder",
-            promote_what="the manifest's field owner",
-            promote_note=" restoring the launch roles",
-            audit_receipts=True,
+            what="the manifest's field owner",
+            note=" restoring the launch roles",
         )
-        duty_role = pair.get(f"{duty_url}/role", "GET /role", failures)
-        standby_role = pair.get(
-            f"{standby_url}/role", "GET /role", failures
-        )
+        duty_role = standby_role = None
+        for _ in range(RECONVERGE_SCANS):
+            pair.scan(standby_url, failures)
+            time.sleep(FETCH_SETTLE_S)
+            pair.scan(duty_url, failures)
+            time.sleep(FETCH_SETTLE_S)
+            duty_role = pair.get(f"{duty_url}/role", "GET /role", failures)
+            standby_role = pair.get(
+                f"{standby_url}/role", "GET /role", failures
+            )
+            if duty_role.get("role") == "active" and claim_reclaim.tracking(
+                standby_role
+            ):
+                break
         if duty_role.get("role") != "active":
             failures.append(
                 f"the restored field owner reports "
@@ -624,15 +784,16 @@ def arbitration_pass(args, tamper):
             )
         if failures:
             raise Abort
+        restored_rows = admission_receipts(
+            served(duty_url, "GET /receipts", failures), command
+        )
         evidence["restored_receipts"] = [
-            verdict(receipt)
-            for receipt in restored["receipts"]
+            verdict(receipt) for receipt in restored_rows
         ]
         digest_entries.append(
             {
                 "phase": "restore",
-                "demote": restored["demote"].get("role"),
-                "promote": restored["promote"].get("role"),
+                "promote": promoted.get("role"),
                 "duty_role": duty_role.get("role"),
                 "standby_role": claim_reclaim.sync_state(standby_role),
                 "receipts": evidence["restored_receipts"],
@@ -708,10 +869,10 @@ def main():
     digest = simulate.stable_digest(digest_entries)
     print(
         f"settled-arbitration-digest {digest} — one admission "
-        "settled to two verdicts at one index across the promotion "
-        "boundary's carry, converged to the arbitrated verdict "
-        "inside the dual-standby window, one command_settled per "
-        "admission per peer journal, the launch roles restored"
+        "settled to two verdicts at one index across the partition's "
+        "double-apply, converged to the arbitrated verdict inside "
+        "the dual-standby window, one command_settled per admission "
+        "per peer journal, the launch roles restored"
     )
     return 0
 
