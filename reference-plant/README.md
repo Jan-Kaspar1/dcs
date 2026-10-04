@@ -459,6 +459,16 @@ newer command. Adding a leg is exactly one new file under
 document; the leg set and each leg's contract prose live in the
 directory and its docstrings.
 
+One leg in particular is about this pair's operator console rather than
+its control behaviour: `ci/legs/responsiveness.py` holds the field
+owner's checkpoint source unreachable and drives a `POST /scan` batch
+against the survivor's monitor, requiring `/snapshot`, `/role`,
+`/journal`, and a receipted command on that same monitor to keep
+answering inside the leg's declared bound — the mirror, on the pair this
+deployment actually ships, of the platform rig's bounded-responsiveness
+leg. A consumer UI that stalls only when a peer dies is the dishonesty
+the pair's publication boundary exists to prevent.
+
 The check's `consumers` stage then proves the replaceable-consumer
 boundary end to end — `ci/consumers.py --schedule <name>` replays the
 identical driven run once per consumer schedule: `zero-clients` (no UI
