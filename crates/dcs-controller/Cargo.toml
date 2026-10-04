@@ -9,6 +9,11 @@ license.workspace = true
 dcs-assembly = { path = "../dcs-assembly" }
 dcs-blocks = { path = "../dcs-blocks" }
 dcs-core = { path = "../dcs-core" }
+# The binary resolves the hardware-bound `ethercat` kind through the
+# deployment's `--bus` logical-bus → segment bindings, so it names the
+# crates that carry that seam: the registry's kind constants and the
+# bindings type the factories resolve through.
+dcs-ethercat = { path = "../dcs-ethercat" }
 dcs-model = { path = "../dcs-model" }
 dcs-monitor = { path = "../dcs-monitor" }
 dcs-runtime = { path = "../dcs-runtime" }
@@ -23,7 +28,6 @@ dcs-build = { path = "../dcs-build" }
 dcs-demo = { path = "../dcs-demo" }
 # The Wago rig test binds the checked-in ethercat document to a fake
 # transport playing the field wiring — the only hardware-free path.
-dcs-ethercat = { path = "../dcs-ethercat" }
 # The sim-bus failover rig observes the register bank and builds the
 # reference run's driver side through BusDriver directly.
 dcs-sim-bus = { path = "../dcs-sim-bus" }

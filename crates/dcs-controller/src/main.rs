@@ -344,21 +344,25 @@
 //! Load, validation, and assembly failures exit nonzero naming the
 //! offending model element.
 
-use dcs_assembly::{DriverRegistry, FanoutDriver, StepError, assemble, resolve_drivers};
+use dcs_assembly::{
+    DriverRegistry, ETHERCAT_KIND, FanoutDriver, StepError, assemble, resolve_drivers,
+};
 use dcs_controller::registry;
 use dcs_core::{
     CarryoverReport, CommandError, CommandOutcome, CommandReceipt, FieldClaim, IoDriver, IoError,
     PointId, RestartConsultOutcome, SwitchError, TelemetrySnapshot, Tick, TickAnchor, ValueKind,
 };
+use dcs_ethercat::{EthercatBuses, RECORDED_BINDING_PREFIX};
 use dcs_model::PlantModel;
 use dcs_monitor::{
-    CheckpointPuller, DEFAULT_STATE_DRAIN_CAPACITY, Driven, Monitor, MonitorClient, MonitorConfig,
-    StateSink, StateWriterLock, TrackTarget,
+    BuildIdentity, CheckpointPuller, DEFAULT_STATE_DRAIN_CAPACITY, Driven, Monitor, MonitorClient,
+    MonitorConfig, StateSink, StateWriterLock, TrackTarget,
 };
 use dcs_runtime::{
     Activation, Checkpoint, Executor, Peer, PeerEvent, TrackReport, WriteGate, mint_generation,
 };
 use dcs_sim_net::{ClaimGrant, RemoteDriver, RemoteError};
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -966,6 +970,18 @@ struct Options {
     /// misconfiguration the plant server flags `claimed_shared` and
     /// this instance warns about.
     owner_token: Option<u64>,
+    /// The deployment's logical-bus → host-interface bindings, from
+    /// repeated `--bus <bus>=<binding>` arms — the deployment half of
+    /// decision 47's split: the model owns the logical name, the
+    /// deployment says which segment serves it.
+    ///
+    /// A binding value names either a host interface
+    /// (`ecat0=enx00e04c751f7c`) or a recorded run replayed in its
+    /// place (`ecat0=@capture.json`, the `RECORDED_BINDING_PREFIX`
+    /// arm). Either is an explicit deployment choice: an interface
+    /// binding never falls back to a recording, and a recorded binding
+    /// never opens a socket.
+    buses: BTreeMap<String, String>,
     /// The pair's shared tracking secret — both peers launch with the
     /// same token, hashed to the key the monitor's `?prove=`
     /// checkpoint answers sign and its announced-source pulls verify:
@@ -1086,6 +1102,24 @@ controller scan.
                   and an announced-only demotion refuses
                   no_tracking_source (a configured --peer still covers
                   the switchover)
+  --bus BUS=BINDING
+                  bind a hardware-bound device's logical bus to the
+                  segment that serves it, repeatable: `--bus
+                  ecat0=enx00e04c751f7c`. The model names the logical
+                  bus; this arm says which host interface serves it, so
+                  the deployment owns the NIC rather than the model.
+                  A BINDING naming a recorded run instead —
+                  `@path/to/capture.json` — replays that recording in
+                  the interface's place, which is how the hardware
+                  path is exercised with no rig. A model declaring a
+                  hardware-bound bus this flag does not bind, a
+                  binding naming an interface this host does not have,
+                  and a recorded run that cannot be read all fail
+                  startup naming the bus; neither ever falls back to
+                  simulation. A hardware-bound model runs paced only:
+                  --driven against one is refused, and the paced run
+                  refuses POST /scan, because the wall clock owns the
+                  schedule against hardware
   --state-file PATH
                   persist the run's checkpoint to PATH at the end of
                   every scan cycle and at each accepted command's
@@ -1159,6 +1193,7 @@ impl Options {
         let mut history_file = None;
         let mut owner_token = None;
         let mut pair_token = None;
+        let mut buses: BTreeMap<String, String> = BTreeMap::new();
         let mut args = args;
         while let Some(arg) = args.next() {
             let mut value = |flag: &str| {
@@ -1215,6 +1250,23 @@ impl Options {
                             .map_err(|error| format!("invalid --owner-token value: {error}"))?,
                     );
                 }
+                "--bus" => {
+                    let binding = value("--bus")?;
+                    let (bus, bound) = binding.split_once('=').ok_or_else(|| {
+                        format!("invalid --bus value {binding:?}: expected <bus>=<binding>")
+                    })?;
+                    if bus.is_empty() || bound.is_empty() {
+                        return Err(format!(
+                            "invalid --bus value {binding:?}: expected <bus>=<binding>"
+                        ));
+                    }
+                    if buses.insert(bus.to_string(), bound.to_string()).is_some() {
+                        return Err(format!(
+                            "--bus binds logical bus {bus:?} twice: {binding:?} replaces an \
+                             earlier binding"
+                        ));
+                    }
+                }
                 "--pair-token" => pair_token = Some(value("--pair-token")?),
                 "-h" | "--help" => {
                     println!("{USAGE}");
@@ -1249,6 +1301,7 @@ impl Options {
                 ("--history-file", history_file.is_some()),
                 ("--owner-token", owner_token.is_some()),
                 ("--pair-token", pair_token.is_some()),
+                ("--bus", !buses.is_empty()),
             ] {
                 if present {
                     rejected.push(flag);
@@ -1444,6 +1497,7 @@ impl Options {
             history_file,
             owner_token,
             pair_token,
+            buses,
         })
     }
 }
@@ -1579,6 +1633,109 @@ fn fail(message: impl std::fmt::Display) -> ExitCode {
     ExitCode::FAILURE
 }
 
+/// The hardware-bound device kinds a model's field wiring can declare:
+/// the kinds that name a physical bus and therefore cannot run against
+/// the `--driven` schedule, and each need their bus bound by the
+/// deployment.
+const HARDWARE_KINDS: [&str; 1] = [ETHERCAT_KIND];
+
+/// The logical buses `model` declares on a hardware-bound kind — the
+/// `bus` parameter each such device's declaration carries.
+fn hardware_buses(model: &PlantModel) -> Vec<String> {
+    let mut buses: Vec<String> = model
+        .devices
+        .iter()
+        .filter(|device| HARDWARE_KINDS.contains(&device.kind.as_str()))
+        .filter_map(|device| device.parameters.get("bus"))
+        .filter_map(|bus| bus.as_str())
+        .map(str::to_string)
+        .collect();
+    buses.sort();
+    buses.dedup();
+    buses
+}
+
+/// Resolves the deployment's logical-bus → segment bindings into the
+/// [`EthercatBuses`] the hardware-bound factories resolve through.
+///
+/// Three failures are startup errors, each naming the bus, and none of
+/// them degrades into a simulated substitute:
+///
+/// - a model declaring a hardware-bound bus that no `--bus` arm binds —
+///   the deployment did not say which segment serves it, and guessing
+///   would open the wrong one;
+/// - a binding naming a host interface this host does not have — the
+///   deployment names a NIC that is not there, which is a wiring
+///   mistake rather than a bus to open later;
+/// - a recorded binding whose capture cannot be read — the recording
+///   is the segment, so an unreadable one leaves nothing to open.
+///
+/// A binding for a bus no device declares is left alone: the deployment
+/// may bind segments ahead of the model that uses them, and an unused
+/// binding opens nothing.
+fn resolve_bus_bindings(
+    model: &PlantModel,
+    bindings: &BTreeMap<String, String>,
+) -> Result<EthercatBuses, String> {
+    let declared = hardware_buses(model);
+    for bus in &declared {
+        if !bindings.contains_key(bus) {
+            return Err(format!(
+                "logical bus {bus:?} is declared by a hardware-bound device and no \
+                 --bus binds it; bind it to the host interface that serves it \
+                 (--bus {bus}=<interface>) or to a recorded run \
+                 (--bus {bus}=@<recorded>.json)"
+            ));
+        }
+    }
+    for (bus, binding) in bindings {
+        let Some(path) = binding.strip_prefix(RECORDED_BINDING_PREFIX) else {
+            if !host_interface_exists(binding) {
+                return Err(format!(
+                    "logical bus {bus:?} is bound to interface {binding:?}, which this host \
+                     has no such interface for"
+                ));
+            }
+            continue;
+        };
+        let recorded = Path::new(path);
+        if !recorded.is_file() {
+            return Err(format!(
+                "logical bus {bus:?} is bound to the recorded run {path:?}, which is not a \
+                 readable file"
+            ));
+        }
+    }
+    Ok(EthercatBuses::new(bindings.clone()))
+}
+
+/// Whether this host has an interface named `name`.
+///
+/// `/sys/class/net` is the kernel's own answer rather than a
+/// getifaddrs walk: a bound-down or unconfigured NIC is still an
+/// interface, and the field NIC this platform binds is exactly the one
+/// whose address configuration must stay off.
+fn host_interface_exists(name: &str) -> bool {
+    if name.is_empty() || name.contains('/') {
+        return false;
+    }
+    Path::new("/sys/class/net").join(name).exists()
+}
+
+/// The driver registry a run resolves through: the standard kinds, plus
+/// the hardware-bound factories bound to `buses`.
+///
+/// A model with no hardware-bound device resolves through
+/// [`DriverRegistry::standard`] exactly as before — the deployment's
+/// bindings are inert without a device asking for them.
+fn driver_registry(model: &PlantModel, options: &Options) -> Result<DriverRegistry, String> {
+    if hardware_buses(model).is_empty() {
+        return Ok(DriverRegistry::standard());
+    }
+    let buses = resolve_bus_bindings(model, &options.buses)?;
+    Ok(DriverRegistry::standard().with_ethercat_buses(&buses))
+}
+
 /// Installs the pair's shared tracking secret on the monitor when the
 /// deployment declared one — `--pair-token` hashed to the key the
 /// monitor's `?prove=` checkpoint answers sign and its adopted-source
@@ -1588,6 +1745,26 @@ fn keyed_monitor<'d>(monitor: Monitor<'d>, options: &Options) -> Monitor<'d> {
     match &options.pair_token {
         Some(token) => monitor.with_pair_key(dcs_monitor::pair_key(token)),
         None => monitor,
+    }
+}
+
+/// The build identity this process reports on `GET /health`: its crate
+/// version, the git revision it was compiled from where one was
+/// recorded, and the fingerprint of the model it loaded.
+///
+/// The revision is read from `DCS_BUILD_SHA` — the build arm CI stamps
+/// into the image — and is absent otherwise. An absent revision is
+/// reported absent rather than invented: a consumer must be able to
+/// tell "this build did not record one" from "it did, and here it is",
+/// because the first is a deployment gap and the second is evidence.
+fn build_identity(model: &PlantModel) -> BuildIdentity {
+    BuildIdentity {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        git_sha: std::env::var("DCS_BUILD_SHA")
+            .ok()
+            .map(|sha| sha.trim().to_string())
+            .filter(|sha| !sha.is_empty()),
+        model_fingerprint: Some(model.fingerprint().to_string()),
     }
 }
 
@@ -1976,6 +2153,33 @@ fn main() -> ExitCode {
         };
     }
 
+    // A model declaring a hardware-bound device kind runs paced only:
+    // the wall clock owns the scan schedule against a real bus, so the
+    // driven schedule — scans arriving one at a time through
+    // `POST /scan`, each also stepping the field — has no meaning here.
+    // The refusal names both sides of the conflict rather than
+    // substituting a simulation for requested hardware.
+    let hardware = hardware_buses(&model);
+    if !hardware.is_empty() && options.driven {
+        return fail(format!(
+            "--driven paces scans through POST /scan, which has no meaning against a \
+             hardware-bound bus; this model declares {} on {}. Run paced with \
+             --scan-ms instead",
+            HARDWARE_KINDS.join("/"),
+            hardware.join(", ")
+        ));
+    }
+
+    // The deployment's logical-bus → segment bindings resolve before the
+    // drivers do: an unbound bus, a binding naming an interface this host
+    // does not have, and an unreadable recorded run are startup failures
+    // naming the bus, so no run ever serves telemetry as healthy over a
+    // bus it could not open.
+    let driver_kinds = match driver_registry(&model, &options) {
+        Ok(registry) => registry,
+        Err(error) => return fail(error),
+    };
+
     // The field driver: the registry-resolved fan-out — local simulated
     // backends plus any `sim-tcp` devices the model declares — or the
     // shared simulated plant a redundant pair observes together.
@@ -2018,13 +2222,10 @@ fn main() -> ExitCode {
                 }
             }
         }
-        None => {
-            match resolve_drivers(&model, &DriverRegistry::standard()).and_then(|plan| plan.build())
-            {
-                Ok(fanout) => Driver::Local(fanout),
-                Err(error) => return fail(error),
-            }
-        }
+        None => match resolve_drivers(&model, &driver_kinds).and_then(|plan| plan.build()) {
+            Ok(fanout) => Driver::Local(fanout),
+            Err(error) => return fail(error),
+        },
     };
 
     // Every instance whose driver surface reaches the shared field runs
@@ -2305,7 +2506,7 @@ fn main() -> ExitCode {
                     return fail(format!("cannot bind monitor on {addr}: {error}"));
                 }
             };
-        let monitor = keyed_monitor(monitor, &options);
+        let monitor = keyed_monitor(monitor, &options).with_build(build_identity(&model));
         // Declare this monitor on every field claim this run asserts:
         // a peer the claim preempts learns where the successor serves
         // from the field's own fencing verdicts — the unkeyed pair's
@@ -2400,7 +2601,7 @@ fn main() -> ExitCode {
                         return fail(format!("cannot bind monitor on {addr}: {error}"));
                     }
                 };
-                let monitor = keyed_monitor(monitor, &options);
+                let monitor = keyed_monitor(monitor, &options).with_build(build_identity(&model));
                 // Declare this monitor on every field claim this run
                 // asserts: a peer the claim preempts learns where the
                 // successor serves from the field's own fencing
@@ -2600,7 +2801,7 @@ fn main() -> ExitCode {
                         return fail(format!("cannot bind monitor on {addr}: {error}"));
                     }
                 };
-                let monitor = keyed_monitor(monitor, &options);
+                let monitor = keyed_monitor(monitor, &options).with_build(build_identity(&model));
                 // Declare this monitor on every field claim this run
                 // asserts: a peer the claim preempts learns where the
                 // successor serves from the field's own fencing

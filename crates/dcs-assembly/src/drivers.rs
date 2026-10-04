@@ -28,9 +28,9 @@
 use crate::assembly::{neutral, resolve};
 use crate::error::AssemblyError;
 use dcs_core::{
-    CyclicIoDriver, DriverDiagnostics, ExchangeDiagnostics, FieldClaim, IoDriver, IoError,
-    LinkState, PointId, Quality, QualityReason, Sample, StateError, StateMap, Tick, Value,
-    ValueKind,
+    BusExchangeDiagnostics, CyclicIoDriver, DriverDiagnostics, ExchangeDiagnostics, FieldClaim,
+    IoDriver, IoError, LinkState, PointId, Quality, QualityReason, Sample, StateError, StateMap,
+    Tick, Value, ValueKind,
 };
 use dcs_ethercat::{AttachError, BusPoint, ChannelDecl, EthercatBuses};
 use dcs_model::{Channel, DeviceId, Direction, PlantModel};
@@ -614,6 +614,23 @@ impl DriverRegistry {
     /// host-interface bindings (the model names the bus, the deployment
     /// names the NIC); a deployment without EtherCAT hardware keeps the
     /// stub and its honest startup failure.
+    /// The compile-check registry: the standard kinds with every
+    /// hardware-bound kind resolved by its declaration-only factory, so
+    /// `--check` assembles a hardware-bound model without the
+    /// deployment's bus binding. A run resolves through
+    /// [`standard`](Self::standard) or
+    /// [`with_ethercat_buses`](Self::with_ethercat_buses) instead —
+    /// only check mode gets the bus-less placeholder, because only
+    /// check mode promises not to open a segment.
+    pub fn for_check() -> Self {
+        Self::standard().with(ETHERCAT_KIND, ethercat_declared_device)
+    }
+
+    /// The deployment-bound registry: the standard kinds with
+    /// [`ETHERCAT_KIND`] resolved through `buses`, so each hardware-bound
+    /// device attaches to its logical bus over the deployment's
+    /// bindings. A model with no hardware-bound device resolves through
+    /// [`standard`](Self::standard) unchanged.
     pub fn with_ethercat_buses(mut self, buses: &EthercatBuses) -> Self {
         let buses = buses.clone();
         self.register(ETHERCAT_KIND, move |spec| ethercat_backend(spec, &buses));
@@ -1316,6 +1333,72 @@ fn ethercat_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
          a hardware-bound kind is never silently substituted by simulation",
         declaration.bus
     )))
+}
+
+/// The compile-check registry's [`ETHERCAT_KIND`] factory
+/// [`for_check`](DriverRegistry::for_check) installs: the same
+/// declaration checks as the stub, then a driver that opens no
+/// segment and answers no point.
+///
+/// `--check` is the engineering compile-check — load, validate,
+/// resolve kinds, construct components — and it must reach that far on
+/// a hardware-bound model *without* the deployment's bus binding,
+/// which is the whole point of checking a document before a segment
+/// exists. The stub's honest "no master is available" failure is right
+/// for a run and wrong here: it would make every hardware document
+/// uncheckable off-rig. So the declaration is validated in full — the
+/// `hardware` marker, the parameter grammar, the channel map — and
+/// the bus is left unopened, with every read an explicit
+/// [`IoError::UnknownPoint`] that a check-mode run can never reach
+/// because check mode runs no scan.
+fn ethercat_declared_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
+    let declaration = ethercat_declaration(spec)?;
+    let bus = declaration.bus;
+    Ok(DeviceDriver::Backend(DeviceBackend {
+        field_facing: true,
+        step: None,
+        claim: None,
+        release: None,
+        ensure: None,
+        startup_claim: None,
+        probe: None,
+        reclaim: None,
+        fenced_by: None,
+        declare_monitor: None,
+        claimed_monitor: None,
+        inspect: None,
+        io: Arc::new(UnopenedBus {
+            bus: bus.to_string(),
+        }),
+    }))
+}
+
+/// The compile-check placeholder for a bus no `--check` run opens:
+/// every point answers [`IoError::UnknownPoint`], the cyclic surface
+/// is absent, and the reported link is the
+/// [`LinkState::Disconnected`] an unopened segment honestly reads as.
+struct UnopenedBus {
+    /// The logical bus the declaration named — the message a check-mode
+    /// diagnostic points at.
+    bus: String,
+}
+
+impl IoDriver for UnopenedBus {
+    fn read(&self, point: PointId) -> Result<Sample, IoError> {
+        Err(IoError::UnknownPoint(point))
+    }
+
+    fn write(&self, point: PointId, _value: Value) -> Result<(), IoError> {
+        Err(IoError::UnknownPoint(point))
+    }
+}
+
+impl std::fmt::Debug for UnopenedBus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UnopenedBus")
+            .field("bus", &self.bus)
+            .finish()
+    }
 }
 
 /// The [`ETHERCAT_KIND`] validation both factories share: the
@@ -2348,6 +2431,11 @@ impl IoDriver for FanoutDriver {
     /// aggregate's own: counters sum over the buses and
     /// `last_exchange_tick` takes the earliest reported — the freshest
     /// exchange every bus has completed is the aggregate's honest bound.
+    /// The merge also records each bus as its own
+    /// [`BusExchangeDiagnostics`] row in backend order, so a counter stays
+    /// attributable to the bus that moved it (#547): a sum alone cannot say
+    /// which bus missed a deadline or which one's miss streak is one step
+    /// from its own declared threshold escalation.
     fn diagnostics(&self) -> Option<DriverDiagnostics> {
         let mut link = LinkState::Connected;
         let mut errors = Vec::new();
@@ -2361,10 +2449,10 @@ impl IoDriver for FanoutDriver {
             if diagnostics.link == LinkState::Disconnected {
                 link = LinkState::Disconnected;
             }
-            if let Some(error) = diagnostics.last_error {
-                let name = backend
-                    .device
-                    .map_or_else(|| "local sim".to_string(), |id| format!("device {}", id.0));
+            let name = backend
+                .device
+                .map_or_else(|| "local sim".to_string(), |id| format!("device {}", id.0));
+            if let Some(error) = &diagnostics.last_error {
                 errors.push(format!("{name}: {error}"));
             }
             if let Some(section) = diagnostics.exchange {
@@ -2378,6 +2466,42 @@ impl IoDriver for FanoutDriver {
                         (Some(held), Some(fresh)) => Some(held.min(fresh)),
                         (held, fresh) => held.or(fresh),
                     };
+                // A single-bus driver volunteers one row carrying its
+                // own logical bus, deployment binding, and operational
+                // state; a backend with several keeps them all, each
+                // attributed to the device that declared it.
+                if section.buses.is_empty() {
+                    merged.buses.push(BusExchangeDiagnostics {
+                        device: backend.device.map(|id| id.0),
+                        bus: None,
+                        binding: None,
+                        state: None,
+                        link: diagnostics.link,
+                        attempted: section.attempted,
+                        succeeded: section.succeeded,
+                        working_counter_mismatches: section.working_counter_mismatches,
+                        missed_deadlines: section.missed_deadlines,
+                        failed_exchanges: section.attempted.saturating_sub(section.succeeded),
+                        last_exchange_tick: section.last_exchange_tick,
+                        last_error: diagnostics.last_error.clone(),
+                    });
+                }
+                for row in &section.buses {
+                    merged.buses.push(BusExchangeDiagnostics {
+                        device: backend.device.map(|id| id.0),
+                        bus: row.bus.clone(),
+                        binding: row.binding.clone(),
+                        state: row.state,
+                        link: row.link,
+                        attempted: row.attempted,
+                        succeeded: row.succeeded,
+                        working_counter_mismatches: row.working_counter_mismatches,
+                        missed_deadlines: row.missed_deadlines,
+                        failed_exchanges: row.failed_exchanges,
+                        last_exchange_tick: row.last_exchange_tick,
+                        last_error: row.last_error.clone(),
+                    });
+                }
             }
         }
         reported.then_some(DriverDiagnostics {
@@ -2407,14 +2531,17 @@ impl IoDriver for FanoutDriver {
 /// Every cyclic backend gets its attempt each scan (#547): the iteration
 /// is bounded and never returns early, so a failure on one bus cannot
 /// skip another's exchange — each backend's exchange counters, miss
-/// streak, and `last_error` record its own boundary outcome, and its
+/// streak, and `last_error` record their own boundary outcome, and its
 /// declared `exchange_miss_threshold` escalation tracks its own link.
 /// A scan in which any exchange failed returns the first failing
 /// backend's error in backend order — the single-failure shape the
-/// boundary's [`IoError`] carries; every failed bus's own diagnostics
-/// still name it through the aggregate
-/// [`diagnostics`](IoDriver::diagnostics) merge, which prefixes each
-/// reporting backend's `last_error` with its device.
+/// boundary's [`IoError`] carries; the scan-level
+/// [`IoHealth::failed_exchanges`](dcs_core::IoHealth) counter therefore
+/// advances once for the boundary, while every failed bus's own count
+/// and the attribution stay readable in
+/// [`ExchangeDiagnostics::buses`](dcs_core::ExchangeDiagnostics) and in
+/// the aggregate [`diagnostics`](IoDriver::diagnostics) merge, which
+/// prefixes each reporting backend's `last_error` with its device.
 impl CyclicIoDriver for FanoutDriver {
     fn exchange(&self, tick: Tick) -> Result<(), IoError> {
         let mut failure = None;
@@ -2524,6 +2651,7 @@ mod tests {
                     working_counter_mismatches: 0,
                     last_exchange_tick: *self.last_tick.lock().unwrap(),
                     missed_deadlines: 0,
+                    buses: Vec::new(),
                 }),
             })
         }
@@ -2617,7 +2745,8 @@ mod tests {
 
         // The aggregate diagnostics merge each reporting backend's
         // exchange section: counters sum, the freshest exchange every
-        // bus completed bounds `last_exchange_tick`.
+        // bus completed bounds `last_exchange_tick`, and each bus keeps
+        // its own row so the summed failure stays attributable.
         let diagnostics = fanout.diagnostics().unwrap();
         assert_eq!(
             diagnostics.exchange,
@@ -2627,6 +2756,36 @@ mod tests {
                 working_counter_mismatches: 0,
                 last_exchange_tick: Some(Tick(7)),
                 missed_deadlines: 0,
+                buses: vec![
+                    BusExchangeDiagnostics {
+                        device: Some(1),
+                        bus: None,
+                        binding: None,
+                        state: None,
+                        link: LinkState::Disconnected,
+                        attempted: 2,
+                        succeeded: 1,
+                        working_counter_mismatches: 0,
+                        missed_deadlines: 0,
+                        failed_exchanges: 1,
+                        last_exchange_tick: Some(Tick(7)),
+                        last_error: Some("I/O point PointId(31) disconnected".to_string()),
+                    },
+                    BusExchangeDiagnostics {
+                        device: Some(3),
+                        bus: None,
+                        binding: None,
+                        state: None,
+                        link: LinkState::Connected,
+                        attempted: 2,
+                        succeeded: 2,
+                        working_counter_mismatches: 0,
+                        missed_deadlines: 0,
+                        failed_exchanges: 0,
+                        last_exchange_tick: Some(Tick(8)),
+                        last_error: None,
+                    },
+                ],
             })
         );
     }
@@ -2668,9 +2827,60 @@ mod tests {
         // the still-healthy bus contributes no error.
         let diagnostics = fanout.diagnostics().unwrap();
         assert_eq!(diagnostics.link, LinkState::Disconnected);
-        let last_error = diagnostics.last_error.unwrap();
+        let last_error = diagnostics.last_error.clone().unwrap();
         assert!(last_error.contains("device 1"), "{last_error}");
         assert!(!last_error.contains("device 2"), "{last_error}");
+
+        // The typed per-bus rows keep the failure attributable: the
+        // summed scalars above cannot say which bus failed, but each
+        // row carries its own counters, link, and error — and each
+        // failed exchange is counted once at its own boundary.
+        let exchange = diagnostics.exchange.unwrap();
+        assert_eq!(
+            exchange.buses,
+            vec![
+                BusExchangeDiagnostics {
+                    device: Some(1),
+                    bus: None,
+                    binding: None,
+                    state: None,
+                    link: LinkState::Disconnected,
+                    attempted: 1,
+                    succeeded: 0,
+                    working_counter_mismatches: 0,
+                    missed_deadlines: 0,
+                    failed_exchanges: 1,
+                    last_exchange_tick: None,
+                    last_error: Some("I/O point PointId(31) disconnected".to_string()),
+                },
+                BusExchangeDiagnostics {
+                    device: Some(2),
+                    bus: None,
+                    binding: None,
+                    state: None,
+                    link: LinkState::Connected,
+                    attempted: 1,
+                    succeeded: 1,
+                    working_counter_mismatches: 0,
+                    missed_deadlines: 0,
+                    failed_exchanges: 0,
+                    last_exchange_tick: Some(Tick(1)),
+                    last_error: None,
+                },
+            ],
+            "the failed exchange is counted once at the bus that failed \
+             while the healthy bus records its own completed boundary"
+        );
+        assert_eq!(
+            exchange
+                .buses
+                .iter()
+                .map(|bus| bus.failed_exchanges)
+                .sum::<u64>(),
+            1,
+            "one count per failed exchange — never a second count of the \
+             same boundary"
+        );
 
         // Miss-threshold escalation tracks each bus independently:
         // bus_a's second consecutive miss reaches its declared

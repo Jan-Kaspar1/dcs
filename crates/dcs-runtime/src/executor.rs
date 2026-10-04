@@ -9871,6 +9871,7 @@ mod tests {
                     working_counter_mismatches: state.shortfalls,
                     last_exchange_tick: state.last_exchange_tick,
                     missed_deadlines: state.missed_deadlines,
+                    buses: Vec::new(),
                 }),
             })
         }
@@ -10152,6 +10153,7 @@ mod tests {
                     working_counter_mismatches: 0,
                     last_exchange_tick: Some(Tick(1)),
                     missed_deadlines: 0,
+                    buses: Vec::new(),
                 }),
             }
         );
@@ -10357,6 +10359,7 @@ mod tests {
                 working_counter_mismatches: 0,
                 last_exchange_tick: Some(Tick(4)),
                 missed_deadlines: 1,
+                buses: Vec::new(),
             }
         );
         // The recovered link reports connected again.

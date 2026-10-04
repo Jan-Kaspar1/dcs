@@ -1143,8 +1143,8 @@ use dcs_assembly::{
     DeviceSpec, DriverRegistry,
 };
 use dcs_core::{
-    CyclicIoDriver, Direction, DriverDiagnostics, ExchangeDiagnostics, IoDriver, IoError,
-    LinkState, PointId, Quality, QualityReason, Sample, Tick, Value, ValueKind,
+    BusExchangeDiagnostics, CyclicIoDriver, Direction, DriverDiagnostics, ExchangeDiagnostics,
+    IoDriver, IoError, LinkState, PointId, Quality, QualityReason, Sample, Tick, Value, ValueKind,
 };
 use dcs_model::{DeviceId, PlantModel};
 use std::any::Any;
@@ -1280,6 +1280,7 @@ impl IoDriver for CyclicBus {
                 succeeded: state.succeeded,
                 working_counter_mismatches: 0,
                 last_exchange_tick: state.last_exchange_tick,
+                buses: Vec::new(),
                 missed_deadlines: 0,
             }),
         })
@@ -1506,6 +1507,24 @@ assert_eq!(
         working_counter_mismatches: 0,
         last_exchange_tick: Some(Tick(2)),
         missed_deadlines: 0,
+        // The per-backend attribution: on a fan-out the aggregate
+        // scalars above are sums, so each bus keeps its own row —
+        // here the one backend the model declared, which is where the
+        // three missed exchanges are attributable.
+        buses: vec![BusExchangeDiagnostics {
+            device: Some(1),
+            bus: None,
+            binding: None,
+            state: None,
+            link: LinkState::Disconnected,
+            attempted: 5,
+            succeeded: 2,
+            working_counter_mismatches: 0,
+            missed_deadlines: 0,
+            failed_exchanges: 3,
+            last_exchange_tick: Some(Tick(2)),
+            last_error: Some("the exchange did not complete".to_string()),
+        }],
     }
 );
 

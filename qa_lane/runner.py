@@ -3035,7 +3035,10 @@ def start_sim_bus_device(cfg, record, run_dir, timeline, fixture=None,
     `fixture` overrides the staged document — a src-relative model
     path the run config names beside `model_fixture` (the
     `cyclic_model` key holds the `sim-cyclic` document the
-    fencing-loss demotion leg stages). The server serves either
+    fencing-loss demotion leg stages), or an absolute host path for the
+    lane's own derived documents (`qa_lane/rig_model.py`), which the
+    revision's tree cannot carry because they are derived per run from
+    fixtures it does carry. The server serves either
     register-protocol kind, so one block carries a fixture per model
     the lane's legs need; a path the revision's tree does not carry
     fails before a container exists, naming the missing fixture.
@@ -3089,7 +3092,13 @@ def start_sim_bus_device(cfg, record, run_dir, timeline, fixture=None,
         raise RuntimeError('the sim-bus device server was asked to '
                            'stage a non-integer timeout_ms: '
                            + repr(timeout_ms))
-    model = Path(cfg['src_dir']) / sha / rel
+    # A src-relative fixture comes from the revision under test's own
+    # extracted tree; an absolute one is the lane's own derived
+    # document, which the tree cannot carry because it is derived from
+    # a fixture the tree does carry.
+    candidate = Path(rel)
+    model = candidate if candidate.is_absolute() \
+        else Path(cfg['src_dir']) / sha / rel
     if not model.is_file():
         raise RuntimeError('sim-bus model fixture missing: ' + str(model))
     container = 'dcs-hw-' + run_id + '-bus'

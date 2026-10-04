@@ -966,6 +966,7 @@ impl IoDriver for CyclicBusDriver {
                 working_counter_mismatches: image.wkc_mismatches,
                 last_exchange_tick: image.last_exchange_tick,
                 missed_deadlines: image.missed_deadlines,
+                buses: Vec::new(),
             }),
         })
     }

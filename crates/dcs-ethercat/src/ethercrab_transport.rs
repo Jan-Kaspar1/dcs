@@ -25,7 +25,7 @@
 use crate::transport::{
     BusTransport, CycleOutcome, DiscoveredStation, OpenRequest, TransportError,
 };
-use dcs_core::LinkState;
+use dcs_core::{LinkState, OperationalState};
 use ethercrab::error::Error;
 use ethercrab::std::{ethercat_now, tx_rx_task};
 use ethercrab::subdevice_group::{Op, PreOpPdi};
@@ -78,6 +78,12 @@ enum BusRequest {
     Recover {
         /// The reply sink.
         reply: Reply<Result<(), TransportError>>,
+    },
+    /// The segment's current AL state, read from the master — what the
+    /// monitoring surface reports as the bus's operational state.
+    State {
+        /// The reply sink.
+        reply: Reply<OperationalState>,
     },
 }
 
@@ -227,6 +233,14 @@ impl BusTransport for EthercrabTransport {
         } else {
             LinkState::Disconnected
         }
+    }
+
+    fn state(&self) -> OperationalState {
+        // The bus thread owns the master, so the read is a request on
+        // its queue. A dead thread is an unreachable segment, not a
+        // claim about its AL state.
+        self.request(|reply| BusRequest::State { reply })
+            .unwrap_or(OperationalState::Init)
     }
 }
 
@@ -420,6 +434,16 @@ async fn session(
                     )),
                 };
                 let _ = reply.send(result);
+            }
+            BusRequest::State { reply } => {
+                // The bus thread's own record of where the segment is on
+                // the state path: the group type it holds *is* the
+                // state, so this is the AL state rather than a guess.
+                let _ = reply.send(match stage {
+                    Some(Stage::Op(_)) => OperationalState::Op,
+                    Some(Stage::PreOpPdi(_)) => OperationalState::SafeOp,
+                    None => OperationalState::Init,
+                });
             }
         }
     }

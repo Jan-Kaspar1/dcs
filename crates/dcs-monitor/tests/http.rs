@@ -2,10 +2,10 @@
 //! in-process `MonitorClient`.
 
 use dcs_core::{
-    Command, CommandError, CommandOutcome, CommandReceipt, CyclicIoDriver, Direction,
-    DriverDiagnostics, EmittedEvent, EventValue, ExchangeDiagnostics, ForcedPoint, IoDriver,
-    IoError, IoFault, IoHealth, JournalEvent, LinkState, PointId, Quality, QualityReason, Role,
-    Sample, Tick, Value, ValueKind,
+    BusExchangeDiagnostics, Command, CommandError, CommandOutcome, CommandReceipt, CyclicIoDriver,
+    Direction, DriverDiagnostics, EmittedEvent, EventValue, ExchangeDiagnostics, ForcedPoint,
+    IoDriver, IoError, IoFault, IoHealth, JournalEvent, LinkState, PointId, Quality, QualityReason,
+    Role, Sample, Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{
@@ -216,6 +216,7 @@ impl IoDriver for CyclicStub {
                 working_counter_mismatches: state.mismatches,
                 last_exchange_tick: state.last_exchange_tick,
                 missed_deadlines: state.missed_deadlines,
+                buses: Vec::new(),
             }),
         })
     }
@@ -410,6 +411,31 @@ fn io_health_pane(health: &IoHealth) -> (Vec<(String, String)>, bool) {
             if exchange.working_counter_mismatches > 0 || exchange.missed_deadlines > 0 {
                 troubled = true;
             }
+            for bus in &exchange.buses {
+                let name = bus
+                    .device
+                    .map_or("local sim".to_string(), |id| format!("device {id}"));
+                rows.push((
+                    format!("bus {name}"),
+                    format!(
+                        "link {}, exchanges {}/{}, failed {}, short {}, late {}, \
+                         last exchange tick {}, last failure {}",
+                        serde_json::to_value(bus.link).unwrap().as_str().unwrap(),
+                        bus.attempted,
+                        bus.succeeded,
+                        bus.failed_exchanges,
+                        bus.working_counter_mismatches,
+                        bus.missed_deadlines,
+                        bus.last_exchange_tick
+                            .map(|tick| tick.0.to_string())
+                            .unwrap_or_else(|| "none".to_string()),
+                        bus.last_error.clone().unwrap_or_else(|| "none".to_string()),
+                    ),
+                ));
+                if bus.link != LinkState::Connected || bus.failed_exchanges > 0 {
+                    troubled = true;
+                }
+            }
         }
     }
     rows.push(("failed reads".to_string(), health.failed_reads.to_string()));
@@ -564,6 +590,7 @@ fn health_reports_liveness_role_and_scan_age() {
                 role: Role::Active,
                 tick: Tick::ZERO,
                 last_scan_age_ms: None,
+                build: None,
             }
         );
 
@@ -1261,6 +1288,7 @@ fn the_pane_renders_the_cyclic_exchange_surface() {
                     working_counter_mismatches: 0,
                     last_exchange_tick: Some(Tick(4)),
                     missed_deadlines: 1,
+                    buses: Vec::new(),
                 }
             );
 
@@ -1291,6 +1319,140 @@ fn the_pane_renders_the_cyclic_exchange_surface() {
             assert_eq!(io_health_pane(&again), io_health_pane(&health));
         },
     );
+}
+
+#[test]
+fn the_pane_renders_every_bus_behind_the_aggregate_counters() {
+    // On a fan-out over several cyclic buses the aggregate counters are
+    // sums, so the pane's per-bus rows are the only place a counter stays
+    // attributable to the bus that moved it.
+    let health = IoHealth {
+        failed_exchanges: 1,
+        consecutive_failures: 1,
+        last_error: Some(IoFault {
+            error: IoError::Disconnected(PointId(11)),
+            direction: Direction::In,
+            point: PointId(11),
+            tick: Tick(4),
+        }),
+        driver: Some(DriverDiagnostics {
+            link: LinkState::Disconnected,
+            last_error: Some("device 1: link down; device 2: link down".to_string()),
+            exchange: Some(ExchangeDiagnostics {
+                attempted: 4,
+                succeeded: 3,
+                working_counter_mismatches: 1,
+                last_exchange_tick: Some(Tick(3)),
+                missed_deadlines: 1,
+                buses: vec![
+                    BusExchangeDiagnostics {
+                        device: Some(1),
+                        bus: None,
+                        binding: None,
+                        state: None,
+                        link: LinkState::Disconnected,
+                        attempted: 2,
+                        succeeded: 1,
+                        working_counter_mismatches: 0,
+                        missed_deadlines: 0,
+                        failed_exchanges: 1,
+                        last_exchange_tick: Some(Tick(2)),
+                        last_error: Some("link down".to_string()),
+                    },
+                    BusExchangeDiagnostics {
+                        device: Some(2),
+                        bus: None,
+                        binding: None,
+                        state: None,
+                        link: LinkState::Connected,
+                        attempted: 2,
+                        succeeded: 2,
+                        working_counter_mismatches: 1,
+                        missed_deadlines: 1,
+                        failed_exchanges: 0,
+                        last_exchange_tick: Some(Tick(3)),
+                        last_error: None,
+                    },
+                ],
+            }),
+        }),
+        ..IoHealth::default()
+    };
+
+    let (rows, troubled) = io_health_pane(&health);
+    let rendered: HashMap<&str, &str> = rows
+        .iter()
+        .map(|(label, value)| (label.as_str(), value.as_str()))
+        .collect();
+    assert_eq!(rendered["exchanges attempted/succeeded"], "4/3");
+    assert!(rendered.contains_key("bus device 1"), "{rows:?}");
+    let first = rendered["bus device 1"];
+    assert!(first.contains("link disconnected"), "{first}");
+    assert!(first.contains("exchanges 2/1"), "{first}");
+    assert!(first.contains("failed 1"), "{first}");
+    assert!(first.contains("last failure link down"), "{first}");
+    assert!(first.contains("last exchange tick 2"), "{first}");
+
+    assert!(rendered.contains_key("bus device 2"), "{rows:?}");
+    let second = rendered["bus device 2"];
+    assert!(second.contains("link connected"), "{second}");
+    assert!(second.contains("exchanges 2/2"), "{second}");
+    assert!(second.contains("failed 0"), "{second}");
+    assert!(second.contains("short 1"), "{second}");
+    assert!(second.contains("late 1"), "{second}");
+    assert!(second.contains("last failure none"), "{second}");
+    assert!(troubled, "a bus down reads degraded: {rows:?}");
+
+    // Every bus's own failure count sums to the boundary's own: one
+    // count per failed exchange, never a second count of the same one.
+    assert_eq!(
+        health
+            .driver
+            .as_ref()
+            .and_then(|driver| driver.exchange.as_ref())
+            .map(|exchange| exchange
+                .buses
+                .iter()
+                .map(|bus| bus.failed_exchanges)
+                .sum::<u64>()),
+        Some(health.failed_exchanges)
+    );
+
+    // A clean multi-bus run renders both rows and reads healthy.
+    let healthy = IoHealth {
+        driver: Some(DriverDiagnostics {
+            link: LinkState::Connected,
+            last_error: None,
+            exchange: Some(ExchangeDiagnostics {
+                attempted: 2,
+                succeeded: 2,
+                working_counter_mismatches: 0,
+                last_exchange_tick: Some(Tick(2)),
+                missed_deadlines: 0,
+                buses: (1..=2)
+                    .map(|device| BusExchangeDiagnostics {
+                        device: Some(device),
+                        bus: None,
+                        binding: None,
+                        state: None,
+                        link: LinkState::Connected,
+                        attempted: 2,
+                        succeeded: 2,
+                        working_counter_mismatches: 0,
+                        missed_deadlines: 0,
+                        failed_exchanges: 0,
+                        last_exchange_tick: Some(Tick(2)),
+                        last_error: None,
+                    })
+                    .collect(),
+            }),
+        }),
+        ..IoHealth::default()
+    };
+    let (rows, troubled) = io_health_pane(&healthy);
+    assert!(rows.iter().any(|(label, _)| label == "bus device 1"));
+    assert!(rows.iter().any(|(label, _)| label == "bus device 2"));
+    assert!(!troubled, "healthy buses read healthy: {rows:?}");
 }
 
 #[test]

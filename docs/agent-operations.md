@@ -124,6 +124,72 @@ Interrupted sessions are resumed rather than restarted: a retry launch passes `-
 
 `dcs-agents admission` prints group targets, modes, active leases, and deduplicated outcome counts; `dcs-agents admission reset <group>` clears a blocked or cooling group. An optional `scheduler` section in `config.json` defines named groups (`models`, `initial`, optional `minimum`, `ceiling`, `external_slots` for consumers outside the pool) plus `quiet_seconds`, `cooldown_seconds`, and `max_cooldown_seconds`. Global `pause` remains the manual and integrity control and still gates all admission.
 
+## Hardware-lane routing rules
+
+Some work needs physical equipment — a rig in a room, a cable, an operator
+supervising the first write. Those tickets are routed by metadata, not by
+extra dispatcher machinery.
+
+**The hardware-lane group values.** A ticket is hardware-bound when its
+`dcs-task` body metadata declares `group` in this set:
+
+| Group value | Lane | Who works it |
+| --- | --- | --- |
+| `qa-hardware` | Physical rig commissioning and acceptance on the Lenovo host | The dedicated QA lane under supervised commissioning — never an autonomous worker |
+| `wago-rig` | The Wago EtherCAT rig's physical acceptance steps (see `docs/wago-ethercat-rig-manifest.md`) | Same: supervised commissioning only |
+
+Any other group string `agent_pool/planning.py`'s metadata parser accepts is a
+software group, even when the ticket's prose mentions a rig: the group value,
+not the wording, decides. `crates/dcs-controller`, `crates/dcs-ethercat`,
+`crates/dcs-assembly`, and `qa_lane` are the ordinary software groups that carry
+the simulation-only work leading up to hardware acceptance.
+
+**Rule 1 — the planner does not propose hardware-lane issues.** The planner
+prompt is already bound to work only on software and simulated I/O; it never
+emits a `dcs-task` item whose `group` is a hardware-lane value. A proposal that
+does is a planner error, not a dispatch decision.
+
+**Rule 2 — no auto-dispatch to a simulation-only worker.** A worker runs in its
+own clone with no rig access, no `CAP_NET_RAW`, no device bus, and no authority
+to drive a physical output. Dispatching hardware work to one would burn a full
+invocation budget to rediscover that it cannot proceed, and would file the
+failure as a product defect. The supervisor dispatch loop needs no code change
+for this: its `agent:ready` gate plus the existing policy language exclude
+hardware groups, and this section is the one place the rule is recorded.
+
+**Rule 3 — a manual issue is an operator correction.** If an operator files an
+issue carrying `agent:ready` whose body metadata names a hardware-lane group, the
+dispatcher must not pick it up. Correct it before dispatch, either by removing
+`agent:ready` or by re-grouping the body metadata to the software group that owns
+its simulation-only slice. Do not change the dispatcher to accommodate it.
+
+**Rule 4 — split software from hardware acceptance.** A ticket may be
+hardware-bound as a whole while only part of it is software. Land the software
+slice through the ordinary worker path under a software group, and keep the
+physical acceptance on the hardware lane. #327/#328 is the reference split: #327
+was the software-only slice (bus binding, run-mode gating, diagnostics, and
+controller tests, all against a fake hardware kind) while #328 held supervised
+commissioning and the rig evidence — #328 stays held for supervised commissioning
+with no `agent:ready`, and closing the software slice does not promote it.
+
+**Rule 5 — the QA findings route for hardware reproductions.** A reproduced
+hardware finding follows `docs/qa-findings-ingestion.md`, and the route is the
+same in both this document and `docs/lenovo-hardware-qa-plan.md`:
+
+1. The worker reproduces it in simulation wherever possible — the simulated
+   cyclic kind, the scripted exchange failures, and the rig's per-run model
+   variants exist so the software half is reachable without the bus.
+2. Where simulation cannot reach the finding, it stays unfixed-in-simulation and
+   rides a `qav-*` verification run on the Lenovo host: the lane replays the
+   finding's original case against the merged revision on real hardware.
+3. The merge of a fix is not hardware verification. Only the `qav-*` run closes
+   the verification record, and it records the case key it replayed.
+
+`docs/wago-ethercat-rig-manifest.md` is the blocking evidence list the
+`WW-LCM-002` and `WW-SEC-001` candidates cite: its `unverified` and `unknown`
+fields are exactly what first-client deployment and security answers must
+resolve, and no autonomous worker may mark them verified.
+
 ## Architecture review lane
 
 The supervisor can run a daily architecture reviewer: a read-and-report invocation pinned to the resolved `main` SHA that proposes deep-module and naming-consistency improvements. It does not refactor `main` itself — accepted candidates become ordinary managed issues that workers implement through the existing CI and merge gates.

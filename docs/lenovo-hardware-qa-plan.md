@@ -1873,6 +1873,46 @@ Merged does not mean hardware-verified. For failed fixes, create a linked follow
 or explicitly support redispatch: the current dispatcher skips already recorded
 issue jobs, so merely reopening an issue is insufficient.
 
+### Hardware-lane routing
+
+`docs/agent-operations.md`'s "Hardware-lane routing rules" is the normative
+statement of these rules; this section records the same lane split for this plan
+so the two documents cannot drift. The metadata decides, not the prose: a ticket
+is hardware-bound when its `dcs-task` body metadata's `group` is `qa-hardware`
+or `wago-rig`, the two group values this lane owns.
+
+| Step | Owning lane |
+|---|---|
+| Software slices of a hardware ticket — driver contracts, run-mode gating, bus binding, diagnostics surface, simulated cyclic scenarios, controller tests against a fake kind | Simulation-only worker, dispatched under an ordinary software group (`crates/dcs-controller`, `crates/dcs-ethercat`, `crates/dcs-assembly`, `qa_lane`) |
+| Physical commissioning — wiring, module identity, loopback observation, interface binding on the dedicated NIC, first output write, watchdog response | The dedicated QA lane under supervised commissioning; never an autonomous worker |
+| Re-verification of a reproduced hardware finding | The QA findings route: the worker reproduces in simulation where possible, hardware re-verification rides a `qav-*` run |
+
+The dispatcher needs no code change: its `agent:ready` gate plus the existing
+policy language exclude hardware-lane groups, the planner prompt is bound to
+software and simulated I/O, and an operator-filed `agent:ready` issue naming a
+hardware-lane group is an operator correction — remove the label or re-group the
+body metadata — rather than a dispatcher change.
+
+**The #327/#328 split, unchanged.** #327 is the software-only slice of HQ-4: the
+controller's logical-bus→interface binding, the paced-only run-mode gate for
+hardware-bound models, the diagnostics surface, and the fake-kind controller
+tests. It runs through the ordinary worker path. #328 holds the rig's hardware
+acceptance — supervised commissioning of the Wago segment — and stays held with
+no `agent:ready` until a human is present. Completing #327's software scope does
+not move #328, and #328's physical evidence does not substitute for #327's
+simulated verification.
+
+`docs/wago-ethercat-rig-manifest.md` is the blocking evidence list for the
+`WW-LCM-002` and `WW-SEC-001` candidates. Its `unverified` and `unknown` fields —
+segment topology beyond one station, terminal order, interface binding, and
+supervisor-driven first write — are what deployment-topology and role-tier
+answers must resolve before those requirements may promote, and only supervised
+commissioning may move a field's status. This lane's role in the roadmap is the
+pre-pilot gate for `WW-FND-002` hardware evidence: supervised commissioning (#328)
+precedes any claim that the EtherCAT field path is proven on hardware, and the
+replay regression pattern adopted for `dcs-ethercat` turns each live-rig incident
+into a hardware-free regression test rather than a one-off finding.
+
 ## Implementation tickets, in order
 
 Proposed work packages only; assign real issue IDs when publishing. Existing
