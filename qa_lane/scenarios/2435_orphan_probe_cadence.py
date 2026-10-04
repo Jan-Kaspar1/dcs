@@ -74,10 +74,19 @@ RUNS_BEFORE = frozenset({'scenario_yielded_claim_rearm'})
 PROBE_FORM = 25          # bound on the island forming and on each
                          # settlement wait
 PROBE_POLL = 0.3         # the standing window's watch cadence
-PROBE_HOLD = 12.0        # seconds the standing window spans — enough
-                         # paced scans to span at least one probe retry
-                         # boundary, and far under the armed failover
-                         # budget the collapse used to stretch
+PROBE_HOLD = 8.0         # seconds the standing window spans at most —
+                         # enough paced scans to span at least one
+                         # ANNOUNCED_VERIFY_RETRY boundary, and the cap
+                         # beside the armed-failover close below
+ARMED_FRACTION = 2 / 3   # close the standing window once an armed
+                         # peer's served failover.misses reach this
+                         # share of its budget: orphaned misses count
+                         # toward the armed standby's failover budget,
+                         # and the failover that budget owes is the
+                         # contract's neighbor, not its subject — the
+                         # claim releases well before the trip so a
+                         # legitimately armed promotion cannot out-race
+                         # the release into a dual-active reconverge
 CADENCE_MEASURE = 4.0    # seconds the baseline cadence is sampled over
 CADENCE_FLOOR = 0.4      # the fraction of the measured cadence a peer
                          # must hold inside the standing window: the
@@ -132,12 +141,15 @@ def _probe_row(ctx, name):
         kind = next(iter(sync))
     elif isinstance(sync, str):
         kind = sync
+    failover = report.get('failover') or {}
     return {
         'role': report.get('role'),
         'sync': kind,
         'tick': report.get('tick'),
         'published': (snapshot.get('publication') or {}).get('published'),
         'overruns': (snapshot.get('io_health') or {}).get('scan_overruns'),
+        'misses': failover.get('misses'),
+        'budget': failover.get('budget'),
     }
 
 
@@ -613,7 +625,8 @@ def _probe_pass(ctx, number, owner, peer, floors):
     stamps = {owner: [], peer: []}
     verdicts = {owner: [], peer: []}
     deadline = time.monotonic() + PROBE_HOLD
-    while time.monotonic() < deadline:
+    armed_close = None
+    while time.monotonic() < deadline and armed_close is None:
         at = time.monotonic()
         for name in (owner, peer):
             row = _probe_row(ctx, name)
@@ -621,9 +634,15 @@ def _probe_pass(ctx, number, owner, peer, floors):
             stamps[name].append(at)
             if isinstance(row, dict):
                 verdicts[name].append(row.get('sync'))
+                misses, budget = row.get('misses'), row.get('budget')
+                if _int(misses) and _int(budget) and budget > 0 \
+                        and misses >= int(budget * ARMED_FRACTION):
+                    armed_close = name
     record['window'] = [
         row for name in (owner, peer) for row in rows[name] if row]
     record['verdicts'] = verdicts
+    record['window_close'] = (
+        'armed failover ' + armed_close) if armed_close else 'elapsed'
     record['orphaned'] = {
         name: any(row and row.get('sync') == 'orphaned'
                   for row in entries)
@@ -632,6 +651,7 @@ def _probe_pass(ctx, number, owner, peer, floors):
         {'peer': name, 'tick': row['tick'], 'sync': row['sync'],
          'published': row['published'], 'overruns': row['overruns']}
         for name in (owner, peer) for row in rows[name] if row]
+    evidence['window_close'] = record['window_close']
 
     # Phase 5 — the cadence and cost readings. Each peer's run-tick
     # advance is measured against the wall span its own samples span and
@@ -656,7 +676,7 @@ def _probe_pass(ctx, number, owner, peer, floors):
             'floor': round(floor, 3),
             'cycles': advance,
             'published': _advance(rows[name], 1),
-            'published_floor': int(floor * PROBE_HOLD),
+            'published_floor': int(floor * span),
             'overruns': _advance(rows[name], 2),
             'refused': len(_refused_records(
                 ctx, name, floors[name])),

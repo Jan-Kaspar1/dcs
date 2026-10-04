@@ -671,10 +671,20 @@ def _mutual_pass(ctx, number, owner, peer, journal_paths):
         clocks.append(
             (at, frame[owner].get('tick') if frame[owner] else None,
              frame[peer].get('tick') if frame[peer] else None))
-        ticks = [row.get('tick') for row in frame.values()
-                 if row and _int_tick(row.get('tick'))]
-        if len(ticks) == 2:
-            spacing.append({'apart': abs(ticks[0] - ticks[1])})
+        # The peers' run-tick spacing is a settled-stream reading: the
+        # seeded lead legitimately stands between the thaw and the
+        # realigning apply that clears it — the seed the clear clause
+        # names — so a frame counts toward the spacing bound only once
+        # both peers' own clocks sit within the clearing bound of their
+        # aligned marks. A frame carrying a standing seed is the
+        # contract's recovery window, not a spacing violation.
+        settled = [
+            row['tick'] for row in frame.values()
+            if row and _int_tick(row.get('tick'))
+            and _int_tick(row.get('aligned'))
+            and abs(row['tick'] - row['aligned']) <= CLEAR_BOUND]
+        if len(settled) == 2:
+            spacing.append({'apart': abs(settled[0] - settled[1])})
         return frame
 
     # Phase 2 — the mutual settle: `POST /demote` on the field owner.
