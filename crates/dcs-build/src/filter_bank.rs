@@ -103,16 +103,15 @@
 //! explicit `""` marker.
 
 use crate::specs::{
-    AlarmMonitorSpec, BackwashCoordinatorInstance, BackwashCoordinatorSpec,
-    BackwashSequenceSpec, BoolGateSpec, DigitalInputSpec, DigitalOutputSpec, InterlockSpec,
-    ManagedAlarmHandles,
+    AlarmMonitorSpec, BackwashCoordinatorInstance, BackwashCoordinatorSpec, BackwashSequenceSpec,
+    BoolGateSpec, DigitalInputSpec, DigitalOutputSpec, InterlockSpec, ManagedAlarmHandles,
     ManagedBoolLatchingAlarmSpec, ManagedInputs, ManagedLatchingAlarmSpec, MotorSpec,
     PhaseMonitorSpec, RateLimiterSpec, TimerSpec, ValveSpec,
 };
 use crate::station::{AlarmLayout, rationalization};
 use crate::{
-    BuildError, DeviceId, Direction, InPoint, OutPoint, PlantBuilder, PointId, SignalId,
-    Sink, Source, Value, parameters, unit,
+    BuildError, DeviceId, Direction, InPoint, OutPoint, PlantBuilder, PointId, SignalId, Sink,
+    Source, Value, parameters, unit,
 };
 use dcs_model::{ComponentId, PlantModel};
 
@@ -412,9 +411,19 @@ pub struct EquipmentPattern {
 /// The reference bank's declared equipment pattern: the canonical
 /// granular-media backwash decision 57 describes.
 pub const EQUIPMENT_PATTERN: EquipmentPattern = EquipmentPattern {
-    inlet: &[step::DRAIN, step::AIR_SCOUR, step::REFERENCE_FLOW, step::VERIFY],
+    inlet: &[
+        step::DRAIN,
+        step::AIR_SCOUR,
+        step::REFERENCE_FLOW,
+        step::VERIFY,
+    ],
     outlet: &[],
-    waste: &[step::DRAIN, step::AIR_SCOUR, step::HIGH_RATE_WASH, step::FILTER_TO_WASTE],
+    waste: &[
+        step::DRAIN,
+        step::AIR_SCOUR,
+        step::HIGH_RATE_WASH,
+        step::FILTER_TO_WASTE,
+    ],
     air: &[step::AIR_SCOUR],
     wash: &[step::HIGH_RATE_WASH],
     water: &[step::HIGH_RATE_WASH, step::FILTER_TO_WASTE],
@@ -768,7 +777,8 @@ pub fn filter_bank(config: &FilterBankConfig) -> Result<FilterBank, BuildError> 
     let supply_channel = plant.channel::<bool>(di, "supply-available", Direction::In);
     let waste_channel = plant.channel::<bool>(di, "waste-available", Direction::In);
     let flow_channel = plant.channel::<f64>(ai, "flow-disturbance", Direction::In);
-    let supply_available = plant.field_input::<bool>(points::SUPPLY_AVAILABLE, supply_channel, false);
+    let supply_available =
+        plant.field_input::<bool>(points::SUPPLY_AVAILABLE, supply_channel, false);
     let waste_available = plant.field_input::<bool>(points::WASTE_AVAILABLE, waste_channel, false);
     let flow_disturbance = plant.field_input::<f64>(points::FLOW_DISTURBANCE, flow_channel, false);
     // Decision 77's protection-layer report: the two availability contacts
@@ -848,8 +858,18 @@ pub fn filter_bank(config: &FilterBankConfig) -> Result<FilterBank, BuildError> 
             "",
             "Flow permissive delivered to the coordinator",
         ),
-        (PointId(905), "active", "", "1-based index of the filter holding the grant"),
-        (PointId(906), "queued", "", "How many backwash requests stand pending"),
+        (
+            PointId(905),
+            "active",
+            "",
+            "1-based index of the filter holding the grant",
+        ),
+        (
+            PointId(906),
+            "queued",
+            "",
+            "How many backwash requests stand pending",
+        ),
         (
             PointId(907),
             "resource-blocked",
@@ -869,7 +889,14 @@ pub fn filter_bank(config: &FilterBankConfig) -> Result<FilterBank, BuildError> 
             "Operator's standing queue-reorder instruction — 0 leaves the queue policy's order",
         ),
     ] {
-        signal(&mut plant, point, name, described_unit, description, "backwash-supply");
+        signal(
+            &mut plant,
+            point,
+            name,
+            described_unit,
+            description,
+            "backwash-supply",
+        );
     }
 
     // The disturbance monitor is the shared measurement behind both the
@@ -878,7 +905,10 @@ pub fn filter_bank(config: &FilterBankConfig) -> Result<FilterBank, BuildError> 
     let flow_monitor = plant.add(AlarmMonitorSpec::new(parameters([
         ("low_limit", Value::Float(-PARKED_LIMIT)),
         ("high_limit", Value::Float(config.flow_disturbance_bound)),
-        ("hysteresis", Value::Float(config.flow_disturbance_bound / 10.0)),
+        (
+            "hysteresis",
+            Value::Float(config.flow_disturbance_bound / 10.0),
+        ),
     ])));
     plant.connect(flow_disturbance, &flow_monitor.input);
     plant.connect(&flow_monitor.alarm, flow_exceeded);
@@ -950,7 +980,10 @@ pub fn filter_bank(config: &FilterBankConfig) -> Result<FilterBank, BuildError> 
         parameters([
             ("low_limit", Value::Float(-PARKED_LIMIT)),
             ("high_limit", Value::Float(config.flow_disturbance_bound)),
-            ("hysteresis", Value::Float(config.flow_disturbance_bound / 10.0)),
+            (
+                "hysteresis",
+                Value::Float(config.flow_disturbance_bound / 10.0),
+            ),
             ("max_shelve_ticks", Value::Int(0)),
             ("priority", Value::Int(2)),
             ("class", Value::Int(1)),
@@ -985,7 +1018,16 @@ pub fn filter_bank(config: &FilterBankConfig) -> Result<FilterBank, BuildError> 
 
     let mut filters = Vec::with_capacity(config.filters);
     for index in 0..config.filters {
-        filters.push(wire_filter(&mut plant, config, index, ai, di, d_o, ao, &coordinator));
+        filters.push(wire_filter(
+            &mut plant,
+            config,
+            index,
+            ai,
+            di,
+            d_o,
+            ao,
+            &coordinator,
+        ));
     }
 
     let model = plant.build()?;
@@ -1050,6 +1092,7 @@ fn signal(
 /// shelve request point journals too, since its transitions are the
 /// lifecycle actions recorded beside their attributed receipts. `ack`
 /// stays receipted-only — its writes are already the record.
+#[allow(clippy::too_many_arguments)]
 fn managed_alarm(
     plant: &mut PlantBuilder,
     index: u64,
@@ -1062,7 +1105,15 @@ fn managed_alarm(
     group: &str,
 ) -> AlarmLayout {
     managed_alarm_carrying(
-        plant, index, component, ack_port, managed, alarm_port, unacknowledged_port, prefix, group,
+        plant,
+        index,
+        component,
+        ack_port,
+        managed,
+        alarm_port,
+        unacknowledged_port,
+        prefix,
+        group,
         None,
     )
 }
@@ -1155,7 +1206,11 @@ fn managed_alarm_carrying(
             "alarm",
             "Standing alarm state — process truth under every managed flag",
         ),
-        (4, "unacknowledged", "Latched until the operator acknowledges"),
+        (
+            4,
+            "unacknowledged",
+            "Latched until the operator acknowledges",
+        ),
         (5, "shelved", "Shelved within the declared bound"),
         (6, "suppressed", "Suppressed by the declared condition"),
         (7, "out-of-service", "Out of service on the declared path"),
@@ -1364,6 +1419,7 @@ impl Block {
 /// fault aggregate, the post-wash verification pair, and the seven
 /// declared alarms.
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 fn wire_filter(
     plant: &mut PlantBuilder,
     config: &FilterBankConfig,
@@ -1381,14 +1437,12 @@ fn wire_filter(
     // ----------------------------------------------------------------
     // Field points.
     // ----------------------------------------------------------------
-    let channel = |plant: &mut PlantBuilder, device: DeviceId, kind: &str, name: String| {
-        match kind {
-            "f" => plant.channel::<f64>(device, &name, Direction::In),
-            "b" => plant.channel::<bool>(device, &name, Direction::In),
-            _ => plant.channel::<bool>(device, &name, Direction::Out),
-        }
+    let channel = |plant: &mut PlantBuilder, device: DeviceId, kind: &str, name: String| match kind
+    {
+        "f" => plant.channel::<f64>(device, &name, Direction::In),
+        "b" => plant.channel::<bool>(device, &name, Direction::In),
+        _ => plant.channel::<bool>(device, &name, Direction::Out),
     };
-    let channel = channel;
     macro_rules! ai_ch {
         ($suffix:literal) => {
             channel(plant, ai, "f", format!("{tag}-{}", $suffix))
@@ -1432,109 +1486,54 @@ fn wire_filter(
     let blower_cmd_channel = do_ch!("blower-cmd");
     let pump_cmd_channel = do_ch!("pump-cmd");
     let drain_cmd_channel = do_ch!("drain-cmd");
-    let wash_valve_cmd_channel = plant.channel::<f64>(ao, &format!("{tag}-wash-valve-cmd"), Direction::Out);
+    let wash_valve_cmd_channel =
+        plant.channel::<f64>(ao, &format!("{tag}-wash-valve-cmd"), Direction::Out);
 
-
-    let headloss = plant.field_input::<f64>(
-        points::headloss(index),
-        headloss_channel,
+    let headloss = plant.field_input::<f64>(points::headloss(index), headloss_channel, false);
+    let turbidity = plant.field_input::<f64>(points::turbidity(index), turbidity_channel, false);
+    plant.field_input::<f64>(
+        points::turbidity_forcing(index),
+        turbidity_forcing_channel,
         false,
     );
-    let turbidity = plant.field_input::<f64>(
-        points::turbidity(index),
-        turbidity_channel,
-        false,
-    );
-    plant.field_input::<f64>(points::turbidity_forcing(index), turbidity_forcing_channel, false);
-    let level = plant.field_input::<f64>(
-        points::level(index),
-        level_channel,
-        false,
-    );
+    let level = plant.field_input::<f64>(points::level(index), level_channel, false);
     plant.field_input::<f64>(points::inflow(index), inflow_channel, false);
     plant.field_input::<f64>(points::drain_rate(index), drain_rate_channel, false);
     plant.field_input::<f64>(points::net_draw(index), net_draw_channel, false);
-    let drain_depth = plant.field_input::<f64>(
-        points::drain_depth(index),
-        drain_depth_channel,
+    let drain_depth =
+        plant.field_input::<f64>(points::drain_depth(index), drain_depth_channel, false);
+    plant.field_input::<f64>(
+        points::filtered_volume(index),
+        filtered_volume_channel,
         false,
     );
-    plant.field_input::<f64>(points::filtered_volume(index), filtered_volume_channel, false);
     plant.field_input::<f64>(points::headloss_rise(index), headloss_rise_channel, false);
     plant.field_input::<f64>(points::wash_draw(index), wash_draw_channel, false);
-    let inlet_fb = plant.field_input::<bool>(
-        points::inlet_fb(index),
-        inlet_fb_channel,
+    let inlet_fb = plant.field_input::<bool>(points::inlet_fb(index), inlet_fb_channel, false);
+    let outlet_fb = plant.field_input::<bool>(points::outlet_fb(index), outlet_fb_channel, false);
+    let waste_fb = plant.field_input::<bool>(points::waste_fb(index), waste_fb_channel, false);
+    let air_fb = plant.field_input::<bool>(points::air_fb(index), air_fb_channel, false);
+    let blower_run =
+        plant.field_input::<bool>(points::blower_run(index), blower_run_channel, false);
+    let pump_run = plant.field_input::<bool>(points::pump_run(index), pump_run_channel, false);
+    let fault_contact =
+        plant.field_input::<bool>(points::fault_contact(index), fault_channel, false);
+    plant.field_input::<bool>(
+        points::drained_contact(index),
+        drained_contact_channel,
         false,
     );
-    let outlet_fb = plant.field_input::<bool>(
-        points::outlet_fb(index),
-        outlet_fb_channel,
-        false,
-    );
-    let waste_fb = plant.field_input::<bool>(
-        points::waste_fb(index),
-        waste_fb_channel,
-        false,
-    );
-    let air_fb = plant.field_input::<bool>(
-        points::air_fb(index),
-        air_fb_channel,
-        false,
-    );
-    let blower_run = plant.field_input::<bool>(
-        points::blower_run(index),
-        blower_run_channel,
-        false,
-    );
-    let pump_run = plant.field_input::<bool>(
-        points::pump_run(index),
-        pump_run_channel,
-        false,
-    );
-    let fault_contact = plant.field_input::<bool>(
-        points::fault_contact(index),
-        fault_channel,
-        false,
-    );
-    plant.field_input::<bool>(points::drained_contact(index), drained_contact_channel, false);
-    let inlet_cmd = plant.field_output::<bool>(
-        points::inlet_cmd(index),
-        inlet_cmd_channel,
-    );
-    let outlet_cmd = plant.field_output::<bool>(
-        points::outlet_cmd(index),
-        outlet_cmd_channel,
-    );
-    let waste_cmd = plant.field_output::<bool>(
-        points::waste_cmd(index),
-        waste_cmd_channel,
-    );
-    let air_cmd = plant.field_output::<bool>(
-        points::air_cmd(index),
-        air_cmd_channel,
-    );
-    let blower_cmd = plant.field_output::<bool>(
-        points::blower_cmd(index),
-        blower_cmd_channel,
-    );
-    let pump_cmd = plant.field_output::<bool>(
-        points::pump_cmd(index),
-        pump_cmd_channel,
-    );
-    let drain_cmd = plant.field_output::<bool>(
-        points::drain_cmd(index),
-        drain_cmd_channel,
-    );
-    let wash_valve_cmd = plant.field_output::<f64>(
-        points::wash_valve_cmd(index),
-        wash_valve_cmd_channel,
-    );
-    let wash_valve_pos = plant.field_input::<f64>(
-        points::wash_valve_pos(index),
-        wash_valve_pos_channel,
-        false,
-    );
+    let inlet_cmd = plant.field_output::<bool>(points::inlet_cmd(index), inlet_cmd_channel);
+    let outlet_cmd = plant.field_output::<bool>(points::outlet_cmd(index), outlet_cmd_channel);
+    let waste_cmd = plant.field_output::<bool>(points::waste_cmd(index), waste_cmd_channel);
+    let air_cmd = plant.field_output::<bool>(points::air_cmd(index), air_cmd_channel);
+    let blower_cmd = plant.field_output::<bool>(points::blower_cmd(index), blower_cmd_channel);
+    let pump_cmd = plant.field_output::<bool>(points::pump_cmd(index), pump_cmd_channel);
+    let drain_cmd = plant.field_output::<bool>(points::drain_cmd(index), drain_cmd_channel);
+    let wash_valve_cmd =
+        plant.field_output::<f64>(points::wash_valve_cmd(index), wash_valve_cmd_channel);
+    let wash_valve_pos =
+        plant.field_input::<f64>(points::wash_valve_pos(index), wash_valve_pos_channel, false);
 
     // Decision 102's declared recording duty: the filter's compliance
     // series records every scan.
@@ -1547,7 +1546,12 @@ fn wire_filter(
     plant.journaled(fault_contact);
 
     for (point, name, described_unit, description) in [
-        (points::headloss(index), "headloss", unit::M, "Headloss across the filter bed"),
+        (
+            points::headloss(index),
+            "headloss",
+            unit::M,
+            "Headloss across the filter bed",
+        ),
         (
             points::turbidity(index),
             "turbidity",
@@ -1560,7 +1564,12 @@ fn wire_filter(
             unit::NTU,
             "Simulated effluent-turbidity forcing the dynamics lags",
         ),
-        (points::level(index), "level", unit::M, "Water level above the filter bed"),
+        (
+            points::level(index),
+            "level",
+            unit::M,
+            "Water level above the filter bed",
+        ),
         (
             points::inflow(index),
             "inflow",
@@ -1603,12 +1612,42 @@ fn wire_filter(
             unit::M,
             "Headloss the open wash-water valve removes",
         ),
-        (points::inlet_fb(index), "inlet-fb", "", "Inlet-valve open contact"),
-        (points::outlet_fb(index), "outlet-fb", "", "Outlet-valve open contact"),
-        (points::waste_fb(index), "waste-fb", "", "Waste-valve open contact"),
-        (points::air_fb(index), "air-fb", "", "Air-valve open contact"),
-        (points::blower_run(index), "blower-run", "", "Air-scour blower run contact"),
-        (points::pump_run(index), "pump-run", "", "Backwash-pump run contact"),
+        (
+            points::inlet_fb(index),
+            "inlet-fb",
+            "",
+            "Inlet-valve open contact",
+        ),
+        (
+            points::outlet_fb(index),
+            "outlet-fb",
+            "",
+            "Outlet-valve open contact",
+        ),
+        (
+            points::waste_fb(index),
+            "waste-fb",
+            "",
+            "Waste-valve open contact",
+        ),
+        (
+            points::air_fb(index),
+            "air-fb",
+            "",
+            "Air-valve open contact",
+        ),
+        (
+            points::blower_run(index),
+            "blower-run",
+            "",
+            "Air-scour blower run contact",
+        ),
+        (
+            points::pump_run(index),
+            "pump-run",
+            "",
+            "Backwash-pump run contact",
+        ),
         (
             points::fault_contact(index),
             "fault",
@@ -1621,12 +1660,37 @@ fn wire_filter(
             "",
             "Plant-side drained-bed contact the drain step's measured input reads",
         ),
-        (points::inlet_cmd(index), "inlet-cmd", "", "Inlet-valve command"),
-        (points::outlet_cmd(index), "outlet-cmd", "", "Outlet-valve command"),
-        (points::waste_cmd(index), "waste-cmd", "", "Waste-valve command"),
+        (
+            points::inlet_cmd(index),
+            "inlet-cmd",
+            "",
+            "Inlet-valve command",
+        ),
+        (
+            points::outlet_cmd(index),
+            "outlet-cmd",
+            "",
+            "Outlet-valve command",
+        ),
+        (
+            points::waste_cmd(index),
+            "waste-cmd",
+            "",
+            "Waste-valve command",
+        ),
         (points::air_cmd(index), "air-cmd", "", "Air-valve command"),
-        (points::blower_cmd(index), "blower-cmd", "", "Air-scour blower run command"),
-        (points::pump_cmd(index), "pump-cmd", "", "Backwash-pump run command"),
+        (
+            points::blower_cmd(index),
+            "blower-cmd",
+            "",
+            "Air-scour blower run command",
+        ),
+        (
+            points::pump_cmd(index),
+            "pump-cmd",
+            "",
+            "Backwash-pump run command",
+        ),
         (
             points::drain_cmd(index),
             "drain-cmd",
@@ -1646,7 +1710,14 @@ fn wire_filter(
             "Wash-water valve position feedback",
         ),
     ] {
-        signal(plant, point, &format!("{tag}-{name}"), described_unit, description, &group);
+        signal(
+            plant,
+            point,
+            &format!("{tag}-{name}"),
+            described_unit,
+            description,
+            &group,
+        );
     }
 
     // The actuators' feedback loopbacks: the simulated plant observes the
@@ -1693,19 +1764,32 @@ fn wire_filter(
         Value::Bool(true),
     )])));
     let service = b.out_bool(plant, "service", "The filter is held in service", true);
-    let trip_ok_a = b.out_bool(plant, "in-service-ok", "In service — the inverted maintenance inhibit", true);
+    let trip_ok_a = b.out_bool(
+        plant,
+        "in-service-ok",
+        "In service — the inverted maintenance inhibit",
+        true,
+    );
     let service_gate = plant.add(BoolGateSpec::new(
         parameters([("operation", Value::Int(GATE_AND))]),
         2,
     ));
-    let service_in = b.deliver_bool(plant, "service-in", "In-service delivered to the guard and the filtering gate");
+    let service_in = b.deliver_bool(
+        plant,
+        "service-in",
+        "In-service delivered to the guard and the filtering gate",
+    );
     let trip_ok_b = b.out_bool(
         plant,
         "filter-out-of-service-ok",
         "Not held out of service — the inverted guard trip",
         true,
     );
-    let trip_ok_b_in = b.deliver_bool(plant, "filter-out-of-service-ok-in", "Not-held-out-of-service delivered to the filtering gate");
+    let trip_ok_b_in = b.deliver_bool(
+        plant,
+        "filter-out-of-service-ok-in",
+        "Not-held-out-of-service delivered to the filtering gate",
+    );
 
     let service_anchor = b.anchor(
         plant,
@@ -1729,22 +1813,39 @@ fn wire_filter(
         "The filter is held out of service by the declared meanwhile state",
         false,
     );
-    let service_trip_in = b.deliver_bool(plant, "service-trip-in", "In-service trip delivered to its inversion");
+    let service_trip_in = b.deliver_bool(
+        plant,
+        "service-trip-in",
+        "In-service trip delivered to its inversion",
+    );
     plant.journaled(service_trip);
     let inv_trip = plant.add(DigitalInputSpec::new(parameters([(
         "invert",
         Value::Bool(true),
     )])));
-    let filtering = b.out_bool(plant, "filtering", "The filter is filtering — in service and not washing", true);
+    let filtering = b.out_bool(
+        plant,
+        "filtering",
+        "The filter is filtering — in service and not washing",
+        true,
+    );
     plant.journaled(filtering);
-    let filtering_in = b.deliver_bool(plant, "filtering-in", "Filtering delivered to the run timer and the equipment patterns");
+    let filtering_in = b.deliver_bool(
+        plant,
+        "filtering-in",
+        "Filtering delivered to the run timer and the equipment patterns",
+    );
 
     plant.connect(oos, &inv_oos.input);
     plant.connect(&inv_oos.out, trip_ok_a);
-    plant.connect(in_service, &service_gate.input(1));
-    let trip_ok_a_in = b.deliver_bool(plant, "in-service-ok-in", "In-service delivered to the service gate");
+    plant.connect(in_service, service_gate.input(1));
+    let trip_ok_a_in = b.deliver_bool(
+        plant,
+        "in-service-ok-in",
+        "In-service delivered to the service gate",
+    );
     plant.connect(trip_ok_a_in, trip_ok_a);
-    plant.connect(trip_ok_a_in, &service_gate.input(2));
+    plant.connect(trip_ok_a_in, service_gate.input(2));
     plant.connect(&service_gate.out, service);
     plant.connect(service_in, service);
     plant.connect(service_in, &service_guard.permissive);
@@ -1759,8 +1860,8 @@ fn wire_filter(
         parameters([("operation", Value::Int(GATE_AND))]),
         2,
     ));
-    plant.connect(service_in, &filtering_gate.input(1));
-    plant.connect(trip_ok_b_in, &filtering_gate.input(2));
+    plant.connect(service_in, filtering_gate.input(1));
+    plant.connect(trip_ok_b_in, filtering_gate.input(2));
     plant.connect(&filtering_gate.out, filtering);
     plant.connect(filtering_in, filtering);
 
@@ -1768,8 +1869,18 @@ fn wire_filter(
     // Trigger primaries (decision 58).
     // ----------------------------------------------------------------
     let trig_time = b.out_bool(plant, "trig-time", "The elapsed-run-time trigger", false);
-    let trig_headloss = b.out_bool(plant, "trig-headloss", "The terminal-headloss trigger", false);
-    let trig_turbidity = b.out_bool(plant, "trig-turbidity", "The effluent-turbidity trigger", false);
+    let trig_headloss = b.out_bool(
+        plant,
+        "trig-headloss",
+        "The terminal-headloss trigger",
+        false,
+    );
+    let trig_turbidity = b.out_bool(
+        plant,
+        "trig-turbidity",
+        "The effluent-turbidity trigger",
+        false,
+    );
     let run_timer = plant.add(TimerSpec::new(parameters([(
         "delay_ticks",
         Value::Int(config.run_time_ticks),
@@ -1812,14 +1923,23 @@ fn wire_filter(
     ]);
     for n in 0..STEPS {
         let one = i64::try_from(n + 1).expect("the step index stays in range");
-        step_parameters.insert(format!("step_{one}_ticks"), Value::Int(config.step_ticks[n]));
+        step_parameters.insert(
+            format!("step_{one}_ticks"),
+            Value::Int(config.step_ticks[n]),
+        );
         step_parameters.insert(format!("step_{one}_out"), Value::Float(config.step_out[n]));
-        step_parameters.insert(format!("step_{one}_advance"), Value::Int(config.step_advance[n]));
+        step_parameters.insert(
+            format!("step_{one}_advance"),
+            Value::Int(config.step_advance[n]),
+        );
         step_parameters.insert(
             format!("step_{one}_on_overrun"),
             Value::Int(config.step_on_overrun[n]),
         );
-        step_parameters.insert(format!("step_{one}_bound"), Value::Float(config.step_bound[n]));
+        step_parameters.insert(
+            format!("step_{one}_bound"),
+            Value::Float(config.step_bound[n]),
+        );
         step_parameters.insert(format!("step_{one}_meas"), Value::Int(config.step_meas[n]));
     }
     let sequence = plant.add(BackwashSequenceSpec::new(step_parameters, 2, STEPS));
@@ -1831,21 +1951,53 @@ fn wire_filter(
 
     let request = b.out_bool(plant, "request", "The armed backwash request", false);
     plant.journaled(request);
-    let request_coord = b.deliver_bool(plant, "request-coord", "Request delivered to the coordinator");
-    let grant = b.out_bool(plant, "grant", "The coordinator's exclusive supply grant", false);
+    let request_coord = b.deliver_bool(
+        plant,
+        "request-coord",
+        "Request delivered to the coordinator",
+    );
+    let grant = b.out_bool(
+        plant,
+        "grant",
+        "The coordinator's exclusive supply grant",
+        false,
+    );
     plant.journaled(grant);
-    let grant_seq = b.deliver_bool(plant, "grant-seq", "Grant delivered to the sequence's run permissive");
-    let active = b.out_bool(plant, "active", "The sequence is stepping under the grant", false);
+    let grant_seq = b.deliver_bool(
+        plant,
+        "grant-seq",
+        "Grant delivered to the sequence's run permissive",
+    );
+    let active = b.out_bool(
+        plant,
+        "active",
+        "The sequence is stepping under the grant",
+        false,
+    );
     plant.journaled(active);
-    let active_in = b.deliver_bool(plant, "active-in", "Stepping delivered to the equipment patterns");
-    let pending = b.out_bool(plant, "pending", "The request is armed and awaiting the operator's start", false);
+    let active_in = b.deliver_bool(
+        plant,
+        "active-in",
+        "Stepping delivered to the equipment patterns",
+    );
+    let pending = b.out_bool(
+        plant,
+        "pending",
+        "The request is armed and awaiting the operator's start",
+        false,
+    );
     plant.journaled(pending);
     let done = b.out_bool(plant, "done", "The step table ran to its end", false);
     plant.journaled(done);
     let aborted = b.out_bool(plant, "aborted", "An abort path fired", false);
     plant.journaled(aborted);
     let aborted_in = b.deliver_bool(plant, "aborted-in", "Abort status delivered to its alarm");
-    let overrun = b.out_bool(plant, "overrun", "A measured step stands past its tick bound", false);
+    let overrun = b.out_bool(
+        plant,
+        "overrun",
+        "A measured step stands past its tick bound",
+        false,
+    );
     plant.journaled(overrun);
     let trigger = b.out_int(plant, "trigger-source", "The held trigger attribution", 0);
     plant.journaled(trigger);
@@ -1858,7 +2010,12 @@ fn wire_filter(
         "The reported step's declared wash-water valve position",
         0.0,
     );
-    let position = b.out_int(plant, "position", "The 1-based queue position; 0 while not queued", 0);
+    let position = b.out_int(
+        plant,
+        "position",
+        "The 1-based queue position; 0 while not queued",
+        0,
+    );
     plant.journaled(position);
     let rate_in = b.deliver_float(
         plant,
@@ -1867,9 +2024,21 @@ fn wire_filter(
         "The reported step's declared wash-water valve position",
     );
 
-    let trig_time_in = b.deliver_bool(plant, "trig-time-in", "Elapsed-run-time trigger delivered to the sequence");
-    let trig_headloss_in = b.deliver_bool(plant, "trig-headloss-in", "Terminal-headloss trigger delivered to the sequence");
-    let trig_turbidity_in = b.deliver_bool(plant, "trig-turbidity-in", "Effluent-turbidity trigger delivered to the sequence");
+    let trig_time_in = b.deliver_bool(
+        plant,
+        "trig-time-in",
+        "Elapsed-run-time trigger delivered to the sequence",
+    );
+    let trig_headloss_in = b.deliver_bool(
+        plant,
+        "trig-headloss-in",
+        "Terminal-headloss trigger delivered to the sequence",
+    );
+    let trig_turbidity_in = b.deliver_bool(
+        plant,
+        "trig-turbidity-in",
+        "Effluent-turbidity trigger delivered to the sequence",
+    );
 
     plant.connect(trig_time_in, trig_time);
     plant.connect(trig_time_in, &sequence.trig_time);
@@ -1880,11 +2049,11 @@ fn wire_filter(
     plant.connect(operator_start, &sequence.trig_operator);
     plant.connect(abort, &sequence.abort);
     plant.connect(grant_seq, &sequence.grant);
-    plant.connect(drain_depth, &sequence.meas(1));
-    plant.connect(turbidity, &sequence.meas(2));
+    plant.connect(drain_depth, sequence.meas(1));
+    plant.connect(turbidity, sequence.meas(2));
     plant.connect(&sequence.request, request);
     plant.connect(request_coord, request);
-    plant.connect(request_coord, &coordinator.request(index + 1));
+    plant.connect(request_coord, coordinator.request(index + 1));
     plant.connect(coordinator.grant(index + 1), grant);
     plant.connect(grant_seq, grant);
     plant.connect(&sequence.active, active);
@@ -1911,17 +2080,25 @@ fn wire_filter(
         "The declared meanwhile-state condition holding the filter out of service",
         false,
     );
-    let meanwhile_in = b.deliver_bool(plant, "meanwhile-in", "Meanwhile-state condition delivered to the in-service guard");
-    let trip_source = if config.queued_state == 0 { active } else { request };
+    let meanwhile_in = b.deliver_bool(
+        plant,
+        "meanwhile-in",
+        "Meanwhile-state condition delivered to the in-service guard",
+    );
+    let trip_source = if config.queued_state == 0 {
+        active
+    } else {
+        request
+    };
     plant.connect(meanwhile_in, trip_source);
-    plant.connect(meanwhile_in, &service_guard.trip(1));
+    plant.connect(meanwhile_in, service_guard.trip(1));
 
     // ----------------------------------------------------------------
     // The phase flags and the declared equipment pattern.
     // ----------------------------------------------------------------
     let mut phase_carriers = Vec::with_capacity(STEPS);
     let mut phase = [PointId(0); STEPS];
-    for n in 0..STEPS {
+    for (n, slot) in phase.iter_mut().enumerate() {
         let name = format!("phase-{}", n + 1);
         let carrier = b.out_bool(
             plant,
@@ -1930,8 +2107,8 @@ fn wire_filter(
             false,
         );
         plant.journaled(carrier);
-        plant.connect(&sequence.phase(n + 1), carrier);
-        phase[n] = carrier.into();
+        plant.connect(sequence.phase(n + 1), carrier);
+        *slot = carrier.into();
         phase_carriers.push(carrier);
     }
     // The step-active carriers: `active AND phase_<n>`. The kind reports
@@ -1942,7 +2119,7 @@ fn wire_filter(
     // them, so the step report and the equipment pattern are separately
     // visible.
     let mut step_carriers = Vec::with_capacity(STEPS);
-    for n in 0..STEPS {
+    for (n, phase_carrier) in phase_carriers.iter().enumerate() {
         let gate = plant.add(BoolGateSpec::new(
             parameters([("operation", Value::Int(GATE_AND))]),
             2,
@@ -1958,7 +2135,7 @@ fn wire_filter(
             &format!("step-flag-{}", n + 1),
             "The phase flag delivered to its step-active gate",
         );
-        plant.connect(flag, phase_carriers[n]);
+        plant.connect(flag, *phase_carrier);
         let carrier = b.out_bool(
             plant,
             &format!("step-active-{}", n + 1),
@@ -1978,15 +2155,18 @@ fn wire_filter(
     let mut fanout = [0usize; STEPS];
     let mut copies: Vec<Vec<InPoint<bool>>> = (0..STEPS).map(|_| Vec::new()).collect();
     let copy = |plant: &mut PlantBuilder,
-                    b: &mut Block,
-                    fanout: &mut [usize; STEPS],
-                    copies: &mut Vec<Vec<InPoint<bool>>>,
-                    carrier: OutPoint<bool>,
-                    n: usize,
-                    role: &str| {
+                b: &mut Block,
+                fanout: &mut [usize; STEPS],
+                copies: &mut Vec<Vec<InPoint<bool>>>,
+                carrier: OutPoint<bool>,
+                n: usize,
+                role: &str| {
         let name = format!("step-{}-{}", n + 1, fanout[n] + 1);
-        let delivered =
-            b.deliver_bool(plant, &name, &format!("Step {} delivered to the {role}", n + 1));
+        let delivered = b.deliver_bool(
+            plant,
+            &name,
+            &format!("Step {} delivered to the {role}", n + 1),
+        );
         plant.connect(delivered, carrier);
         fanout[n] += 1;
         copies[n].push(delivered);
@@ -2021,7 +2201,7 @@ fn wire_filter(
         Value::Int(config.actuator_fault_ticks),
     )])));
     plant.param_unit(inlet_motor.id, "fault_ticks", unit::TICKS);
-    plant.connect(filtering_in, &inlet_gate.input(1));
+    plant.connect(filtering_in, inlet_gate.input(1));
     for (slot, n) in inlet_pattern.iter().enumerate() {
         let delivered = copy(
             plant,
@@ -2032,7 +2212,7 @@ fn wire_filter(
             *n,
             "inlet pattern gate",
         );
-        plant.connect(delivered, &inlet_gate.input(slot + 2));
+        plant.connect(delivered, inlet_gate.input(slot + 2));
     }
     plant.connect(&inlet_gate.out, &inlet_motor.cmd);
     plant.connect(inlet_fb, &inlet_motor.run);
@@ -2051,8 +2231,8 @@ fn wire_filter(
         Value::Int(config.actuator_fault_ticks),
     )])));
     plant.param_unit(outlet_motor.id, "fault_ticks", unit::TICKS);
-    plant.connect(filtering_in, &outlet_gate.input(1));
-    plant.connect(active_in, &outlet_gate.input(2));
+    plant.connect(filtering_in, outlet_gate.input(1));
+    plant.connect(active_in, outlet_gate.input(2));
     for (slot, n) in outlet_pattern.iter().enumerate() {
         let delivered = copy(
             plant,
@@ -2063,7 +2243,7 @@ fn wire_filter(
             *n,
             "outlet pattern gate",
         );
-        plant.connect(delivered, &outlet_gate.input(slot + 3));
+        plant.connect(delivered, outlet_gate.input(slot + 3));
     }
     plant.connect(&outlet_gate.out, &outlet_motor.cmd);
     plant.connect(outlet_fb, &outlet_motor.run);
@@ -2090,7 +2270,7 @@ fn wire_filter(
             *n,
             "waste pattern gate",
         );
-        plant.connect(delivered, &waste_gate.input(slot + 1));
+        plant.connect(delivered, waste_gate.input(slot + 1));
     }
     plant.connect(&waste_gate.out, &waste_motor.cmd);
     plant.connect(waste_fb, &waste_motor.run);
@@ -2124,7 +2304,7 @@ fn wire_filter(
             *n,
             "air pattern gate",
         );
-        plant.connect(delivered, &air_gate.input(slot + 1));
+        plant.connect(delivered, air_gate.input(slot + 1));
     }
     plant.connect(&air_gate.out, &air_motor.cmd);
     plant.connect(air_fb, &air_motor.run);
@@ -2188,11 +2368,15 @@ fn wire_filter(
             *n,
             "pump gate",
         );
-        plant.connect(delivered, &wash_gate.input(slot + 1));
+        plant.connect(delivered, wash_gate.input(slot + 1));
     }
-    let exclusion_ok_in = b.deliver_bool(plant, "exclusion-ok-in", "Air-scour exclusion delivered to the pump gate");
+    let exclusion_ok_in = b.deliver_bool(
+        plant,
+        "exclusion-ok-in",
+        "Air-scour exclusion delivered to the pump gate",
+    );
     plant.connect(exclusion_ok_in, exclusion_ok);
-    plant.connect(exclusion_ok_in, &wash_gate.input(wash_pattern.len() + 1));
+    plant.connect(exclusion_ok_in, wash_gate.input(wash_pattern.len() + 1));
     plant.connect(&wash_gate.out, &pump_motor.cmd);
     plant.connect(pump_run, &pump_motor.run);
     plant.connect(&pump_motor.out, pump_cmd);
@@ -2215,15 +2399,23 @@ fn wire_filter(
             *n,
             "wash-water permissive",
         );
-        plant.connect(delivered, &water_gate.input(slot + 1));
+        plant.connect(delivered, water_gate.input(slot + 1));
     }
     let water_permissive_gate = plant.add(BoolGateSpec::new(
         parameters([("operation", Value::Int(GATE_AND))]),
         2,
     ));
     let water_gate_out = b.out_bool(plant, "water-step", "A wash-water step is asserting", false);
-    let water_gate_in = b.deliver_bool(plant, "water-step-in", "Wash-water step delivered to the permissive gate");
-    let exclusion_ok_water = b.deliver_bool(plant, "exclusion-ok-water", "Air-scour exclusion delivered to the wash-water permissive");
+    let water_gate_in = b.deliver_bool(
+        plant,
+        "water-step-in",
+        "Wash-water step delivered to the permissive gate",
+    );
+    let exclusion_ok_water = b.deliver_bool(
+        plant,
+        "exclusion-ok-water",
+        "Air-scour exclusion delivered to the wash-water permissive",
+    );
     let water_permissive = b.out_bool(
         plant,
         "water-permissive",
@@ -2237,9 +2429,9 @@ fn wire_filter(
     );
     plant.connect(&water_gate.out, water_gate_out);
     plant.connect(water_gate_in, water_gate_out);
-    plant.connect(water_gate_in, &water_permissive_gate.input(1));
+    plant.connect(water_gate_in, water_permissive_gate.input(1));
     plant.connect(exclusion_ok_water, exclusion_ok);
-    plant.connect(exclusion_ok_water, &water_permissive_gate.input(2));
+    plant.connect(exclusion_ok_water, water_permissive_gate.input(2));
     plant.connect(&water_permissive_gate.out, water_permissive);
     plant.connect(water_permissive_in, water_permissive);
 
@@ -2313,7 +2505,7 @@ fn wire_filter(
         step::AIR_SCOUR,
         "high-rate exclusion guard",
     );
-    plant.connect(guard_trip, &exclusion_guard.trip(1));
+    plant.connect(guard_trip, exclusion_guard.trip(1));
     plant.connect(&exclusion_guard.out, guarded_rate);
     plant.connect(&exclusion_guard.tripped, exclusion_tripped);
     plant.connect(valve_cmd, guarded_rate);
@@ -2324,10 +2516,23 @@ fn wire_filter(
     // ----------------------------------------------------------------
     // The fault aggregate (decisions 60, 61).
     // ----------------------------------------------------------------
-    let fault = b.out_bool(plant, "fault", "The aggregated per-filter equipment fault", false);
+    let fault = b.out_bool(
+        plant,
+        "fault",
+        "The aggregated per-filter equipment fault",
+        false,
+    );
     plant.journaled(fault);
-    let fault_seq = b.deliver_bool(plant, "fault-seq", "Fault aggregate delivered to the sequence");
-    let fault_alarm_in = b.deliver_bool(plant, "fault-alarm-in", "Fault aggregate delivered to its alarm");
+    let fault_seq = b.deliver_bool(
+        plant,
+        "fault-seq",
+        "Fault aggregate delivered to the sequence",
+    );
+    let fault_alarm_in = b.deliver_bool(
+        plant,
+        "fault-alarm-in",
+        "Fault aggregate delivered to its alarm",
+    );
     let fault_gate = plant.add(BoolGateSpec::new(
         parameters([("operation", Value::Int(GATE_OR))]),
         9,
@@ -2337,7 +2542,7 @@ fn wire_filter(
     let mut next_fault_input = 2;
     // The filter's own equipment-fault contact binds directly: a field
     // `In` point feeds many port inputs.
-    plant.connect(fault_contact, &fault_gate.input(1));
+    plant.connect(fault_contact, fault_gate.input(1));
     for actuator in [
         &inlet_motor.fault,
         &outlet_motor.fault,
@@ -2346,10 +2551,10 @@ fn wire_filter(
         &blower_motor.fault,
         &pump_motor.fault,
     ] {
-        plant.connect(actuator, &fault_gate.input(next_fault_input));
+        plant.connect(actuator, fault_gate.input(next_fault_input));
         next_fault_input += 1;
     }
-    plant.connect(&wash_valve.discrepancy, &fault_gate.input(next_fault_input));
+    plant.connect(&wash_valve.discrepancy, fault_gate.input(next_fault_input));
     let fault_trip_input = b.deliver_bool(
         plant,
         "turbidity-trip",
@@ -2435,8 +2640,8 @@ fn wire_filter(
         "cbhl-window-in",
         "The clean-bed-headloss window delivered to its check",
     );
-    plant.connect(cbhl_window_reference, &cbhl_window_gate.input(1));
-    plant.connect(cbhl_window_verify, &cbhl_window_gate.input(2));
+    plant.connect(cbhl_window_reference, cbhl_window_gate.input(1));
+    plant.connect(cbhl_window_verify, cbhl_window_gate.input(2));
     plant.connect(&cbhl_window_gate.out, cbhl_window);
     plant.connect(cbhl_window_in, cbhl_window);
     let ripening_phase = copy(
@@ -2476,7 +2681,11 @@ fn wire_filter(
         "The clean-bed headloss has not settled within the declared deadline",
         false,
     );
-    let cbhl_alarm_in = b.deliver_bool(plant, "cbhl-alarm-in", "Clean-bed-headloss excursion delivered to its alarm");
+    let cbhl_alarm_in = b.deliver_bool(
+        plant,
+        "cbhl-alarm-in",
+        "Clean-bed-headloss excursion delivered to its alarm",
+    );
     let ripening_exceeded = b.out_bool(
         plant,
         "ripening-exceeded",
@@ -2493,8 +2702,16 @@ fn wire_filter(
         parameters([("operation", Value::Int(GATE_OR))]),
         2,
     ));
-    let ripening_exceeded_in = b.deliver_bool(plant, "ripening-exceeded-in", "The ripening excursion delivered to its alarm");
-    let ripening_overdue_in = b.deliver_bool(plant, "ripening-overdue-in", "The ripening deadline delivered to its alarm");
+    let ripening_exceeded_in = b.deliver_bool(
+        plant,
+        "ripening-exceeded-in",
+        "The ripening excursion delivered to its alarm",
+    );
+    let ripening_overdue_in = b.deliver_bool(
+        plant,
+        "ripening-overdue-in",
+        "The ripening deadline delivered to its alarm",
+    );
     let ripening_deviation = b.out_float(
         plant,
         "ripening-deviation",
@@ -2508,7 +2725,11 @@ fn wire_filter(
         "The ripening excursion or its deadline stands",
         false,
     );
-    let ripening_alarm_in = b.deliver_bool(plant, "ripening-alarm-in", "Ripening excursion delivered to its alarm");
+    let ripening_alarm_in = b.deliver_bool(
+        plant,
+        "ripening-alarm-in",
+        "Ripening excursion delivered to its alarm",
+    );
 
     plant.connect(headloss, &cbhl.input);
     plant.connect(cbhl_capture, &cbhl.capture);
@@ -2524,9 +2745,9 @@ fn wire_filter(
     plant.connect(&ripening.overdue, ripening_overdue);
     plant.connect(&ripening.deviation, ripening_deviation);
     plant.connect(ripening_exceeded_in, ripening_exceeded);
-    plant.connect(ripening_exceeded_in, &ripening_gate.input(1));
+    plant.connect(ripening_exceeded_in, ripening_gate.input(1));
     plant.connect(ripening_overdue_in, ripening_overdue);
-    plant.connect(ripening_overdue_in, &ripening_gate.input(2));
+    plant.connect(ripening_overdue_in, ripening_gate.input(2));
     plant.connect(&ripening_gate.out, ripening_fault);
     plant.connect(ripening_alarm_in, ripening_fault);
 
@@ -2540,7 +2761,10 @@ fn wire_filter(
             ("low_limit", Value::Float(-PARKED_LIMIT)),
             ("high_limit", Value::Float(config.turbidity_alarm_ntu)),
             ("hysteresis", Value::Float(config.turbidity_hysteresis_ntu)),
-            ("max_shelve_ticks", Value::Int(config.turbidity_alarm_max_shelve_ticks)),
+            (
+                "max_shelve_ticks",
+                Value::Int(config.turbidity_alarm_max_shelve_ticks),
+            ),
             ("priority", Value::Int(2)),
             ("class", Value::Int(1)),
             ("response_ticks", Value::Int(30)),
@@ -2623,7 +2847,7 @@ fn wire_filter(
         fault_trip_input,
         trip_alarm_carrier.expect("the trip alarm declared its status carrier"),
     );
-    plant.connect(fault_trip_input, &fault_gate.input(9));
+    plant.connect(fault_trip_input, fault_gate.input(9));
 
     let headloss_alarm_instance = plant.add(ManagedLatchingAlarmSpec::new(
         parameters([

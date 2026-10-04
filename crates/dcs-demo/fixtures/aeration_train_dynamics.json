@@ -1,0 +1,257 @@
+[
+  {
+    "scaled_flow": {
+      "input": 30,
+      "output": 24,
+      "gain": 5.5,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 24,
+      "output": 25,
+      "gain": 0.006,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 23,
+      "output": 26,
+      "gain": -1.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        25,
+        26
+      ],
+      "output": 27,
+      "bias": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "first_order_lag": {
+      "input": 27,
+      "output": 20,
+      "time_constant": 1.0,
+      "initial": 2.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        25,
+        26
+      ],
+      "output": 28,
+      "bias": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "first_order_lag": {
+      "input": 28,
+      "output": 21,
+      "time_constant": 3.0,
+      "initial": 2.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        25,
+        26
+      ],
+      "output": 29,
+      "bias": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "first_order_lag": {
+      "input": 29,
+      "output": 22,
+      "time_constant": 8.0,
+      "initial": 2.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 70,
+      "output": 64,
+      "gain": 5.5,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 64,
+      "output": 65,
+      "gain": 0.006,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 63,
+      "output": 66,
+      "gain": -1.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        65,
+        66
+      ],
+      "output": 67,
+      "bias": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "first_order_lag": {
+      "input": 67,
+      "output": 60,
+      "time_constant": 1.0,
+      "initial": 2.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        65,
+        66
+      ],
+      "output": 68,
+      "bias": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "first_order_lag": {
+      "input": 68,
+      "output": 61,
+      "time_constant": 3.0,
+      "initial": 2.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        65,
+        66
+      ],
+      "output": 69,
+      "bias": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "first_order_lag": {
+      "input": 69,
+      "output": 62,
+      "time_constant": 8.0,
+      "initial": 2.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 403,
+      "output": 400,
+      "gain": 5.5,
+      "initial": 0.0
+    }
+  },
+  {
+    "first_order_lag": {
+      "input": 400,
+      "output": 401,
+      "time_constant": 1.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 401,
+      "output": 402,
+      "gain": 0.12,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 427,
+      "output": 424,
+      "gain": 5.5,
+      "initial": 0.0
+    }
+  },
+  {
+    "first_order_lag": {
+      "input": 424,
+      "output": 425,
+      "time_constant": 1.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 425,
+      "output": 426,
+      "gain": 0.12,
+      "initial": 0.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        401,
+        425
+      ],
+      "output": 13,
+      "bias": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 13,
+      "output": 11,
+      "gain": 1.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 13,
+      "output": 15,
+      "gain": 0.03,
+      "initial": 0.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        15
+      ],
+      "output": 14,
+      "bias": 30.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "first_order_lag": {
+      "input": 14,
+      "output": 10,
+      "time_constant": 1.0,
+      "initial": 30.0
+    }
+  }
+]

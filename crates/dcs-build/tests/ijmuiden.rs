@@ -676,8 +676,7 @@ fn journaled_marks_the_durable_record_points() {
         layout.gate_cmd,
         layout.level_selected,
         layout.level_filtered,
-        layout.level_trend,
-        layout.deviation,
+        layout.rate,
         layout.gate_demand,
         layout.chain_demand,
         layout.gate_auto_demand,
@@ -931,9 +930,10 @@ fn scripted_run_shows_the_consequential_annunciation() {
         at(lah_at).filtered
     );
     assert!(scans[..22].iter().any(|scan| scan.lah_unack));
-    // The composed rate-of-rise annunciation: the divergence detector
-    // flags the sustained rise and its alarm latches until the
-    // scan-24 ack.
+    // The dedicated rate-of-rise annunciation (the post-M10 transition
+    // record's adopted answer): the one-sided detector flags the rising
+    // level and its alarm latches until the scan-24 ack — the same
+    // carrier, the same alarm, the same annunciation order.
     assert!(scans[..24].iter().any(|scan| scan.deviating));
     assert!(scans[..25].iter().any(|scan| scan.ror_unack));
 

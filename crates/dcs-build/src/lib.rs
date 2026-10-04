@@ -151,6 +151,7 @@
 
 #![warn(missing_docs)]
 
+pub mod aeration;
 mod builder;
 pub mod dosing;
 pub mod dynamics;

@@ -59,9 +59,7 @@ use dcs_build::filter_bank::{
 };
 use dcs_build::station::AlarmLayout;
 use dcs_build::{PointId, Value};
-use dcs_core::{
-    Command, CommandOutcome, CommandReceipt, IoDriver, Value as CoreValue, ValueKind,
-};
+use dcs_core::{Command, CommandOutcome, CommandReceipt, IoDriver, Value as CoreValue, ValueKind};
 use dcs_model::PlantModel;
 use dcs_sim::ProcessElement;
 
@@ -312,11 +310,15 @@ fn run() -> Run {
     // filter held in service with a clean bed and clear effluent — plus one
     // step so scan 1 sees the dynamics' declared state rather than the
     // binding's neutral seed.
-    sim.write(layout.supply_available, CoreValue::Bool(true)).unwrap();
-    sim.write(layout.waste_available, CoreValue::Bool(true)).unwrap();
-    sim.write(layout.flow_disturbance, CoreValue::Float(0.0)).unwrap();
+    sim.write(layout.supply_available, CoreValue::Bool(true))
+        .unwrap();
+    sim.write(layout.waste_available, CoreValue::Bool(true))
+        .unwrap();
+    sim.write(layout.flow_disturbance, CoreValue::Float(0.0))
+        .unwrap();
     for filter in &layout.filters {
-        sim.write(points::inflow(filter.index - 1), CoreValue::Float(0.0)).unwrap();
+        sim.write(points::inflow(filter.index - 1), CoreValue::Float(0.0))
+            .unwrap();
         sim.write(
             points::turbidity_forcing(filter.index - 1),
             CoreValue::Float(0.05),
@@ -335,7 +337,12 @@ fn run() -> Run {
         let sample = |point| executor.sample(point).unwrap();
         let alarms = all_alarms(&layout)
             .into_iter()
-            .map(|alarm| (bool_(sample(alarm.alarm)), bool_(sample(alarm.unacknowledged))))
+            .map(|alarm| {
+                (
+                    bool_(sample(alarm.alarm)),
+                    bool_(sample(alarm.unacknowledged)),
+                )
+            })
             .collect();
         scans.push(Scan {
             active: int(sample(layout.active)),
@@ -415,7 +422,8 @@ fn run() -> Run {
         if scan == 5 {
             // Filter 1's bed fouls: its terminal headloss crosses the declared
             // bound and arms the bank's first request.
-            sim.write(points::inflow(0), CoreValue::Float(0.02)).unwrap();
+            sim.write(points::inflow(0), CoreValue::Float(0.02))
+                .unwrap();
         }
         if scan == 62 {
             // Filter 2's effluent clouds past its turbidity trigger while its
@@ -448,11 +456,8 @@ fn run() -> Run {
             // each filter's fault aggregate.
             late = true;
             for index in 0..FILTERS {
-                sim.write(
-                    points::turbidity_forcing(index),
-                    CoreValue::Float(1.3),
-                )
-                .unwrap();
+                sim.write(points::turbidity_forcing(index), CoreValue::Float(1.3))
+                    .unwrap();
             }
         }
         if scan == SCANS - 12 {
@@ -466,9 +471,11 @@ fn run() -> Run {
         if (SCANS - 12..=SCANS - 10).contains(&scan) {
             // The online-flow disturbance crosses its bound, so the `flow_ok`
             // permissive falls and the bank's alarm stands.
-            sim.write(layout.flow_disturbance, CoreValue::Float(0.9)).unwrap();
+            sim.write(layout.flow_disturbance, CoreValue::Float(0.9))
+                .unwrap();
         } else if scan > SCANS - 10 {
-            sim.write(layout.flow_disturbance, CoreValue::Float(0.0)).unwrap();
+            sim.write(layout.flow_disturbance, CoreValue::Float(0.0))
+                .unwrap();
         }
 
         // The resource-blocked leg: the waste permissive is held down while a
@@ -476,12 +483,14 @@ fn run() -> Run {
         // grant permissive and the withheld grant is named. The leg retires
         // once the bank has reported it.
         if !blocked_once && current.queued >= 1 {
-            sim.write(layout.waste_available, CoreValue::Bool(false)).unwrap();
+            sim.write(layout.waste_available, CoreValue::Bool(false))
+                .unwrap();
             if current.resource_blocked {
                 blocked_once = true;
             }
         } else {
-            sim.write(layout.waste_available, CoreValue::Bool(true)).unwrap();
+            sim.write(layout.waste_available, CoreValue::Bool(true))
+                .unwrap();
         }
 
         // The reactive legs, keyed off what the run just observed.
@@ -507,11 +516,8 @@ fn run() -> Run {
                     verify_open[index] = true;
                     sim.write(points::inflow(index), CoreValue::Float(0.05))
                         .unwrap();
-                    sim.write(
-                        points::turbidity_forcing(index),
-                        CoreValue::Float(0.9),
-                    )
-                    .unwrap();
+                    sim.write(points::turbidity_forcing(index), CoreValue::Float(0.9))
+                        .unwrap();
                 } else if verify_open[index] && !seen.step_active[step::VERIFY] {
                     // The window closed: filter 1 and filter 2 return to a
                     // fouling fill rate, so their next washes arm on their own
@@ -520,17 +526,11 @@ fn run() -> Run {
                     verify_open[index] = false;
                     verify_done[index] = true;
                     fill_rate[index] = if index == 2 { 0.0 } else { 0.02 };
-                    sim.write(
-                        points::inflow(index),
-                        CoreValue::Float(fill_rate[index]),
-                    )
-                    .unwrap();
-                    if index == 2 {
-                        sim.write(
-                            points::turbidity_forcing(index),
-                            CoreValue::Float(0.05),
-                        )
+                    sim.write(points::inflow(index), CoreValue::Float(fill_rate[index]))
                         .unwrap();
+                    if index == 2 {
+                        sim.write(points::turbidity_forcing(index), CoreValue::Float(0.05))
+                            .unwrap();
                     }
                 }
             }
@@ -539,7 +539,8 @@ fn run() -> Run {
             // reached too.
             if verify_done[2] && washes[2] >= 2 && fill_rate[2] == 0.0 {
                 fill_rate[2] = 0.02;
-                sim.write(points::inflow(2), CoreValue::Float(0.02)).unwrap();
+                sim.write(points::inflow(2), CoreValue::Float(0.02))
+                    .unwrap();
             }
             // The second wash of each filter is the operator abort: the
             // declared abort step, distinct from a completed table.
@@ -577,7 +578,12 @@ fn run() -> Run {
         // so the request is asserted on the scan it is written and released on
         // the next.
         if let Some(alarm) = held_ack.take() {
-            write(&mut executor, alarm.ack, ValueKind::Bool, Value::Bool(false));
+            write(
+                &mut executor,
+                alarm.ack,
+                ValueKind::Bool,
+                Value::Bool(false),
+            );
         } else if !pending_acks.is_empty() {
             let alarm = pending_acks.remove(0);
             write(&mut executor, alarm.ack, ValueKind::Bool, Value::Bool(true));
@@ -611,10 +617,10 @@ fn the_helper_re_emits_the_checked_in_document_exactly() {
 
 #[test]
 fn identical_builder_invocations_emit_identical_documents() {
-    let first = serde_json::to_string(&filter_bank(&FilterBankConfig::reference()).unwrap().model)
-        .unwrap();
-    let second = serde_json::to_string(&filter_bank(&FilterBankConfig::reference()).unwrap().model)
-        .unwrap();
+    let first =
+        serde_json::to_string(&filter_bank(&FilterBankConfig::reference()).unwrap().model).unwrap();
+    let second =
+        serde_json::to_string(&filter_bank(&FilterBankConfig::reference()).unwrap().model).unwrap();
     assert_eq!(first, second);
 }
 
@@ -716,7 +722,8 @@ fn every_declared_trigger_source_attributes_its_own_wash() {
             .find(|trigger| *trigger != 0)
             .unwrap_or(0);
         assert_eq!(
-            first, source,
+            first,
+            source,
             "filter {}'s first wash attributed to {first}",
             filter + 1
         );
@@ -755,11 +762,7 @@ fn the_grant_is_exclusive_and_the_queue_reports_its_order() {
             .count();
         assert_eq!(usize::try_from(scan.queued).unwrap(), positioned);
         // A request never exceeds the queue.
-        let armed = scan
-            .filters
-            .iter()
-            .filter(|filter| filter.request)
-            .count();
+        let armed = scan.filters.iter().filter(|filter| filter.request).count();
         assert!(armed as i64 >= scan.queued);
     }
     // Contention stood in the queue while two filters were armed at once.
@@ -799,12 +802,16 @@ fn a_queued_filter_keeps_filtering_under_the_declared_meanwhile_state() {
 #[test]
 fn the_table_advances_on_the_measured_step_and_the_declared_ticks() {
     let run = run();
-    assert!(run.scans.iter().any(|scan| {
-        scan.filters[0].step == 1 && scan.filters[0].drain_depth < 1.0
-    }));
-    assert!(run.scans.iter().any(|scan| {
-        scan.filters[0].drain_depth >= 1.0 && scan.filters[0].step > 1
-    }));
+    assert!(
+        run.scans
+            .iter()
+            .any(|scan| { scan.filters[0].step == 1 && scan.filters[0].drain_depth < 1.0 })
+    );
+    assert!(
+        run.scans
+            .iter()
+            .any(|scan| { scan.filters[0].drain_depth >= 1.0 && scan.filters[0].step > 1 })
+    );
     for filter in 0..FILTERS {
         let highest = run
             .scans
@@ -877,8 +884,7 @@ fn the_phase_flags_drive_the_declared_equipment_pattern() {
                 // withdrawn wash-water permissive: it stands while no wash
                 // step asserts and clears inside the wash phases.
                 assert_eq!(
-                    filter.exclusion_tripped,
-                    !filter.water_permissive,
+                    filter.exclusion_tripped, !filter.water_permissive,
                     "{filter:?}"
                 );
                 assert_eq!(
@@ -899,7 +905,6 @@ fn the_phase_flags_drive_the_declared_equipment_pattern() {
                     in_pattern(pattern.wash) && filter.exclusion_ok,
                     "{filter:?}"
                 );
-
             }
         }
     }
@@ -932,10 +937,7 @@ fn the_wash_water_demand_is_rate_limited_and_guarded() {
             if water && filter.exclusion_ok {
                 assert!(filter.water_permissive, "{filter:?}");
                 assert!(filter.guarded > 0.0, "{filter:?}");
-                assert!(
-                    filter.guarded <= filter.rate_limited + 1e-9,
-                    "{filter:?}"
-                );
+                assert!(filter.guarded <= filter.rate_limited + 1e-9, "{filter:?}");
             } else {
                 assert_eq!(filter.guarded, 0.0, "{filter:?}");
                 assert_eq!(filter.wash_cmd, 0.0, "{filter:?}");
@@ -957,10 +959,7 @@ fn the_grant_gates_the_table_and_releases_on_completion() {
             }
             if filter.position > 0 && !filter.grant {
                 assert!(!filter.active, "{filter:?}");
-                assert!(
-                    !filter.step_active.iter().any(|flag| *flag),
-                    "{filter:?}"
-                );
+                assert!(!filter.step_active.iter().any(|flag| *flag), "{filter:?}");
             }
         }
     }
@@ -976,13 +975,9 @@ fn the_grant_gates_the_table_and_releases_on_completion() {
         // The completion drops the request, which is the grant release: either
         // the grant falls inside the coordinator's one-scan boundary or the
         // filter has already begun a fresh wash on a new trigger.
-        let released = run.scans[completion + 1..]
-            .iter()
-            .take(4)
-            .all(|scan| {
-                !scan.filters[filter].grant
-                    || scan.filters[filter].step < i64::try_from(STEPS).unwrap()
-            });
+        let released = run.scans[completion + 1..].iter().take(4).all(|scan| {
+            !scan.filters[filter].grant || scan.filters[filter].step < i64::try_from(STEPS).unwrap()
+        });
         assert!(
             released,
             "filter {}'s grant outlived its completion",
@@ -1086,9 +1081,10 @@ fn the_post_wash_checks_flag_their_declared_excursions() {
         );
     }
     assert!(
-        run.scans
+        run.scans.iter().any(|scan| scan
+            .filters
             .iter()
-            .any(|scan| scan.filters.iter().any(|f| f.cbhl_overdue || f.ripening_overdue)),
+            .any(|f| f.cbhl_overdue || f.ripening_overdue)),
         "no verification deadline ever stood"
     );
 }
@@ -1169,7 +1165,11 @@ fn the_resource_blocked_queue_and_the_flow_permissive_alarm() {
     // A disturbance past its bound falls the `flow_ok` permissive, so no grant
     // issues while it stands.
     assert!(run.scans.iter().any(|scan| !scan.flow_ok));
-    assert!(run.scans.iter().any(|scan| !scan.flow_ok && scan.alarms[1].0));
+    assert!(
+        run.scans
+            .iter()
+            .any(|scan| !scan.flow_ok && scan.alarms[1].0)
+    );
     // Both permissives return.
     let last = run.scans.last().unwrap();
     assert!(last.flow_ok);
@@ -1221,7 +1221,11 @@ fn the_journaled_adoption_covers_every_alarm_status_point() {
     }
     assert_eq!(checked, alarms.len() * 5);
     // Every writable operator point rides the receipted path.
-    let writable = model.io_points.iter().filter(|point| point.writable).count();
+    let writable = model
+        .io_points
+        .iter()
+        .filter(|point| point.writable)
+        .count();
     assert!(
         writable >= alarms.len() + 4 * FILTERS,
         "the bank exposes too few writable points for its command surface"
@@ -1268,15 +1272,18 @@ fn the_field_points_carry_their_declared_engineering_units() {
     // Every signal inherits its point's declared unit rather than repeating a
     // display string beside it.
     for signal in &model.signals {
-        if let Some(point) = model.io_points.iter().find(|point| point.id == signal.source) {
-            if let Some(unit) = &point.unit {
-                assert_eq!(
-                    signal.unit.as_ref(),
-                    Some(unit),
-                    "signal {:?} drifts from its point's declared unit",
-                    signal.id
-                );
-            }
+        if let Some(point) = model
+            .io_points
+            .iter()
+            .find(|point| point.id == signal.source)
+            && let Some(unit) = &point.unit
+        {
+            assert_eq!(
+                signal.unit.as_ref(),
+                Some(unit),
+                "signal {:?} drifts from its point's declared unit",
+                signal.id
+            );
         }
     }
 }
@@ -1320,7 +1327,10 @@ fn the_declared_signals_render_the_bank_without_a_second_configuration() {
         .collect();
     assert!(groups.contains(&"backwash-supply"));
     assert_eq!(
-        groups.iter().filter(|group| **group == "filter-f101").count(),
+        groups
+            .iter()
+            .filter(|group| **group == "filter-f101")
+            .count(),
         groups
             .iter()
             .filter(|group| **group == "filter-f102")
@@ -1334,7 +1344,9 @@ fn every_measured_scan_sample_is_finite() {
     for scan in &run.scans {
         for filter in &scan.filters {
             assert!(
-                filter.headloss.is_finite() && filter.turbidity.is_finite() && filter.cbhl_dev.is_finite(),
+                filter.headloss.is_finite()
+                    && filter.turbidity.is_finite()
+                    && filter.cbhl_dev.is_finite(),
                 "{filter:?}"
             );
         }
