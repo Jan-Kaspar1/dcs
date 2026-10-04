@@ -286,7 +286,8 @@ fn attributed_events(
 /// its own step failures, and its kind-emitted events. Run-level
 /// entries — role changes, refused self-promotions, divergence
 /// detections and resolutions, reinitializations, tracking-source
-/// adoptions, run boundaries — belong to no instance.
+/// adoptions and refusals, foreign-writer preemptions, run boundaries
+/// — belong to no instance.
 fn attributed(entry: &JournalEntry, name: &str, points: &BTreeSet<PointId>) -> bool {
     match &entry.event {
         JournalEvent::QualityChanged { point, .. }
@@ -311,8 +312,10 @@ fn attributed(entry: &JournalEntry, name: &str, points: &BTreeSet<PointId>) -> b
         | JournalEvent::Reinitialized { .. }
         | JournalEvent::FieldOrphaned { .. }
         | JournalEvent::SourceRestarted { .. }
+        | JournalEvent::RestartConsult { .. }
         | JournalEvent::TrackingSourceAdopted { .. }
         | JournalEvent::TrackingSourceRefused { .. }
+        | JournalEvent::ForeignClaimPreempted { .. }
         | JournalEvent::RunBoundary { .. } => false,
     }
 }

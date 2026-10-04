@@ -52,7 +52,7 @@ mod state;
 mod telemetry;
 
 pub use carryover::{CarriedPoint, CarryoverReport, DroppedElement, RevertedParameter};
-pub use command::{Command, CommandError, CommandOutcome, CommandReceipt};
+pub use command::{Command, CommandError, CommandOutcome, CommandReceipt, SubmissionId};
 pub use descriptor::{
     CommandDecl, ComponentDescriptor, EventDecl, ParameterDescriptor, ParameterRange,
     PortDescriptor, PortRole,
@@ -69,7 +69,9 @@ pub use io::{
     CyclicIoDriver, Direction, DriverDiagnostics, ExchangeDiagnostics, Input, IoDriver, IoError,
     LinkState, Output, PointType, TypedSample,
 };
-pub use journal::{EmittedEvent, EventRecord, EventValue, JournalEntry, JournalEvent};
+pub use journal::{
+    EmittedEvent, EventRecord, EventValue, JournalEntry, JournalEvent, RestartConsultOutcome,
+};
 pub use resources::{
     CommandState, ComponentInterface, ComponentResources, ConfigValue, ResourceEvent,
     ResourceSample, ResourceView, SchemaView,

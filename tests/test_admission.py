@@ -300,6 +300,49 @@ class AdmissionTests(unittest.TestCase):
         self.assertIsNone(groups['cooldown_until'])
         self.assertTrue(self.a.reserve('next', 'swe-2-high', 'next', 5))
 
+    def test_generic_probe_failure_rearms_the_probe_cooldown(self):
+        """#1365: a generically failed probe paces the next probe by cooldown_len.
+
+        'failure' carries no provider signal, so it must not halve, block, or
+        congest the group — but released without a re-armed cooldown the probe
+        slot regrants at the dispatch rate and a persistently crashing spawn
+        burns a probe wave of amplitude 1 and period 0.
+        """
+        # A generic failure on an ordinary lease stays a plain crash: it frees
+        # capacity without cooling the group.
+        meta = self.start('crash')
+        self.a.finish('crash', meta, 'failure')
+        groups = self.a.summary()['groups']['swe']
+        self.assertEqual(groups['mode'], 'normal')
+        self.assertIsNone(groups['cooldown_until'])
+        # A rate receipt opens the probing episode; past the cooldown the
+        # single probe slot grants.
+        meta = self.start('one')
+        self.a.finish('one', meta, 'rate')
+        groups = self.a.summary()['groups']['swe']
+        self.assertEqual(groups['mode'], 'probing')
+        self.assertEqual(groups['cooldown_until'], self.now + 10)
+        self.now += 11
+        # Each failed probe re-arms the cooldown: the slot stays closed for
+        # cooldown_len instead of regranting in the same tick, and the group
+        # keeps probing rather than escalating on crash evidence.
+        for i in range(3):
+            probe = self.start('probe-' + str(i))
+            self.a.finish('probe-' + str(i), probe, 'failure')
+            groups = self.a.summary()['groups']['swe']
+            self.assertEqual(groups['mode'], 'probing')
+            self.assertEqual(groups['cooldown_until'], self.now + 10)
+            self.assertFalse(self.a.reserve('spin-' + str(i), 'swe-2-high', 'spin-' + str(i), 5))
+            self.now += 9
+            self.assertFalse(self.a.reserve('early-' + str(i), 'swe-2-high', 'early-' + str(i), 5))
+            self.now += 1
+        # Past the re-armed interval the next probe is granted — a single
+        # paced probe, not a wave.
+        self.start('probe-3')
+        granted = self.state.db.execute('SELECT probe FROM admission_leases WHERE owner=?',
+                                        ('probe-3',)).fetchone()
+        self.assertEqual(granted['probe'], 1)
+
     def test_probe_lease_predating_the_ordering_column_cannot_unblock(self):
         stale, probe = self._inflight_probe()
         # A deployment upgraded with a probe in flight keeps that lease at the

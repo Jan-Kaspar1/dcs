@@ -815,6 +815,7 @@ mod tests {
             parameters,
             rationalization: None,
             ports: BTreeMap::new(),
+            parameter_units: BTreeMap::new(),
         };
         let block =
             RateOfRise::from_parameters("ror", IN, RATE, RISING, &instance.parameters).unwrap();

@@ -82,7 +82,6 @@ named diagnostic rather than passing silently.
 """
 
 import argparse
-import hashlib
 import json
 import os
 import sys
@@ -1320,9 +1319,7 @@ def main():
         return 1
     if failures:
         return 1
-    digest = hashlib.sha256(
-        json.dumps(digest_entries, sort_keys=True).encode()
-    ).hexdigest()
+    digest = simulate.stable_digest(digest_entries)
     print(
         f"oos-digest {digest} — duty handed to the sibling at tick "
         f"{evidence['excluded_at']}, managed states at tick "

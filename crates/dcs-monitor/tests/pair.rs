@@ -131,7 +131,15 @@ impl PeerRig {
     /// tracking source — the configured `--peer`/`--standby` half of
     /// the follow-peer contract a demotion tracks.
     fn start_tracking(role: Role, source: Option<SocketAddr>) -> Self {
-        Self::assemble(role, source, None, None)
+        Self::assemble(role, source, None, None, None)
+    }
+
+    /// [`start_tracking`](Self::start_tracking) with the executor
+    /// minting receipt identities under `origin` — the per-run
+    /// submission nonce that keeps the pair's split mints
+    /// distinguishable when their absolute receipt indices collide.
+    fn start_seeded(role: Role, origin: u64, source: Option<SocketAddr>) -> Self {
+        Self::assemble(role, source, None, None, Some(origin))
     }
 
     /// [`start`](Self::start) with a scripted field-claim probe: the
@@ -139,14 +147,14 @@ impl PeerRig {
     /// currently holds, so a test drives `field_claim` through `held` /
     /// `unclaimed` without field-side arbitration.
     fn start_probed(role: Role, claim: Arc<Mutex<FieldClaim>>) -> Self {
-        Self::assemble(role, None, Some(claim), None)
+        Self::assemble(role, None, Some(claim), None, None)
     }
 
     /// [`start`](Self::start) with the peer's failover budget armed —
     /// `budget` as `--auto-promote N` — so the served report carries
     /// the gate's standing proof and miss accounting.
     fn start_failover(role: Role, budget: u32) -> Self {
-        Self::assemble(role, None, None, Some(budget))
+        Self::assemble(role, None, None, Some(budget), None)
     }
 
     fn assemble(
@@ -154,6 +162,7 @@ impl PeerRig {
         source: Option<SocketAddr>,
         claim: Option<Arc<Mutex<FieldClaim>>>,
         failover: Option<u32>,
+        origin: Option<u64>,
     ) -> Self {
         let driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
             (PointId(10), Value::Float(0.0)),
@@ -165,6 +174,10 @@ impl PeerRig {
             .with_point(PointId(20), Direction::Out, ValueKind::Float)
             .with_point(PointId(30), Direction::Out, ValueKind::Float);
         let executor = Executor::new(driver, map, vec![Box::new(Scale)]).unwrap();
+        let executor = match origin {
+            Some(origin) => executor.with_submission_origin(origin),
+            None => executor,
+        };
         let peer = match role {
             Role::Active => Peer::active(executor, None),
             _ => Peer::standby(executor, None),
@@ -239,7 +252,7 @@ fn pair_health_fault_kinds_roundtrip() {
             fault_kinds: vec![kind],
         };
         let json = serde_json::to_value(&health).unwrap();
-        assert_eq!(json["fault_kinds_version"], 3);
+        assert_eq!(json["fault_kinds_version"], 4);
         assert_eq!(json["fault_kinds"], serde_json::json!([kind]));
         assert_eq!(serde_json::from_value::<PairHealth>(json).unwrap(), health);
     }
@@ -270,7 +283,7 @@ fn healthy_pair_health_omits_empty_fault_kinds_and_roundtrips() {
         fault_kinds: vec![],
     };
     let json = serde_json::to_value(&health).unwrap();
-    assert_eq!(json["fault_kinds_version"], 3);
+    assert_eq!(json["fault_kinds_version"], 4);
     assert!(json.get("fault_kinds").is_none());
     assert_eq!(serde_json::from_value::<PairHealth>(json).unwrap(), health);
 }
@@ -356,6 +369,7 @@ fn commands_route_only_to_the_peer_reporting_active() {
                 apply_tick: Tick(2)
             },
             actor: None,
+            submission: None,
             reason: None,
         }]
     );
@@ -793,6 +807,74 @@ fn an_orphaned_standby_is_a_named_fault() {
     standby.stop();
 }
 
+/// The narrower ownerless verdict as pair health: a standby whose
+/// tracked line has no field owner *while the field's own arbitration
+/// names a writer outside the pair* is `standby_usurped`, not
+/// `standby_orphaned`. The two read differently to an operator and to
+/// the remedy — an ownerless field is taken by promoting onto it, an
+/// usurped one by promoting *against* the writer standing on it — so a
+/// pair view that collapsed them would ask for the wrong action. The
+/// verdict is poll-driven like every other: a writer that starts owning
+/// the line again ends the fault.
+#[test]
+fn an_usurped_standby_is_a_named_fault() {
+    let active = PeerRig::start(Role::Active);
+    let claim = Arc::new(Mutex::new(FieldClaim::Held));
+    let standby = PeerRig::start_probed(Role::Standby, Arc::clone(&claim));
+    let mut pair = PairClient::new([active.addr, standby.addr]);
+
+    active.client.advance(1).unwrap();
+    let mut orphaned = active.client.checkpoint().unwrap();
+    orphaned.source_owns_field = Some(false);
+    standby.monitor.apply_checkpoint(&orphaned).unwrap();
+    // The field's own arbitration holds — under a writer that cannot
+    // prove the pair's key, which is the half the sync verdict cannot
+    // see and the diagnosis supplies.
+    *claim.lock().unwrap() = FieldClaim::Held;
+    standby.client.advance(1).unwrap();
+    standby
+        .monitor
+        .note_foreign_writer(Some("127.0.0.1:9099".parse().unwrap()));
+
+    pair.poll_roles();
+    match status_of(&pair, standby.addr) {
+        PeerStatus::Reporting(report) => {
+            assert!(
+                matches!(report.sync, Some(StandbySync::Usurped { .. })),
+                "the usurped standby must not read as ownerless: {report:?}"
+            );
+            assert_eq!(
+                report.field_claim,
+                Some(FieldClaim::Held),
+                "the pair has a writer — that is what the verdict names"
+            );
+        }
+        other => panic!("expected the standby's report, got {other:?}"),
+    }
+    let health = pair.health();
+    assert_eq!(health.active, Some(active.addr));
+    assert_fault_kinds(&health, &[PairFaultKind::StandbyUsurped]);
+    assert!(
+        health
+            .faults
+            .iter()
+            .any(|fault| fault.contains(&standby.addr.to_string())
+                && fault.contains("outside its pair")),
+        "expected the usurped standby named as a redundancy fault, got {:?}",
+        health.faults
+    );
+
+    // Not sticky: a writer inside the line clears the diagnosis, the
+    // narrower verdict falls back to the ownerless one, and the pair
+    // fault with it.
+    standby.monitor.note_foreign_writer(None);
+    pair.poll_roles();
+    assert_fault_kinds(&pair.health(), &[PairFaultKind::StandbyOrphaned]);
+
+    active.stop();
+    standby.stop();
+}
+
 /// The unclaimed-field verdict as pair health: a reporting peer whose
 /// served `field_claim` stands `unclaimed` — the field's own
 /// arbitration answering "no owner stands" — is named the
@@ -1036,4 +1118,163 @@ fn page_carries_the_pair_view_and_answers_cross_origin_role_reads() {
     );
 
     active.stop();
+}
+
+/// QA finding `receipt-index-collision-displaces-settled-receipt`
+/// (#775): the promote/fence window's split mint — the demoting peer
+/// and its successor each admitting a command at the same absolute
+/// index — must not silently overwrite the displaced receipt in the
+/// served `/receipts` audit. The demoted peer's adoption re-mints it
+/// past the adopted window's high-water with its command, actor, and
+/// terminal `superseded` verdict intact, and its settle journals
+/// exactly once.
+#[test]
+fn an_index_collision_keeps_the_displaced_receipt_in_the_served_audit() {
+    // B is the standby that converges on A and takes the field; both
+    // mint receipt identities under their own origins, so the window's
+    // split mint stays distinguishable on either side. A names B as its
+    // configured tracking source, so the demotion below has somewhere
+    // to follow.
+    let b = PeerRig::start_seeded(Role::Standby, 22, None);
+    let a = PeerRig::start_seeded(Role::Active, 11, Some(b.addr));
+    b.monitor
+        .apply_checkpoint(&a.client.checkpoint().unwrap())
+        .unwrap();
+
+    // The reproduction's order: B's promotion takes the field from the
+    // checkpoint it just converged on — which carries no receipts — and
+    // the raced command lands on the still-field-owning A at index 0,
+    // where the demotion suspends it.
+    assert_eq!(b.client.promote().unwrap().role, Role::Promoting);
+    b.client.advance(1).unwrap();
+    assert_eq!(b.client.role().unwrap().role, Role::Active);
+
+    let raced = write_value(10, ValueKind::Float, Value::Float(5.0));
+    let receipt = a.client.command_as(&raced, Some("op-a")).unwrap();
+    assert!(
+        matches!(receipt.outcome, CommandOutcome::Accepted { .. }),
+        "{receipt:?}"
+    );
+
+    // The successor's own admission mints at the same index — the
+    // diverged `attempts` counters meet only at convergence.
+    let successor = write_value(10, ValueKind::Float, Value::Float(9.0));
+    b.client.command_as(&successor, Some("op-b")).unwrap();
+    b.client.advance(1).unwrap();
+    assert_eq!(b.client.receipts().unwrap().len(), 1);
+
+    a.client.demote().unwrap();
+    a.monitor
+        .apply_checkpoint(&b.client.checkpoint().unwrap())
+        .unwrap();
+    a.client.advance(1).unwrap();
+
+    // Both submissions are served: the successor's at the contested
+    // index 0, the displaced one re-minted to index 1 with its command,
+    // actor, and terminal `superseded` verdict intact.
+    let receipts = a.client.receipts().unwrap();
+    assert_eq!(receipts.len(), 2, "{receipts:?}");
+    assert_eq!(receipts[0].command, successor);
+    assert_eq!(receipts[0].actor.as_deref(), Some("op-b"));
+    assert!(matches!(
+        receipts[0].outcome,
+        CommandOutcome::Applied { .. }
+    ));
+    assert_eq!(receipts[1].command, raced);
+    assert_eq!(receipts[1].actor.as_deref(), Some("op-a"));
+    assert!(matches!(
+        receipts[1].outcome,
+        CommandOutcome::Rejected {
+            reason: CommandError::Superseded { .. }
+        }
+    ));
+    assert_ne!(receipts[0].submission, receipts[1].submission);
+
+    // The displaced settle journaled exactly once — the re-home re-keys
+    // the recorded emission rather than re-emitting it.
+    let settles: Vec<_> = a
+        .client
+        .journal(0)
+        .unwrap()
+        .into_iter()
+        .filter(|entry| {
+            matches!(&entry.event, JournalEvent::CommandSettled { receipt } if receipt.command == raced)
+        })
+        .collect();
+    assert_eq!(settles.len(), 1, "{settles:?}");
+
+    // And it stays served: further scans and adoptions never drop it.
+    a.monitor
+        .apply_checkpoint(&b.client.checkpoint().unwrap())
+        .unwrap();
+    a.client.advance(1).unwrap();
+    let receipts = a.client.receipts().unwrap();
+    assert_eq!(receipts.len(), 2, "{receipts:?}");
+    assert_eq!(receipts[1].command, raced);
+
+    a.stop();
+    b.stop();
+}
+
+/// The consolidated #776 case over the served endpoints: the demoting
+/// peer's suspended admission and the successor's carry the *same*
+/// command — payload equality must not merge them. The suspended
+/// submission settles `superseded` under its own actor and identity,
+/// served beside the successor's applied receipt.
+#[test]
+fn an_equal_command_collision_keeps_both_submissions_in_the_served_audit() {
+    let b = PeerRig::start_seeded(Role::Standby, 22, None);
+    let a = PeerRig::start_seeded(Role::Active, 11, Some(b.addr));
+    b.monitor
+        .apply_checkpoint(&a.client.checkpoint().unwrap())
+        .unwrap();
+
+    assert_eq!(b.client.promote().unwrap().role, Role::Promoting);
+    b.client.advance(1).unwrap();
+
+    // Same command on both sides of the window, minted at index 0 by
+    // each run under its own identity and actor.
+    let command = write_value(10, ValueKind::Float, Value::Float(5.0));
+    a.client.command_as(&command, Some("op-a")).unwrap();
+    b.client.command_as(&command, Some("op-b")).unwrap();
+    b.client.advance(1).unwrap();
+
+    a.client.demote().unwrap();
+    a.monitor
+        .apply_checkpoint(&b.client.checkpoint().unwrap())
+        .unwrap();
+    a.client.advance(1).unwrap();
+
+    // The equal payloads never merged: index 0 is the successor's
+    // applied record, index 1 the suspended submission's superseded
+    // one — actors and identities distinguishable throughout.
+    let receipts = a.client.receipts().unwrap();
+    assert_eq!(receipts.len(), 2, "{receipts:?}");
+    assert_eq!(receipts[0].command, command);
+    assert_eq!(receipts[0].actor.as_deref(), Some("op-b"));
+    assert!(matches!(
+        receipts[0].outcome,
+        CommandOutcome::Applied { .. }
+    ));
+    assert_eq!(receipts[1].command, command);
+    assert_eq!(receipts[1].actor.as_deref(), Some("op-a"));
+    assert!(matches!(
+        receipts[1].outcome,
+        CommandOutcome::Rejected {
+            reason: CommandError::Superseded { .. }
+        }
+    ));
+
+    // Each settle journaled exactly once under its own identity.
+    let journal = a.client.journal(0).unwrap();
+    let settles: Vec<_> = journal
+        .iter()
+        .filter(|entry| {
+            matches!(&entry.event, JournalEvent::CommandSettled { receipt } if receipt.command == command)
+        })
+        .collect();
+    assert_eq!(settles.len(), 2, "{settles:?}");
+
+    a.stop();
+    b.stop();
 }

@@ -597,6 +597,7 @@ fn setpoint_command_changes_output_at_the_tick_boundary() {
                     apply_tick: Tick(2)
                 },
                 actor: None,
+                submission: None,
                 reason: None,
             }
         );
@@ -623,6 +624,7 @@ fn setpoint_command_changes_output_at_the_tick_boundary() {
                 command,
                 outcome: CommandOutcome::Applied { tick: Tick(2) },
                 actor: None,
+                submission: None,
                 reason: None,
             }
         );
@@ -924,15 +926,16 @@ fn the_pages_pair_fault_kinds_match_the_versioned_contract() {
             "standby_diverged",
             "standby_orphaned",
             "standby_unsynchronized_past_grace",
+            "standby_usurped",
         ]
     );
-    assert_eq!(PAIR_FAULT_KINDS_VERSION, 3);
+    assert_eq!(PAIR_FAULT_KINDS_VERSION, 4);
 
     with_monitor(|_driver, client| {
         let page = client.page().unwrap();
         let compact: String = page.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(
-            compact.contains("constPAIR_FAULT_KINDS_VERSION=3;"),
+            compact.contains("constPAIR_FAULT_KINDS_VERSION=4;"),
             "page lacks the version constant"
         );
         assert!(
@@ -1166,6 +1169,7 @@ fn trend_and_journal_feeds_track_the_run() {
                         reason: CommandError::UnknownPoint { point: PointId(99) },
                     },
                     actor: None,
+                    submission: None,
                     reason: None,
                 },
             }
@@ -1476,12 +1480,14 @@ fn force_and_release_are_journaled_and_badged_in_the_snapshot() {
                     command: force,
                     outcome: CommandOutcome::Applied { tick: Tick(2) },
                     actor: None,
+                    submission: None,
                     reason: None,
                 },
                 CommandReceipt {
                     command: unforce,
                     outcome: CommandOutcome::Applied { tick: Tick(4) },
                     actor: None,
+                    submission: None,
                     reason: None,
                 },
             ]

@@ -77,10 +77,12 @@
 //!    `sequence_completed` boundary the completing `advance` produced.
 //!
 //! Every leg boundary compares the pair view's snapshot, the receipt
-//! log, and the checkpoint digest — model fingerprint normalized, the
-//! pair and reference models differing only in the plant address —
-//! against the no-consumer reference, and every tick asserts all
-//! three snapshots equal and the field carrying the owner's write.
+//! log, and the checkpoint digest — model fingerprint, generation, line
+//! owner, and tracking source normalized, the pair and reference models
+//! differing only in the plant address and each run booting on its own
+//! monitor addresses — against the no-consumer reference, and every
+//! tick asserts all three snapshots equal and the field carrying the
+//! owner's write.
 //! The whole run executes twice; the returned outcome must be
 //! identical.
 
@@ -106,7 +108,7 @@ use std::time::{Duration, Instant};
 
 mod support;
 
-use support::{SimTcp, controller_model, settle_sink_health, spawn_controller, spawn_plant};
+use support::{SimTcp, audit, controller_model, settle_sink_health, spawn_controller, spawn_plant};
 
 /// The showcase plant model the plant servers load — the #69 fixture.
 const PLANT_MODEL: &str = concat!(
@@ -286,18 +288,25 @@ fn settlements_of(client: &MonitorClient, command: &Command) -> Vec<(u64, Comman
 }
 
 /// The checkpoint a client serves with its model fingerprint, stream
-/// generation, and line-owner name normalized out: the pair and
-/// reference models differ only in the plant address, each process
-/// mints its own generation at boot, and each serving run stamps its
-/// own monitor as the line's field owner, so the rest of the
-/// transferable state — tick, component states, output and internal
-/// images, forces, receipts, admission counters — must serialize
-/// identically.
+/// generation, line-owner name, and tracking source normalized out:
+/// the pair and reference models differ only in the plant address,
+/// each process mints its own generation at boot, and each serving run
+/// stamps its own monitor as the line's field owner and, while it does
+/// not own the field, the peer it would pull from — per-instance wiring,
+/// not transferable run state — so the rest of it — tick, component
+/// states, output and internal images, forces, receipts, admission
+/// counters — must serialize identically. The receipts pass through
+/// the same normalization: a minted `submission` (#775) names its
+/// minting run, not the line.
 fn checkpoint_digest(client: &MonitorClient) -> Vec<u8> {
     let mut checkpoint: Checkpoint = client.checkpoint().unwrap();
     checkpoint.model_fingerprint = None;
     checkpoint.generation = None;
     checkpoint.line_owner = None;
+    checkpoint.tracking_source = None;
+    for receipt in &mut checkpoint.receipts {
+        receipt.submission = None;
+    }
     serde_json::to_vec(&checkpoint).unwrap()
 }
 
@@ -435,8 +444,8 @@ fn leg_boundary(
         "{name}: consumer traffic changed the checkpoint"
     );
     assert_eq!(
-        owner.receipts().unwrap(),
-        reference.receipts().unwrap(),
+        audit(owner.receipts().unwrap()),
+        audit(reference.receipts().unwrap()),
         "{name}: consumer traffic changed the receipt log"
     );
     checkpoints.push(owner_checkpoint);
@@ -1775,7 +1784,10 @@ fn run_verification(tag: &str) -> Outcome {
         emitted(&standby).is_empty(),
         "the promoted peer's journal must hold no emission its quiesced scans never produced"
     );
-    assert_eq!(standby.receipts().unwrap(), reference.receipts().unwrap());
+    assert_eq!(
+        audit(standby.receipts().unwrap()),
+        audit(reference.receipts().unwrap())
+    );
     for client in [&active, &standby, &reference] {
         let journal = client.journal(0).unwrap();
         let settled = journal
@@ -1793,7 +1805,7 @@ fn run_verification(tag: &str) -> Outcome {
         field: trace,
         stages,
         checkpoints,
-        receipts: standby.receipts().unwrap(),
+        receipts: audit(standby.receipts().unwrap()),
         emitted: emitted(&standby),
         journals: {
             let served = [
@@ -1828,7 +1840,9 @@ fn run_verification(tag: &str) -> Outcome {
             // address — its ephemeral listen port run-unique by
             // nature — so the identical-runs comparison masks the
             // port while keeping the event's presence, `seq`, `tick`,
-            // and named host.
+            // and named host. A settlement's `submission` names the
+            // minting run (#775) — run-unique by the same nature — so
+            // it masks out beside the port.
             for journal in &mut journals {
                 for entry in journal {
                     match &mut entry.event {
@@ -1836,6 +1850,7 @@ fn run_verification(tag: &str) -> Outcome {
                         | JournalEvent::TrackingSourceRefused { source, .. } => {
                             source.set_port(0);
                         }
+                        JournalEvent::CommandSettled { receipt } => receipt.submission = None,
                         _ => {}
                     }
                 }

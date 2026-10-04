@@ -22,7 +22,8 @@ command/event surface the clean check proves.
 
 ```
 Cargo.toml             the package — git-pinned to the release tag
-Cargo.lock             the resolved pin — release crates from git only
+Cargo.lock             the resolved pin — release crates from git only,
+                       recorded at the pin this tree declares
 rust-toolchain.toml    the toolchain the release declares
 src/station.rs         the consumer-owned station composition
 src/main.rs            the emit entry point
@@ -31,6 +32,11 @@ model/plant.json       the emitted, approved plant model
 model/dynamics.json    the declared simulation dynamics
 ci/scenario.json       the generated scenario the CI drives
 ci/check.sh            the clean-CI check a fresh clone runs
+ci/lockfile.py         the committed-lockfile leg — the manifest's
+                       declared pin read through `cargo metadata
+                       --no-deps`, the lockfile parsed as TOML, the
+                       release crates' recorded sources held to the
+                       pin before any fetch can rewrite the artifact
 ci/alarm_validation.py the alarm-validation leg — the emitted model's
                        managed-alarm record audited, doctored copies
                        refused by the released `dcs-controller
@@ -159,15 +165,27 @@ platform checkout — the only platform coupling is the pinned release in
 `Cargo.toml` pins the release crates by release tag:
 
 ```toml
-dcs-build = { git = "https://github.com/Jan-Kaspar1/dcs.git", tag = "v0.8.0" }
-dcs-model = { git = "https://github.com/Jan-Kaspar1/dcs.git", tag = "v0.8.0" }
+dcs-build = { git = "https://github.com/Jan-Kaspar1/dcs.git", tag = "v0.10.0" }
+dcs-model = { git = "https://github.com/Jan-Kaspar1/dcs.git", tag = "v0.10.0" }
 ```
 
 `rev = "<commit>"` names the identical immutable commit — the recorded
-commit `docs/releases/v0.8.0/record.md` carries — and is always
+commit `docs/releases/v0.10.0/record.md` carries — and is always
 supported. `Cargo.lock` is committed so every build resolves the same
 sources; a tag pin resolves the tag once and the committed lockfile
-records the commit it landed on.
+records the commit it landed on. The two are one artifact, not two
+declarations that drift: the committed lockfile records this
+manifest's pin — the same remote, the same `tag`/`rev`, resolved to the
+commit that release names — so a fresh clone resolves it under
+`cargo fetch --locked`, and `ci/check.sh`'s `lockfile` stage says so by
+name before any fetch can quietly re-resolve it. A lockfile that
+records another revision is `lockfile-stale`; the documented remedy is
+`cargo update` in this tree (§7), which regenerates it against the pin
+above. Every record of a release crate in that file must carry a git
+source: a released crate reaching the tree through a `path`
+dependency — which Cargo records with no `source` line at all, and
+which `cargo fetch --locked` accepts over the very same file — is
+`path-dependency-leak`.
 
 ### 3. Compose and emit
 
@@ -197,7 +215,7 @@ The released tooling accepts the emitted model — `ci/check.sh` runs
 over `model/plant.json`. Install the tooling from the pinned release:
 
 ```sh
-cargo install --git https://github.com/Jan-Kaspar1/dcs.git --tag v0.8.0 \
+cargo install --git https://github.com/Jan-Kaspar1/dcs.git --tag v0.10.0 \
     dcs-model dcs-controller dcs-plant dcs-monitor
 ```
 
@@ -653,16 +671,30 @@ the duty's reachable monitor address, `<active-host>:8080` in place of
 
 A compatible upgrade is a repin: change the `rev`/`tag` in
 `Cargo.toml`, run `cargo update` to move the lockfile, and re-run
-`ci/check.sh`. Within a compatible crossing the supported API and
+`ci/check.sh`. The `cargo update` is not optional bookkeeping — until
+it lands, the committed lockfile still records the previous release,
+`cargo fetch --locked` cannot resolve the tree, and the check names
+that `lockfile-stale` rather than repairing it for you. Within a
+compatible crossing the supported API and
 `MODEL_VERSION` are unchanged — the check passing is the upgrade's
 acceptance. `ci/check.sh` proves the path itself: its `upgrade` stage
-materializes this tree at the previous release's recorded rev —
-`v0.7.0`'s publish commit — repins it to this tree's recorded
-release, and re-runs the full check requiring a byte-identical
-`model/plant.json`.
+materializes this tree at the earliest release-line rev whose builder
+API carries this composition's declared dimensional metadata —
+`PlantBuilder::unit`/`port_unit`/`param_unit` — repins it to this
+tree's recorded release, and re-runs the full check requiring a
+byte-identical `model/plant.json`. The baseline advances whenever this
+tree's own source starts depending on a newer supported surface; the
+crossing it proves is always "this source, unchanged, across the
+repin".
 
 An **incompatible** crossing fails with named diagnostics, never
 silently: a pin that resolves no release crates is `pin-unresolvable`;
+a committed `Cargo.lock` that records another remote, another
+`rev`/`tag`, or another revision than the manifest declares is
+`lockfile-stale`; a release crate recorded from a `path` into a
+checkout rather than the pinned remote — a record carrying no `source`
+line at all, as Cargo writes a path package — is
+`path-dependency-leak`;
 a pin whose supported API no longer compiles your composition is
 `surface-incompatible`; a model document the release's tooling refuses
 is `tooling-rejected`; a model whose semantic content changed under a

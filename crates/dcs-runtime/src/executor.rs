@@ -17,8 +17,8 @@ use dcs_core::{
     CommandQueueDiagnostics, CommandReceipt, CommandVerdict, ComponentCommands,
     ComponentDiagnostics, ComponentParameters, CyclicIoDriver, Direction, DroppedElement,
     EmittedEvent, ForcedPoint, IoDriver, IoError, IoFault, IoHealth, ModelFingerprint, PointId,
-    PointTelemetry, Quality, QualityReason, RevertedParameter, Sample, StateMap, TelemetrySnapshot,
-    Tick, TickAnchor, Value, ValueKind,
+    PointTelemetry, Quality, QualityReason, RevertedParameter, Sample, StateMap, SubmissionId,
+    TelemetrySnapshot, Tick, TickAnchor, Value, ValueKind,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -64,6 +64,16 @@ pub struct PointSpec {
     /// domain; `None` disables the check, and the budget is
     /// inert on internal points (never driver-read) and `Out` points
     /// (never read).
+    ///
+    /// The budget is a floor rather than the whole patience: the input
+    /// phase widens it to the arrival period the run has watched this
+    /// point's report demonstrate — the reader-tick gaps between
+    /// observed report changes — so a reader scanning faster than the
+    /// field owner steps its inputs does not call each not-yet-arrived
+    /// publication stale. The frozen-field verdict the budget exists for
+    /// stands: a field that stops publishing ages out one demonstrated
+    /// period past its last report, and a point that never published at
+    /// all ages out one budget past its first observation.
     pub stale_after_ticks: Option<u64>,
     /// Whether the point's observed value transitions join the durable
     /// journal — the `journaled` flag a model `io_point` declaration
@@ -416,6 +426,66 @@ struct Freshness {
     /// in a domain running ahead of the run seeds at the observation
     /// itself — the freshest thing the run has seen.
     since: Tick,
+    /// The point's demonstrated arrival period — what the run has
+    /// learned of the field's own publishing pace, in the run's ticks,
+    /// measured from the run's first observation of the point and
+    /// grown by every report the run watches change since.
+    arrival: Arrival,
+}
+
+/// One budgeted point's demonstrated arrival period: how often the
+/// field publishes, as the run — never the field — measures it.
+///
+/// A freshness budget in run ticks answers a question about the
+/// *reader's* patience, and a reader cannot see a publication it has
+/// not been sent yet: a peer scanning faster than the field owner
+/// steps its inputs reads the same report on every scan in between, and
+/// a budget below the owner's step period would call each of those
+/// publications stale. So the run also remembers the pace the field has
+/// actually demonstrated — the reader-tick gaps between the report
+/// changes it has observed — and never judges the report stale before
+/// the longer of the declared budget and that demonstrated period has
+/// passed. The gaps are same-domain measures (two run ticks, and both
+/// recorded from observed changes, never from the driver-stamped seed
+/// `since` may carry), so the period reads no cross-domain subtraction
+/// the age beside it does not.
+#[derive(Debug, Clone, Copy)]
+struct Arrival {
+    /// The run tick of the most recent observed report change: the
+    /// origin the next gap is measured from. Seeded with the run's
+    /// first observation of the point, so the first gap opens from
+    /// wherever the reader joined — short when it joined just ahead of
+    /// a publication. The gap after it runs between two consecutive
+    /// publications and is a whole period wherever the reader joined,
+    /// which is what the two-deep window beneath buys.
+    last: Tick,
+    /// The two most recent gaps between observed report changes, older
+    /// first — the demonstrated period is the longer of the two. Two
+    /// gaps rather than one so a source's own jitter — publications
+    /// landing one scan early and one late — cannot make the window
+    /// flap under a report that keeps arriving; two rather than every
+    /// gap so one unusually long silence does not relax the verdict
+    /// for good.
+    gaps: [u64; 2],
+    /// The run's input-side failure counters as of `last` — the sum of
+    /// `failed_exchanges` and `failed_reads`. A gap spanning a failed
+    /// exchange or a failed read is the run's own I/O trouble, not the
+    /// field's publishing pace, and a gap measured across one
+    /// demonstrates nothing: it records as no gap at all.
+    failures: u64,
+}
+
+impl Freshness {
+    /// The reader-tick budget this point is judged against: the
+    /// declared `stale_after_ticks` floor, widened to the field's
+    /// demonstrated arrival period where the run has watched it
+    /// publish at least once since its first observation. A point whose
+    /// report has never moved demonstrates no pace at all and answers
+    /// to the declared budget alone — the verdict a frozen field gets
+    /// from its first scan on.
+    fn patience(&self, budget: u64) -> u64 {
+        budget.max(self.arrival.gaps[0].max(self.arrival.gaps[1]))
+    }
 }
 
 /// Runtime diagnostics for one registered component.
@@ -883,6 +953,27 @@ pub struct Executor<'d> {
     /// evicted entries is [`receipt_base`](Executor::receipt_base) —
     /// `attempts` minus the retained length.
     receipts: Vec<CommandReceipt>,
+    /// The run's own submission-mint nonce — the value the assembling
+    /// shell stamps through
+    /// [`with_submission_origin`](Executor::with_submission_origin),
+    /// prefixed onto every receipt this run mints so the redundant
+    /// pair's admissions stay distinct however equal their commands or
+    /// however their absolute indices collide. `None` mints
+    /// unidentified receipts — the unminted test/legacy shape.
+    submission_origin: Option<u64>,
+    /// This run's own mint order — the `seq` half of the
+    /// [`SubmissionId`](dcs_core::SubmissionId) the next minted receipt
+    /// takes. Run-local, never checkpointed: a minted receipt carries
+    /// its identity, and a fresh run mints under its own origin.
+    submission_seq: u64,
+    /// Receipts the most recent checkpoint adoption displaced by
+    /// submission-index collision and re-minted past the adopted
+    /// window's high-water — `(prior index, new index, receipt as
+    /// re-minted)` — drained through
+    /// [`take_displaced_receipts`](Self::take_displaced_receipts) so the
+    /// settle journal can reconcile the move. See
+    /// [`adopt_receipts`](Self::adopt_receipts).
+    displaced_receipts: Vec<(u64, u64, CommandReceipt)>,
     /// The declared receipt-log bound — construction configuration set
     /// through [`with_receipt_log_capacity`](Executor::with_receipt_log_capacity),
     /// not run state: checkpoints do not carry it.
@@ -928,8 +1019,9 @@ pub struct Executor<'d> {
     /// it from the driver's `diagnostics` hook at reporting time.
     io_health: IoHealth,
     /// Per-point freshness evidence for field `In` points carrying a
-    /// `stale_after_ticks` budget — the driver sample last observed and
-    /// the run tick that observation last changed, kept in the run-tick
+    /// `stale_after_ticks` budget — the driver sample last observed, the
+    /// run tick that observation last changed, and the arrival period
+    /// the observed changes have demonstrated, kept in the run-tick
     /// domain so a driver stamping in a foreign domain (a remote
     /// plant's plant ticks, say) cannot strand the verdict. Run-local
     /// observation state: checkpoints neither carry nor reset it.
@@ -1123,6 +1215,9 @@ impl<'d> Executor<'d> {
             command_capacity: DEFAULT_COMMAND_QUEUE_CAPACITY,
             command_admission: CommandAdmissionCounts::default(),
             receipts: Vec::new(),
+            submission_origin: None,
+            submission_seq: 0,
+            displaced_receipts: Vec::new(),
             receipt_capacity: DEFAULT_RECEIPT_LOG_CAPACITY,
             restored_suspended: BTreeSet::new(),
             emitted: Vec::new(),
@@ -1171,6 +1266,28 @@ impl<'d> Executor<'d> {
     /// source begins a new one.
     pub fn with_generation(mut self, generation: u64) -> Self {
         self.generation = Some(generation);
+        self
+    }
+
+    /// Records this run's submission-mint origin — the nonce every
+    /// receipt this run mints carries in its
+    /// [`submission`](dcs_core::CommandReceipt::submission) identity.
+    ///
+    /// The running process's shell mints it
+    /// ([`mint_generation`](crate::mint_generation)) at startup, exactly
+    /// like the checkpoint generation: each process boot is a new
+    /// minting run, so the nonce is supplied per run, never derived —
+    /// and unlike the generation it is *not* adopted with a checkpoint,
+    /// because identity here means "which run admitted the submission",
+    /// not "which line the state belongs to". With the pair minting
+    /// under distinct origins, the promote/fence window's split mint —
+    /// both peers assigning the same absolute index to different
+    /// commands — stays distinguishable on either side, and a carried
+    /// receipt is provably the same submission whatever its index. The
+    /// default `None` mints unidentified receipts — the deterministic
+    /// test/legacy shape — which reconcile on command and actor alone.
+    pub fn with_submission_origin(mut self, origin: u64) -> Self {
+        self.submission_origin = Some(origin);
         self
     }
 
@@ -1584,11 +1701,21 @@ impl<'d> Executor<'d> {
             },
         };
         let accepted = matches!(outcome, CommandOutcome::Accepted { .. });
+        // The mint identity is stamped at admission — before the
+        // outcome is even known — because it names the submission, not
+        // its verdict: the receipt carries it unchanged through the
+        // boundary, the checkpoint, and any collision re-home.
+        let submission = self.submission_origin.map(|origin| {
+            let seq = self.submission_seq;
+            self.submission_seq += 1;
+            SubmissionId { origin, seq }
+        });
         let receipt = CommandReceipt {
             command,
             outcome,
             actor,
             reason,
+            submission,
         };
         self.receipts.push(receipt.clone());
         if accepted {
@@ -1826,10 +1953,12 @@ impl<'d> Executor<'d> {
             // The executor has no role view — the serving `Peer` stamps
             // `source_owns_field` over its own capture and the serving
             // `Monitor` stamps `line_owner`; `line_proof` exists only
-            // on `?prove=` responses, never on a capture.
+            // on `?prove=` responses, never on a capture. The tracking
+            // source is peer wiring too: `Peer::checkpoint` stamps it.
             source_owns_field: None,
             line_owner: None,
             line_proof: None,
+            tracking_source: None,
         }
     }
 
@@ -2100,9 +2229,10 @@ impl<'d> Executor<'d> {
     /// drops with the rest of the abandoned window. Either way
     /// `attempts` is the merged window's high-water mark — the count
     /// of receipts the merged line ever minted — so it floors at the
-    /// adopted window's end plus the restored tail and never reports
-    /// the covered stretch as phantom evictions the way a document
-    /// whose counters claim less than its own window would.
+    /// adopted window's end plus the re-minted re-homes and the
+    /// restored tail, and never reports the covered stretch as phantom
+    /// evictions the way a document whose counters claim less than its
+    /// own window would.
     ///
     /// Inside the covered stretch the merge is durable-truth forward:
     /// where the adopted window carries a submission this run already
@@ -2114,11 +2244,34 @@ impl<'d> Executor<'d> {
     /// adjudication, or parked for it — and adopting it would regress
     /// the served receipt and re-queue a command the line may already
     /// have applied: the resumed-stale-peer double-apply the
-    /// receipted-command contract refuses. A terminal-over-terminal
-    /// divergence adopts the document's — the tracked line's newest
-    /// word replacing this run's — and a command mismatch is the fork
-    /// [`Peer::unaccounted`](crate::Peer::unaccounted) convicts before
-    /// the apply ever reaches the merge.
+    /// receipted-command contract refuses.
+    ///
+    /// The covered stretch carries one more rule, because an absolute
+    /// index is not a submission identity: inside the promote/fence
+    /// window the demoting peer and its successor can each mint a
+    /// receipt at the same index for a different submission, the
+    /// per-peer `attempts` counters converging only here. A covered
+    /// entry the adopted window carries as the same submission —
+    /// [`CommandReceipt::same_submission`] — is the line's own verdict
+    /// on this run's record and adopts silently. One whose counterpart
+    /// is a *different* submission was minted on the abandoned branch,
+    /// not adjudicated by the line — the successor's high-water passed
+    /// its index, never its identity — so it re-mints past the adopted
+    /// window's end rather than being silently displaced by the
+    /// colliding receipt. A displaced entry still `Accepted` settles
+    /// `Rejected` carrying [`CommandError::Superseded`] at the re-mint:
+    /// the line demonstrably reached that index without it. The move is
+    /// reported through [`take_displaced_receipts`](Self::take_displaced_receipts)
+    /// so the settle journal attributes the already-journaled verdict
+    /// to the receipt's new index instead of emitting it again.
+    ///
+    /// Only an identified pair re-mints. Two receipts carrying
+    /// distinct mint identities at one index are the window's split
+    /// mint, which identity alone proves; an unidentified entry
+    /// carries no such evidence, so the merge keeps the positional
+    /// rules above — the line's newest word at the index — and
+    /// [`Peer::unaccounted`](crate::Peer::unaccounted) convicts a
+    /// command mismatch the audit cannot excuse.
     fn adopt_receipts(&mut self, checkpoint: &Checkpoint) {
         // An adoption is the run observing the line again: whatever a
         // state-file resume parked for the line's adjudication is
@@ -2132,12 +2285,13 @@ impl<'d> Executor<'d> {
         // while the run's window reaches back to meet it: a prior base
         // above the mark leaves a gap no restoration can span.
         let adopted_end = checkpoint.receipt_base() + checkpoint.receipts.len() as u64;
-        // The log as it stands before the merge — both the unreached
-        // suffix computation below and the covered stretch's
-        // durable-truth check read it: a settled verdict here is the
-        // newest word this run holds on each covered index.
+        // The log as it stands before the merge — the unreached suffix
+        // computation, the covered stretch's durable-truth check, and
+        // the collision split below all read it: a settled verdict here
+        // is the newest word this run holds on each covered index.
         let prior_base = self.receipt_base();
         let prior = self.receipts.clone();
+        self.displaced_receipts.clear();
         // The receipts this run holds past the adopted high-water —
         // submissions the checkpoint's source never observed at
         // capture. `uncovered` is the spanable suffix restored into
@@ -2159,6 +2313,47 @@ impl<'d> Executor<'d> {
         } else {
             Vec::new()
         };
+        // The covered stretch split by submission identity (#775): an
+        // entry the adopted window carries as the same submission
+        // reconciles against it, and one it displaces with a
+        // *different* identified submission re-mints past the window
+        // below rather than vanishing under the colliding receipt.
+        // Entries below the adopted base have no counterpart — the
+        // source already evicted that stretch — and drop with the
+        // abandoned prefix. An unidentified entry never re-mints: with
+        // no mint identity there is no evidence of a collision rather
+        // than of a staler record, so the merge keeps its positional
+        // rules and the ex-owner's audit adjudicates the difference.
+        let checkpoint_base = checkpoint.receipt_base();
+        let mut displaced: Vec<(u64, CommandReceipt)> = Vec::new();
+        for (position, receipt) in prior.iter().enumerate() {
+            let index = prior_base + position as u64;
+            if index >= adopted_end {
+                break;
+            }
+            if index < checkpoint_base {
+                continue;
+            }
+            let adopted = &checkpoint.receipts[(index - checkpoint_base) as usize];
+            if !matches!(
+                (receipt.submission, adopted.submission),
+                (Some(this), Some(other)) if this != other
+            ) {
+                continue;
+            }
+            // The adopted window may already carry this same submission
+            // re-minted at a later index — the line's own collision
+            // resolution from the other side's carry — in which case the
+            // local copy is a duplicate, not a displacement: adopt the
+            // line's record and drop it.
+            if !checkpoint
+                .receipts
+                .iter()
+                .any(|adopted| adopted.same_submission(receipt))
+            {
+                displaced.push((index, receipt.clone()));
+            }
+        }
         self.receipts.clone_from(&checkpoint.receipts);
         // Durable-truth forward inside the covered stretch: the adopted
         // window's still-`Accepted` view of a submission this run already
@@ -2216,10 +2411,32 @@ impl<'d> Executor<'d> {
             .high_water
             .max(self.pending_commands.len());
         // The merged window's high-water mark — the submission index
-        // one past the last receipt the log holds — computed before
-        // the tail moves in: `attempts` floors at it below.
-        let merged_end = adopted_end + uncovered.len() as u64;
-        if !uncovered.is_empty() {
+        // one past the last receipt the log holds — computed before the
+        // tail moves in: `attempts` floors at it below. The displaced
+        // re-homes sit between the adopted window and the restored
+        // suffix: they are the earlier submissions, the suffix the ones
+        // the source had not observed at capture.
+        let merged_end = adopted_end + (displaced.len() + uncovered.len()) as u64;
+        if !displaced.is_empty() || !uncovered.is_empty() {
+            // The displaced receipts re-mint at the adopted window's
+            // end. A still-`Accepted` entry settles `superseded` here —
+            // the line passed its index carrying a different submission
+            // — and the report pairs its prior index with the new one
+            // for the settle journal; an already-settled entry only
+            // changed index, its verdict journaled under the prior one
+            // already.
+            for (next_index, (prior, mut receipt)) in (adopted_end..).zip(displaced) {
+                if matches!(receipt.outcome, CommandOutcome::Accepted { .. }) {
+                    receipt.outcome = CommandOutcome::Rejected {
+                        reason: CommandError::Superseded {
+                            point: receipt.command.point(),
+                        },
+                    };
+                }
+                self.displaced_receipts
+                    .push((prior, next_index, receipt.clone()));
+                self.receipts.push(receipt);
+            }
             // The restored suffix lands after the queue rebuild on
             // purpose: its `Accepted` entries are suspended state the
             // tracked line has not adjudicated, not carried commands
@@ -2311,6 +2528,19 @@ impl<'d> Executor<'d> {
         }
     }
 
+    /// Drains the receipts the most recent checkpoint adoption displaced
+    /// by submission-index collision — `(prior index, new index,
+    /// receipt as re-minted past the adopted window's high-water)`.
+    ///
+    /// [`Peer`](crate::Peer) reconciles them into the settle journal:
+    /// an entry that was still `Accepted` settled `superseded` at the
+    /// re-mint — that verdict is news — while an already-settled entry's
+    /// verdict was journaled under its prior index and only re-marks
+    /// against the window diff at the new one.
+    pub fn take_displaced_receipts(&mut self) -> Vec<(u64, u64, CommandReceipt)> {
+        std::mem::take(&mut self.displaced_receipts)
+    }
+
     /// Adopts the admissions a checkpoint's receipt log carries past
     /// this run's own — the promote boundary's stale-tick path
     /// ([`Peer::final_sync`](crate::Peer::final_sync)): a checkpoint
@@ -2336,6 +2566,17 @@ impl<'d> Executor<'d> {
     /// numbering gap the `attempts` counters report, not a recoverable
     /// stretch. The admission counters measuring the adopted log
     /// converge with it.
+    ///
+    /// The overlapping stretch obeys the same submission-identity rule
+    /// [`adopt_receipts`](Self::adopt_receipts) does, mirrored: this run
+    /// is the continuing line here, so an overlap position whose
+    /// incoming receipt is a *different* identified submission — the
+    /// predecessor's mint colliding with this run's own at one index —
+    /// re-mints the incoming receipt past the adopted tail instead of
+    /// skipping it, a still-`Accepted` one queueing to settle like any
+    /// carried command. Unidentified receipts keep the verbatim
+    /// overlap-wins rule — without a mint identity an equal command
+    /// cannot be told from the same submission seen twice.
     pub fn carry_pending_commands(&mut self, checkpoint: &Checkpoint) {
         let self_end = self.receipt_base() + self.receipts.len() as u64;
         let checkpoint_base = checkpoint.receipt_base();
@@ -2343,9 +2584,28 @@ impl<'d> Executor<'d> {
         if checkpoint_end <= self_end {
             return;
         }
+        // Incoming receipts the overlap shows colliding with this run's
+        // own at their index — identified submissions this log does not
+        // already carry anywhere — re-mint ahead of the tail: they are
+        // the earlier submissions, and a pending one still owes the
+        // promoted run a boundary.
+        let overlap = self_end.min(checkpoint_end);
+        let mut collided = Vec::new();
+        for index in checkpoint_base.max(self.receipt_base())..overlap {
+            let incoming = &checkpoint.receipts[(index - checkpoint_base) as usize];
+            if incoming.submission.is_some()
+                && !self
+                    .receipts
+                    .iter()
+                    .any(|receipt| receipt.same_submission(incoming))
+            {
+                collided.push(incoming.clone());
+            }
+        }
         let tail = self_end.max(checkpoint_base);
         let skipped = (tail - checkpoint_base) as usize;
         let base_len = self.receipts.len();
+        let collided_len = collided.len() as u64;
         let appended: Vec<CommandReceipt> = checkpoint.receipts[skipped..].to_vec();
         self.receipts.extend(appended.iter().cloned());
         // The appended tail's settled force verdicts are line truth
@@ -2353,13 +2613,21 @@ impl<'d> Executor<'d> {
         // `adopt_receipts` runs on its unreached suffix, here for the
         // carry half of the boundary.
         self.reassert_receipted_forces(&appended);
+        // The collided entries re-mint past the appended tail, ahead of
+        // it in submission order: they are the earlier submissions, and
+        // a pending one still owes the promoted run a boundary — it
+        // queues with the tail's own adopted entries below.
+        self.receipts.extend(collided);
         self.command_admission = checkpoint.command_admission;
         // The same floor `adopt_receipts` floors: `attempts` is the
         // merged window's high-water mark, so it never reports fewer
-        // receipts than the appended window the carry assembled — a
-        // document whose counters claim less than its own window
-        // covers cannot revert the count below it.
-        self.command_admission.attempts = self.command_admission.attempts.max(checkpoint_end);
+        // receipts than the window this carry assembled — a document
+        // whose counters claim less than its own window covers cannot
+        // revert the count below it.
+        self.command_admission.attempts = self
+            .command_admission
+            .attempts
+            .max(checkpoint_end + collided_len);
         // Bound the union before the adopted `Accepted` entries queue:
         // the trim may reach into the tail's own settled prefix, so the
         // surviving adopted entries start at `base_len - evicted`.
@@ -3439,18 +3707,31 @@ impl<'d> Executor<'d> {
     ///
     /// A field `In` point carrying a `stale_after_ticks` budget gets the
     /// freshness check before the re-stamp: when the sample the driver
-    /// returns has not changed in more than `budget` run ticks, the
+    /// returns has not changed in more than the point's patience, the
     /// landed sample's quality merges
     /// [`Quality::Uncertain`]`(`[`QualityReason::Stale`]`)` — the
     /// worst-of merge, so a driver-reported `Bad` or worse-named
     /// `Uncertain` is never improved to `Stale`, and the first changed
-    /// sample inside the budget again returns the driver's own quality.
+    /// sample inside the patience again returns the driver's own quality.
     /// The lag is measured in the run-tick domain — the scans since the
     /// driver report last changed — not against the stamp the sample
     /// carries: a remote driver stamps plant ticks, whose offset from
     /// the run tick a stopped-then-resumed field leaves permanently
     /// lagging, so a cross-domain comparison would latch stale on fresh
     /// data. The image stamp stays the run tick either way.
+    ///
+    /// The patience is the declared budget widened to the field's
+    /// demonstrated arrival period — the reader-tick gaps between the
+    /// report changes this run has watched on that point. The budget is
+    /// the engineer's floor, but a run tick measures the *reader's*
+    /// patience, and a reader scanning faster than the field owner steps
+    /// its inputs sees the same report on every scan in between: judged
+    /// on the declared budget alone, a healthy field paces a stale/good
+    /// flap on every publication. The widened window keeps a merely slow
+    /// publication fresh while the field keeps publishing, and still
+    /// reaches stale one demonstrated period past the last report that
+    /// did arrive — the frozen-field verdict the budget exists for,
+    /// from the first scan on for a point that never published at all.
     ///
     /// A forced `In` point skips both channels: the driver is not read
     /// — so a field fault on a forced point counts no failed read —
@@ -3468,6 +3749,12 @@ impl<'d> Executor<'d> {
                     point,
                     Sample::new(value, Quality::Uncertain(QualityReason::Substituted), tick),
                 );
+                // The forced window answers to no driver report at
+                // all, so what the run learned about the field's
+                // publishing pace does not survive it: the next
+                // observed change starts the arrival evidence fresh
+                // rather than measuring a gap the force manufactured.
+                self.freshness.remove(&point);
                 continue;
             }
             if spec.internal.is_some() {
@@ -3483,21 +3770,53 @@ impl<'d> Executor<'d> {
                     // tick a stopped-then-resumed field leaves
                     // permanently lagging, so comparing the two
                     // domains directly would latch stale on fresh data.
-                    // The subtraction below stays same-domain — `tick`
-                    // and `freshness.since` are both run ticks.
+                    // Both subtractions below stay same-domain — `tick`,
+                    // `freshness.since`, and the arrival gaps are all
+                    // run ticks, none of them a driver stamp.
                     let quality = match spec.stale_after_ticks {
                         Some(budget) => {
+                            // The input-side failure counters the
+                            // arrival record is read against: a gap
+                            // spanning a failed exchange or a failed
+                            // read says nothing about how fast the
+                            // field publishes.
+                            let failures =
+                                self.io_health.failed_exchanges + self.io_health.failed_reads;
                             let freshness = self.freshness.entry(point).or_insert(Freshness {
                                 observed: sample,
                                 since: sample.tick.min(tick),
+                                arrival: Arrival {
+                                    last: tick,
+                                    gaps: [0, 0],
+                                    failures,
+                                },
                             });
                             if freshness.observed != sample {
+                                // A changed report restarts the age and
+                                // measures the gap since the previous
+                                // change — same-domain run ticks, the
+                                // only measure of the field's own pace
+                                // a reader has.
+                                let previous = freshness.arrival;
                                 *freshness = Freshness {
                                     observed: sample,
                                     since: tick,
+                                    arrival: Arrival {
+                                        last: tick,
+                                        gaps: [
+                                            previous.gaps[1],
+                                            if failures == previous.failures {
+                                                tick.0.saturating_sub(previous.last.0)
+                                            } else {
+                                                0
+                                            },
+                                        ],
+                                        failures,
+                                    },
                                 };
                             }
-                            if tick.0.saturating_sub(freshness.since.0) > budget {
+                            if tick.0.saturating_sub(freshness.since.0) > freshness.patience(budget)
+                            {
                                 sample
                                     .quality
                                     .merge(Quality::Uncertain(QualityReason::Stale))
@@ -4791,6 +5110,262 @@ mod tests {
         );
     }
 
+    /// A field whose owner publishes on its own cadence: `gaps` are the
+    /// reader-tick distances between consecutive publications, cycled,
+    /// so a run reading every tick meets a fresh report on the
+    /// publication and the byte-identical held one in between. The
+    /// report's stamp is the owner's own step counter — the source's
+    /// tick domain, advancing only when the owner publishes, which is
+    /// the shape a peer scanning faster than the field owner sees.
+    struct PacedField {
+        point: PointId,
+        gaps: Vec<u64>,
+        state: Mutex<Paced>,
+    }
+
+    /// The `PacedField`'s read counter, publication counter, and
+    /// publication schedule position.
+    #[derive(Debug, Clone, Copy)]
+    struct Paced {
+        /// How many reads the driver has served.
+        reads: u64,
+        /// How many publications it has made — the owner's own step
+        /// count, and the value and stamp both carry.
+        step: u64,
+        /// The read index the next publication lands on.
+        next: u64,
+        /// Which entry of `gaps` sizes the next publication.
+        gap: usize,
+    }
+
+    impl PacedField {
+        /// A field publishing on the cycled reader-tick `gaps`.
+        fn new(gaps: &[u64]) -> Self {
+            Self {
+                point: PointId(10),
+                gaps: gaps.to_vec(),
+                state: Mutex::new(Paced {
+                    reads: 0,
+                    step: 0,
+                    next: gaps[0],
+                    gap: 0,
+                }),
+            }
+        }
+
+        /// Stops publishing: the owner is paused or demoted, and the
+        /// field serves its last report from here on.
+        fn stop(&self) {
+            self.state.lock().unwrap().next = u64::MAX;
+        }
+
+        /// Resumes publishing — the owner's next step lands on the very
+        /// next read, back on the same cadence from there.
+        fn resume(&self) {
+            let mut state = self.state.lock().unwrap();
+            state.gap = 0;
+            state.next = state.reads;
+        }
+    }
+
+    impl IoDriver for PacedField {
+        fn read(&self, point: PointId) -> Result<Sample, IoError> {
+            if point != self.point {
+                return Err(IoError::UnknownPoint(point));
+            }
+            let mut state = self.state.lock().unwrap();
+            let reads = state.reads;
+            state.reads += 1;
+            if reads >= state.next {
+                state.step += 1;
+                state.next = reads + self.gaps[state.gap];
+                state.gap = (state.gap + 1) % self.gaps.len();
+            }
+            Ok(Sample::good(
+                Value::Float(state.step as f64),
+                Tick(state.step),
+            ))
+        }
+
+        /// The field carries its one point as an input: there is no
+        /// output image to stage, so a write is the timeout a driver
+        /// answers for a point whose device never acknowledged one —
+        /// and the input-only point maps under test never ask.
+        fn write(&self, point: PointId, _value: Value) -> Result<(), IoError> {
+            Err(IoError::Timeout(point))
+        }
+    }
+
+    /// The quality `executor` last landed on its budgeted point.
+    fn budgeted_quality(executor: &Executor) -> Quality {
+        executor.snapshot().points[0].sample.unwrap().quality
+    }
+
+    /// The freshness finding's reproduction, in the executor: a peer
+    /// scanning ten times faster than the field owner steps its inputs,
+    /// observing a healthy remote field. The owner publishes every ten
+    /// reader ticks, so nine of every ten reads are the identical held
+    /// report — and the declared five-tick budget must not read that
+    /// as a stale/good flap on every publication.
+    #[test]
+    fn a_reader_outpacing_the_field_owners_pace_presents_no_stale_verdict() {
+        let field = PacedField::new(&[10]);
+        let mut executor = Executor::new(
+            &field,
+            stale_map(PointId(10), 5),
+            vec![Box::new(Declared {
+                name: "idle",
+                requirements: vec![IoRequirement::input::<f64>("in", PointId(10))],
+            })],
+        )
+        .unwrap();
+
+        // Ten publications over a hundred scans. Every scan reads the
+        // owner's report; from the pace the run has demonstrated, no
+        // scan may present the stale verdict.
+        let mut stale_scans = Vec::new();
+        for scan in 1..=100 {
+            executor.scan();
+            if budgeted_quality(&executor) == Quality::Uncertain(QualityReason::Stale) {
+                stale_scans.push(scan);
+            }
+        }
+
+        // The only stale scans are the cold start — scans 6 through 10,
+        // the reads past the declared five-tick budget and before the
+        // field's first publication, which the run has to judge on that
+        // budget alone: it had not yet watched the field publish. Every
+        // scan from the demonstrated pace on reads the field's report
+        // Good, however long the reader waits for the next one.
+        assert_eq!(
+            stale_scans,
+            (6..=10).collect::<Vec<u64>>(),
+            "a demonstrated arrival period must stand in for the reader's \
+             patience once the run has measured it"
+        );
+    }
+
+    /// The other half of the same contract: the demonstrated period
+    /// relaxes the reader's patience, it never retires the verdict. A
+    /// field that stops publishing ages to stale one demonstrated
+    /// arrival period past its last report, and a resumed publication
+    /// clears it.
+    #[test]
+    fn a_slow_field_that_stops_publishing_ages_out_past_its_demonstrated_pace() {
+        let field = PacedField::new(&[10]);
+        let mut executor = Executor::new(
+            &field,
+            stale_map(PointId(10), 5),
+            vec![Box::new(Declared {
+                name: "idle",
+                requirements: vec![IoRequirement::input::<f64>("in", PointId(10))],
+            })],
+        )
+        .unwrap();
+
+        // Four publications establish the pace — ten reader ticks
+        // between changed reports, wider than the declared budget.
+        executor.run(44);
+        assert_eq!(budgeted_quality(&executor), Quality::Good);
+
+        // The owner stops stepping. Ten more scans sit inside the
+        // demonstrated arrival period — the point keeps serving the
+        // owner's last report — and the eleventh presents stale.
+        field.stop();
+        executor.run(11);
+        assert_eq!(
+            budgeted_quality(&executor),
+            Quality::Uncertain(QualityReason::Stale)
+        );
+
+        // A resumed publication is a changed report: the driver's own
+        // quality lands on the first scan after it.
+        field.resume();
+        executor.scan();
+        assert_eq!(budgeted_quality(&executor), Quality::Good);
+    }
+
+    /// A field whose own cadence jitters around the reader's patience —
+    /// publications one scan early and one late — keeps its verdict
+    /// steady: the arrival window spans the two most recent gaps, so a
+    /// report that keeps arriving is never called stale between two
+    /// arrivals the field has already shown it makes.
+    #[test]
+    fn a_jittering_source_pace_does_not_flap_the_freshness_verdict() {
+        let field = PacedField::new(&[11, 9]);
+        let mut executor = Executor::new(
+            &field,
+            stale_map(PointId(10), 5),
+            vec![Box::new(Declared {
+                name: "idle",
+                requirements: vec![IoRequirement::input::<f64>("in", PointId(10))],
+            })],
+        )
+        .unwrap();
+
+        let mut stale_scans = Vec::new();
+        for scan in 1..=80 {
+            executor.scan();
+            if budgeted_quality(&executor) == Quality::Uncertain(QualityReason::Stale) {
+                stale_scans.push(scan);
+            }
+        }
+
+        // The cold start only — scans 6 through 11, the reads past the
+        // declared budget and before the field's first publication. The
+        // 9-tick publication lands inside the 11-tick gap beside it,
+        // and the 11-tick gap inside the window that one demonstrated,
+        // so the field's own cadence never trips the verdict.
+        assert_eq!(stale_scans, (6..=11).collect::<Vec<u64>>());
+    }
+
+    /// A gap the run's own failed I/O opened demonstrates nothing: the
+    /// point's demonstrated period is evidence about how fast the
+    /// *field* publishes, and a report held across a failed exchange
+    /// or a failed read is the run's transport talking. The stale
+    /// verdict still arrives on the declared budget alone.
+    #[test]
+    fn a_gap_spanning_a_failed_read_demonstrates_no_arrival_period() {
+        let driver = StubDriver::new(&[float(10)], &[]);
+        let mut executor = Executor::new(
+            &driver,
+            stale_map(PointId(10), 1),
+            vec![Box::new(Declared {
+                name: "idle",
+                requirements: vec![IoRequirement::input::<f64>("in", PointId(10))],
+            })],
+        )
+        .unwrap();
+
+        // Two publications one tick apart: the demonstrated period is
+        // the one reader tick, and the declared budget of one asks for
+        // the same patience.
+        executor.scan();
+        stamp(&driver, 10, Sample::good(Value::Float(1.0), Tick(1)));
+        executor.scan();
+        assert_eq!(budgeted_quality(&executor), Quality::Good);
+
+        // A read fails, and the next report lands two ticks after the
+        // last change — a gap that spans the failure. It demonstrates
+        // no pace, so the patience stays the declared one tick.
+        driver.faults.lock().unwrap().insert(PointId(10));
+        executor.scan();
+        stamp(&driver, 10, Sample::good(Value::Float(2.0), Tick(3)));
+        driver.faults.lock().unwrap().remove(&PointId(10));
+        executor.scan();
+        assert_eq!(budgeted_quality(&executor), Quality::Good);
+
+        // The field holds from there: one lagging scan inside the
+        // budget, the second past it.
+        executor.scan();
+        assert_eq!(budgeted_quality(&executor), Quality::Good);
+        executor.scan();
+        assert_eq!(
+            budgeted_quality(&executor),
+            Quality::Uncertain(QualityReason::Stale)
+        );
+    }
+
     #[test]
     fn forced_budgeted_input_reports_substituted_not_stale() {
         let driver = StubDriver::new(&[float(10)], &[]);
@@ -5084,6 +5659,7 @@ mod tests {
                     apply_tick: Tick(1)
                 },
                 actor: Some("operator-7".to_string()),
+                submission: None,
                 reason: None,
             }
         );
@@ -5187,6 +5763,7 @@ mod tests {
                 outcome: CommandOutcome::Applied { tick: Tick(1) },
                 actor: Some("operator-7".to_string()),
                 reason: Some("nuisance trips during pump work".to_string()),
+                submission: None,
             }
         );
         assert_eq!(driver_value(&driver, 20), Value::Float(10.0));
@@ -5269,6 +5846,7 @@ mod tests {
                     apply_tick: Tick(1)
                 },
                 actor: None,
+                submission: None,
                 reason: None,
             }
         );
@@ -7118,6 +7696,7 @@ mod tests {
                     apply_tick: Tick(2)
                 },
                 actor: None,
+                submission: None,
                 reason: None,
             }
         );
@@ -8510,6 +9089,7 @@ mod tests {
             source_owns_field: None,
             line_owner: None,
             line_proof: None,
+            tracking_source: None,
         }
     }
 
@@ -8675,6 +9255,7 @@ mod tests {
             source_owns_field: None,
             line_owner: None,
             line_proof: None,
+            tracking_source: None,
         }
     }
 
@@ -10259,6 +10840,7 @@ mod tests {
                     apply_tick: Tick(1)
                 },
                 actor: None,
+                submission: None,
                 reason: None,
             }
         );

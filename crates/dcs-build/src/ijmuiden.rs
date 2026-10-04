@@ -93,6 +93,35 @@
 //! Bool state signals declare an empty unit — a deliberate "unitless"
 //! marker rather than an omitted one — so the document's only lint
 //! finding is the bypass point's documented `WritableFieldPoint`.
+//!
+//! ## Declared units (the dimensional-discipline decision)
+//!
+//! The scenario adopts architecture decision 106's declared-unit
+//! metadata: every quantity-bearing point declares its engineering unit
+//! through [`PlantBuilder::unit`](crate::PlantBuilder::unit) — the canal
+//! level path in `m`, the tide and discharge flows in `m/s`, the gate
+//! position path in `fraction`, the composed rate-of-rise deviation in
+//! `fraction`, and the chain's stage count in `stages` — and each
+//! signal inherits its point's declaration at `build` rather than
+//! carrying a display string that could drift beside it. The
+//! unit-transparent kinds the scenario composes declare theirs through
+//! [`PlantBuilder::port_unit`](crate::PlantBuilder::port_unit) and
+//! [`PlantBuilder::param_unit`](crate::PlantBuilder::param_unit): the
+//! `failover-select`'s three level ports, both `signal-filter`s'
+//! `in`/`out`, the `threshold-chain`'s `level`, and the divergence
+//! detector's `expected`/`measured` are `m`; the chain's rungs and the
+//! high-level alarm's limits and hysteresis are `m`; the deviation
+//! detector's `deviation` and its `deviation_limit`, and the
+//! `manual-station` and `valve` position path, are `fraction`; the
+//! chain's `demand` is `stages`; and the `*_ticks` intervals each spec
+//! fixes as `ticks` — the divergence window, the valve's consecutive-
+//! deviating-scans budget, and every alarm's shelving bound and
+//! decision-70 response budget.
+//!
+//! The two `signal-filter`s' `alpha` stays undeclared: a blend factor
+//! is not a plant quantity. The Bool permissive, annunciation, status,
+//! and protection-layer state carriers stay uncheckable rather than
+//! dimensioned, their signals keeping the explicit `""` marker above.
 
 use crate::specs::{
     BoolLatchingAlarmInstance, BoolLatchingAlarmSpec, DeviationMonitorSpec, FailoverSelectSpec,
@@ -102,7 +131,7 @@ use crate::specs::{
 pub use crate::station::ManagedAlarmLayout;
 use crate::station::{AlarmLayout, rationalization};
 use crate::{
-    BuildError, Direction, PlantBuilder, PointId, SignalId, Sink, Source, Value, parameters,
+    BuildError, Direction, PlantBuilder, PointId, SignalId, Sink, Source, Value, parameters, unit,
 };
 use dcs_model::{ComponentId, PlantModel};
 
@@ -199,9 +228,30 @@ pub mod schedule {
     /// The field mode reports automatic again.
     pub const MODE_TO_AUTO: u64 = 45;
     /// The remote repeater's last update before the comms freeze —
-    /// `level-remote` presents `Uncertain(Stale)` once
-    /// `stale_after_ticks` elapses past this tick.
+    /// `level-remote` presents `Uncertain(Stale)` once its freshness
+    /// patience elapses past this tick (see [`REMOTE_FIRST_STALE`]).
     pub const REMOTE_LAST_UPDATE: u64 = 10;
+    /// The remote repeater's declared freshness budget, in scan ticks
+    /// — the floor the `stale_after_ticks` declaration carries on
+    /// `level-remote`.
+    pub const REMOTE_STALE_AFTER: u64 = 3;
+    /// The remote repeater's scripted playback publishes every four
+    /// driver ticks before the freeze — the arrival period a run
+    /// demonstrates on that point, and the patience its declared
+    /// budget is widened to while the field keeps publishing.
+    pub const REMOTE_PERIOD: u64 = 4;
+    /// The scan at which the frozen repeater's held report first
+    /// presents `Uncertain(Stale)`: the lag past
+    /// [`REMOTE_LAST_UPDATE`] crossing the greater of the declared
+    /// [`REMOTE_STALE_AFTER`] budget and the [`REMOTE_PERIOD`]
+    /// arrival period the playback demonstrated (decision 45).
+    pub const REMOTE_FIRST_STALE: u64 = REMOTE_LAST_UPDATE
+        + if REMOTE_STALE_AFTER > REMOTE_PERIOD {
+            REMOTE_STALE_AFTER
+        } else {
+            REMOTE_PERIOD
+        }
+        + 1;
     /// The remote repeater's comms recover.
     pub const REMOTE_RECOVERY: u64 = 30;
     /// The independent high-high layer trips — the scripted inflow
@@ -233,10 +283,6 @@ const SIGNAL_BASE: u64 = 10_000;
 
 /// The bound a single-sided level alarm parks its unused limit at.
 const PARKED_LIMIT: f64 = 1.0e9;
-
-/// The remote repeater's declared freshness budget — three scans past
-/// the last scripted update the image sample lands `Uncertain(Stale)`.
-const REMOTE_STALE_AFTER: u64 = 3;
 
 /// The independent high-high layer's declared trip bound, in metres —
 /// the `threshold` element's `on`: the canal `level` reaching it
@@ -576,7 +622,7 @@ pub fn ijmuiden(config: &IjmuidenConfig) -> Result<Ijmuiden, BuildError> {
         points::LEVEL_REMOTE,
         level_remote_ch,
         false,
-        REMOTE_STALE_AFTER,
+        schedule::REMOTE_STALE_AFTER,
     );
     let gate_mode = plant.field_input::<bool>(points::GATE_MODE, gate_mode_ch, false);
     let sis_available = plant.field_input::<bool>(points::SIS_AVAILABLE, sis_available_ch, false);
@@ -1172,6 +1218,74 @@ pub fn ijmuiden(config: &IjmuidenConfig) -> Result<Ijmuiden, BuildError> {
         ),
     ));
 
+    // The dimensional contract (architecture decision 106): the
+    // quantity-bearing kinds are unit-transparent — a
+    // `failover-select` carries whatever level it is fed, a
+    // `signal-filter` smooths whatever it is given, and the
+    // `deviation-monitor`'s windowed relative `deviation` is a
+    // dimensionless ratio of the two levels it compares — so the
+    // composition declares each quantity port's and bound's unit on the
+    // instance, beside the point declarations the same connection and
+    // validation checks read. The canal level and the annunciation
+    // ladder's rungs are `m`, the chain's stage count is `stages` (the
+    // annunciation rungs a discharge gate declares, not pump stages),
+    // the gate position path is a `fraction` of travel, and the
+    // `*_ticks` intervals each spec fixes as `ticks`. The two
+    // `signal-filter`s' `alpha` and the deviation monitor's
+    // dimensionless `deviation_limit`'s kind codes stay undeclared: a
+    // blend factor is not a plant quantity, and the monitor's limit is
+    // declared `fraction` like its output.
+    plant.port_unit(failover.id, "primary", unit::M);
+    plant.port_unit(failover.id, "backup", unit::M);
+    plant.port_unit(failover.id, "out", unit::M);
+    for filter in [filter.id, trend.id] {
+        plant.port_unit(filter, "in", unit::M);
+        plant.port_unit(filter, "out", unit::M);
+    }
+    plant.port_unit(chain.id, "level", unit::M);
+    plant.port_unit(chain.id, "demand", unit::STAGES);
+    for parameter in ["cutoff", "stop", "start", "lag_start", "high"] {
+        plant.param_unit(chain.id, parameter, unit::M);
+    }
+    plant.port_unit(divergence.id, "expected", unit::M);
+    plant.port_unit(divergence.id, "measured", unit::M);
+    plant.port_unit(divergence.id, "deviation", unit::FRACTION);
+    plant.param_unit(divergence.id, "deviation_limit", unit::FRACTION);
+    plant.param_unit(divergence.id, "window_ticks", unit::TICKS);
+    plant.port_unit(station.id, "control", unit::FRACTION);
+    plant.port_unit(station.id, "manual", unit::FRACTION);
+    plant.port_unit(station.id, "out", unit::FRACTION);
+    plant.param_unit(station.id, "transfer_delta", unit::FRACTION);
+    plant.port_unit(gate.id, "cmd", unit::FRACTION);
+    plant.port_unit(gate.id, "out", unit::FRACTION);
+    plant.port_unit(gate.id, "fb", unit::FRACTION);
+    plant.param_unit(gate.id, "tolerance", unit::FRACTION);
+    plant.param_unit(gate.id, "discrepancy_ticks", unit::TICKS);
+    // The high-level alarm observes the filtered level in `m` and
+    // bounds it in `m`; its shelving bound and decision-70 response
+    // budget are the managed kind's declared `ticks`. The Bool alarms
+    // observe discrete conditions, so only their intervals carry a
+    // dimension.
+    plant.port_unit(lah.id, "in", unit::M);
+    for parameter in ["low_limit", "high_limit", "hysteresis"] {
+        plant.param_unit(lah.id, parameter, unit::M);
+    }
+    for alarm in [lah.id, mode_alarm.id, discrepancy_alarm.id] {
+        for parameter in ["max_shelve_ticks", "response_ticks"] {
+            plant.param_unit(alarm, parameter, unit::TICKS);
+        }
+    }
+    for alarm in [
+        ror_alarm.id,
+        backup_alarm.id,
+        backup_unhealthy_alarm.id,
+        sis_trip_alarm.id,
+        sis_bypass_alarm.id,
+        sis_fault_alarm.id,
+    ] {
+        plant.param_unit(alarm, "response_ticks", unit::TICKS);
+    }
+
     // Measurement path: the failover selects between the canal level
     // and the remote repeater; the filtered selection fans out to the
     // chain, the level alarm, and the divergence detector; the slower
@@ -1361,6 +1475,14 @@ pub fn ijmuiden(config: &IjmuidenConfig) -> Result<Ijmuiden, BuildError> {
 /// Registers point `point`'s monitoring signal — `10000 + point` —
 /// carrying the full unit/description/group metadata WW-FND-001 asks
 /// the surface to render from.
+///
+/// A non-empty `unit` is declared once, on the point — the wiring
+/// contract the connection and validation checks read — and the
+/// signal inherits it at `build`, so the string the operator surface
+/// renders cannot drift from the unit the value is carried in. The
+/// empty `""` stays signal-side: the deliberate "dimensionless" marker
+/// for the status and flag points the wiring layer leaves
+/// uncheckable.
 fn signal(
     plant: &mut PlantBuilder,
     point: PointId,
@@ -1369,11 +1491,19 @@ fn signal(
     description: &str,
     group: &str,
 ) {
-    plant
-        .signal(SignalId(SIGNAL_BASE + point.0), name, point)
-        .unit(unit)
-        .description(description)
-        .group(group);
+    if unit.is_empty() {
+        plant
+            .signal(SignalId(SIGNAL_BASE + point.0), name, point)
+            .unit(unit)
+            .description(description)
+            .group(group);
+    } else {
+        plant.unit(point, unit);
+        plant
+            .signal(SignalId(SIGNAL_BASE + point.0), name, point)
+            .description(description)
+            .group(group);
+    }
 }
 
 /// Declares one managed alarm's points and wires them: the writable

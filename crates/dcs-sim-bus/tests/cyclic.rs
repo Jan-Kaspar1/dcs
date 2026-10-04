@@ -96,9 +96,9 @@ fn fixture_points() -> Vec<CyclicPoint> {
 /// The declared `exchange_miss_threshold` every fixture driver runs
 /// under — three consecutive misses escalate reads.
 const MISS_THRESHOLD: u64 = 3;
-/// A short request timeout keeps the scripted-miss path fast: the
-/// failed connection drops outright rather than waiting a real read
-/// timeout out.
+/// A short request timeout keeps a genuinely unanswerable request —
+/// a stalled or dead endpoint — from stalling the suite on a real
+/// read timeout.
 const TIMEOUT: Duration = Duration::from_millis(500);
 
 /// `shutdown` on drop, so a panicking test still lets the scoped serve
@@ -236,7 +236,10 @@ fn a_missed_exchange_holds_the_image_and_escalates_at_the_threshold() {
                 "tick {tick}: the held image still serves"
             );
         }
-        assert!(!driver.connected(), "a scripted miss drops the link");
+        // The misses answer in-band: the link stays up — it is the
+        // exchange's missed cycle, not a sever — while diagnostics
+        // still report the exchange health as disconnected.
+        assert!(driver.connected(), "a scripted miss answers in-band");
         let diagnostics = driver.diagnostics().unwrap();
         assert_eq!(diagnostics.link, LinkState::Disconnected);
         assert!(diagnostics.last_error.is_some());
@@ -266,9 +269,9 @@ fn a_missed_exchange_holds_the_image_and_escalates_at_the_threshold() {
             );
         }
 
-        // The script exhausted, the next exchange reconnects lazily and
-        // completes: misses reset, the field's asserted value latches
-        // fresh, the link recovers.
+        // The script exhausted, the next exchange on the still-live
+        // link completes: misses reset, the field's asserted value
+        // latches fresh, the link health recovers.
         cyclic(&driver).exchange(Tick(5)).unwrap();
         assert_eq!(
             driver.read(PointId(10)),

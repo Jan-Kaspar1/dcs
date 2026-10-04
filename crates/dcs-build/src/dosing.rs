@@ -89,6 +89,24 @@
 //! Bool state signals and the index-valued `duty`/`staged` declare an
 //! empty unit — a deliberate "unitless" marker rather than an omitted
 //! one, so the document lints clean.
+//!
+//! ## Declared units (the dimensional-discipline decision)
+//!
+//! The skid is the recorded proof of the composition seam's declared
+//! units: every quantity-bearing point declares its engineering unit
+//! through [`PlantBuilder::unit`](crate::PlantBuilder::unit) — flow in
+//! `m3/h`, dose in `mg/L`, the demand chain in `g/h`, the tank levels
+//! in `L`, the tank flows in `L/scan`, the speed output in `%`, the
+//! stroke and stage counts in `strokes`/`pumps` — and the
+//! unit-transparent ports and parameters it wires declare theirs
+//! through [`PlantBuilder::port_unit`](crate::PlantBuilder::port_unit)
+//! and [`PlantBuilder::param_unit`](crate::PlantBuilder::param_unit).
+//! The spec table's inherent `*_ticks` intervals declare `"ticks"` on
+//! the kind, so `add` lands them in `parameter_units` directly. The
+//! Bool permissive, alarm, and status carriers stay undeclared —
+//! their connections remain uncheckable rather than dimensioned —
+//! while their signals keep the explicit `""` marker the lint asks
+//! for.
 
 use crate::specs::{
     AnalogOutputSpec, BoolGateSpec, BoolLatchingAlarmInstance, BoolLatchingAlarmSpec, CounterSpec,
@@ -99,7 +117,7 @@ use crate::specs::{
 use crate::station::{AlarmLayout, rationalization};
 use crate::{
     BuildError, ChannelRef, Direction, OutPoint, PlantBuilder, PointId, SignalId, Sink, Source,
-    Value, parameters,
+    Value, parameters, unit,
 };
 use dcs_model::{ComponentId, PlantModel};
 
@@ -703,7 +721,7 @@ pub fn dosing_skid(config: &DosingSkidConfig) -> Result<DosingSkid, BuildError> 
         &mut plant,
         points::FLOW,
         "flow",
-        "m3/h",
+        unit::M3_PER_H,
         "Measured process flow — the pacing signal",
         "dosing-skid",
     );
@@ -711,7 +729,7 @@ pub fn dosing_skid(config: &DosingSkidConfig) -> Result<DosingSkid, BuildError> 
         &mut plant,
         points::FLOW_SOURCE,
         "flow-src",
-        "m3/h",
+        unit::M3_PER_H,
         "Process flow source — the dynamics document's forcing input",
         "dosing-skid",
     );
@@ -719,7 +737,7 @@ pub fn dosing_skid(config: &DosingSkidConfig) -> Result<DosingSkid, BuildError> 
         &mut plant,
         points::TANK_LEVEL,
         "tank-level",
-        "L",
+        unit::L,
         "Chemical tank level",
         "dosing-skid",
     );
@@ -727,7 +745,7 @@ pub fn dosing_skid(config: &DosingSkidConfig) -> Result<DosingSkid, BuildError> 
         &mut plant,
         points::DISCHARGE_RATE,
         "discharge-rate",
-        "g/h",
+        unit::G_PER_H,
         "Measured chemical discharge rate",
         "dosing-skid",
     );
@@ -735,7 +753,7 @@ pub fn dosing_skid(config: &DosingSkidConfig) -> Result<DosingSkid, BuildError> 
         &mut plant,
         points::NET_DRAW,
         "net-draw",
-        "L/scan",
+        unit::L_PER_SCAN,
         "Net tank drawdown rate — draws plus refill",
         "dosing-skid",
     );
@@ -743,7 +761,7 @@ pub fn dosing_skid(config: &DosingSkidConfig) -> Result<DosingSkid, BuildError> 
         &mut plant,
         points::TANK_REFILL,
         "tank-refill",
-        "L/scan",
+        unit::L_PER_SCAN,
         "Tank refill inflow — the delivery line",
         "dosing-skid",
     );
@@ -751,7 +769,7 @@ pub fn dosing_skid(config: &DosingSkidConfig) -> Result<DosingSkid, BuildError> 
         &mut plant,
         points::INJECTION_RATE,
         "injection-rate",
-        "g/h",
+        unit::G_PER_H,
         "Injected chemical rate at the injection point — upstream of the transport delay to the discharge measurement",
         "dosing-skid",
     );
@@ -881,13 +899,13 @@ pub fn dosing_skid(config: &DosingSkidConfig) -> Result<DosingSkid, BuildError> 
         (
             carriers::RATIO_DEMAND,
             "ratio-demand",
-            "g/h",
+            unit::G_PER_H,
             "Paced demand before the permissive gate",
         ),
         (
             carriers::RATIO_DEMAND_IN,
             "ratio-demand-in",
-            "g/h",
+            unit::G_PER_H,
             "Paced demand delivered to the interlock",
         ),
         (
@@ -1002,13 +1020,13 @@ pub fn dosing_skid(config: &DosingSkidConfig) -> Result<DosingSkid, BuildError> 
         (
             carriers::GATED_DEMAND,
             "gated-demand",
-            "g/h",
+            unit::G_PER_H,
             "Permissive-gated demand",
         ),
         (
             carriers::GATED_DEMAND_IN,
             "gated-demand-in",
-            "g/h",
+            unit::G_PER_H,
             "Permissive-gated demand delivered to the manual station",
         ),
         (
@@ -1017,23 +1035,28 @@ pub fn dosing_skid(config: &DosingSkidConfig) -> Result<DosingSkid, BuildError> 
             "",
             "Demand interlock tripped",
         ),
-        (carriers::DEMAND, "demand", "g/h", "Commanded chemical rate"),
+        (
+            carriers::DEMAND,
+            "demand",
+            unit::G_PER_H,
+            "Commanded chemical rate",
+        ),
         (
             carriers::DEMAND_CHAIN_IN,
             "demand-chain-in",
-            "g/h",
+            unit::G_PER_H,
             "Commanded rate delivered to stage selection",
         ),
         (
             carriers::DEMAND_TOTAL_IN,
             "demand-total-in",
-            "g/h",
+            unit::G_PER_H,
             "Commanded rate delivered to totalization",
         ),
         (
             carriers::DEMAND_DEVMON_IN,
             "demand-devmon-in",
-            "g/h",
+            unit::G_PER_H,
             "Commanded rate delivered to dose confirmation",
         ),
         (
@@ -1045,25 +1068,25 @@ pub fn dosing_skid(config: &DosingSkidConfig) -> Result<DosingSkid, BuildError> 
         (
             carriers::STAGE_DEMAND,
             "stage-demand",
-            "pumps",
+            unit::PUMPS,
             "Stage-count demand the threshold chain computes",
         ),
         (
             carriers::STAGE_DEMAND_IN,
             "stage-demand-in",
-            "pumps",
+            unit::PUMPS,
             "Stage-count demand delivered to the pump group",
         ),
         (
             carriers::DUTY,
             "duty",
-            "pumps",
+            unit::PUMPS,
             "1-based index of the pump holding duty; 0 while none does",
         ),
         (
             carriers::STAGED,
             "staged",
-            "pumps",
+            unit::PUMPS,
             "How many pumps the group currently commands",
         ),
         (
@@ -1099,7 +1122,7 @@ pub fn dosing_skid(config: &DosingSkidConfig) -> Result<DosingSkid, BuildError> 
         (
             carriers::DOSE,
             "dose",
-            "mg/L",
+            unit::MG_PER_L,
             "Operator dose setpoint per flow unit",
         ),
         (
@@ -1111,7 +1134,7 @@ pub fn dosing_skid(config: &DosingSkidConfig) -> Result<DosingSkid, BuildError> 
         (
             carriers::MANUAL_RATE,
             "man-rate",
-            "g/h",
+            unit::G_PER_H,
             "Operator's manual chemical rate",
         ),
         (
@@ -1123,13 +1146,13 @@ pub fn dosing_skid(config: &DosingSkidConfig) -> Result<DosingSkid, BuildError> 
         (
             carriers::DOSE_TOTAL,
             "dose-total",
-            "g",
+            unit::G,
             "Commanded chemical total",
         ),
         (
             carriers::DEVIATION,
             "deviation",
-            "",
+            unit::FRACTION,
             "Commanded-versus-measured relative deviation",
         ),
         (
@@ -1213,6 +1236,53 @@ pub fn dosing_skid(config: &DosingSkidConfig) -> Result<DosingSkid, BuildError> 
         ("window_ticks", Value::Int(config.window_ticks)),
     ])));
 
+    // The dimensional contract: the kinds are unit-transparent — an
+    // `interlock` carries whatever demand it gates and a
+    // `latching-alarm`'s limits take the `in` port's unit — so the
+    // composition declares each quantity port's and bound's unit on the
+    // instance, where it joins the point declarations in the
+    // connect/build checks. The `*_ticks` intervals are the kind's own
+    // dimension: each spec's `ParamDecl::with_unit(unit::TICKS)` makes
+    // `ticks` the only declaration `param_unit` will accept, and the
+    // instance declares it so the document records what each interval
+    // counts.
+    plant.port_unit(ratio.id, "flow", unit::M3_PER_H);
+    plant.port_unit(ratio.id, "dose", unit::MG_PER_L);
+    plant.port_unit(ratio.id, "demand", unit::G_PER_H);
+    plant.param_unit(ratio.id, "min_dose", unit::MG_PER_L);
+    plant.param_unit(ratio.id, "max_dose", unit::MG_PER_L);
+    plant.param_unit(ratio.id, "min_rate", unit::G_PER_H);
+    plant.param_unit(ratio.id, "max_rate", unit::G_PER_H);
+    plant.param_unit(ratio.id, "fallback_rate", unit::G_PER_H);
+    plant.port_unit(interlock.id, "in", unit::G_PER_H);
+    plant.port_unit(interlock.id, "out", unit::G_PER_H);
+    plant.param_unit(interlock.id, "safe_value", unit::G_PER_H);
+    plant.port_unit(manual.id, "control", unit::G_PER_H);
+    plant.port_unit(manual.id, "manual", unit::G_PER_H);
+    plant.port_unit(manual.id, "out", unit::G_PER_H);
+    plant.param_unit(manual.id, "transfer_delta", unit::G_PER_H);
+    plant.port_unit(chain.id, "level", unit::G_PER_H);
+    plant.port_unit(chain.id, "demand", unit::PUMPS);
+    for parameter in ["cutoff", "stop", "start", "lag_start", "high"] {
+        plant.param_unit(chain.id, parameter, unit::G_PER_H);
+    }
+    plant.port_unit(group.id, "demand", unit::PUMPS);
+    plant.port_unit(group.id, "duty", unit::PUMPS);
+    plant.port_unit(group.id, "staged", unit::PUMPS);
+    for parameter in ["start_delay_ticks", "restage_delay_ticks", "min_off_ticks"] {
+        plant.param_unit(group.id, parameter, unit::TICKS);
+    }
+    if config.rotation_ticks.is_some() {
+        plant.param_unit(group.id, "rotation_ticks", unit::TICKS);
+    }
+    plant.port_unit(totalizer.id, "rate", unit::G_PER_H);
+    plant.port_unit(totalizer.id, "total", unit::G);
+    plant.port_unit(devmon.id, "expected", unit::G_PER_H);
+    plant.port_unit(devmon.id, "measured", unit::G_PER_H);
+    plant.port_unit(devmon.id, "deviation", unit::FRACTION);
+    plant.param_unit(devmon.id, "deviation_limit", unit::FRACTION);
+    plant.param_unit(devmon.id, "window_ticks", unit::TICKS);
+
     // The decision-55 alarm set — each latching on its condition and
     // its own writable ack point. The decision-70 codes are declared
     // data — the site priority/class vocabulary and response budgets
@@ -1295,6 +1365,28 @@ pub fn dosing_skid(config: &DosingSkidConfig) -> Result<DosingSkid, BuildError> 
             "dose-deviation-alarm",
         ),
     ));
+
+    // The level alarms' dimension: `in` and the limit parameters are in
+    // the tank level's `L`; the bool alarms' `in` stays undeclared.
+    // Every alarm's `response_ticks` is the kind's declared `ticks` —
+    // the composition declares it so the document records each
+    // decision-70 response budget's dimension.
+    plant.port_unit(low_alarm.id, "in", unit::L);
+    plant.port_unit(empty_alarm.id, "in", unit::L);
+    for parameter in ["low_limit", "high_limit", "hysteresis"] {
+        plant.param_unit(low_alarm.id, parameter, unit::L);
+        plant.param_unit(empty_alarm.id, parameter, unit::L);
+    }
+    for alarm in [
+        low_alarm.id,
+        empty_alarm.id,
+        pacing_alarm.id,
+        bund_alarm.id,
+        external_alarm.id,
+        deviation_alarm.id,
+    ] {
+        plant.param_unit(alarm, "response_ticks", unit::TICKS);
+    }
 
     // ---------- the ratio demand and the permissive chain ----------
     // The operator dose rides the writable internal point; `demand`,
@@ -1496,6 +1588,11 @@ fn pump_tag(index: usize) -> String {
 /// Registers point `point`'s monitoring signal — `10000 + point` —
 /// carrying the full unit/description/group metadata WW-FND-001 asks
 /// the surface to render from.
+///
+/// `unit` is declared once, on the point — the wiring contract — and
+/// the signal inherits it at `build`. The empty `""` stays
+/// signal-side: the deliberate "dimensionless" marker for the status
+/// and flag points the wiring layer leaves uncheckable.
 fn signal(
     plant: &mut PlantBuilder,
     point: PointId,
@@ -1504,11 +1601,19 @@ fn signal(
     description: &str,
     group: &str,
 ) {
-    plant
-        .signal(SignalId(SIGNAL_BASE + point.0), name, point)
-        .unit(unit)
-        .description(description)
-        .group(group);
+    if unit.is_empty() {
+        plant
+            .signal(SignalId(SIGNAL_BASE + point.0), name, point)
+            .unit(unit)
+            .description(description)
+            .group(group);
+    } else {
+        plant.unit(point, unit);
+        plant
+            .signal(SignalId(SIGNAL_BASE + point.0), name, point)
+            .description(description)
+            .group(group);
+    }
 }
 
 /// What the shared alarm wiring needs of either latching kind: the
@@ -1658,13 +1763,13 @@ fn wire_pump(
         (
             points::draw(index),
             "draw",
-            "L/scan",
+            unit::L_PER_SCAN,
             "Chemical draw the bool_flow element drives",
         ),
         (
             points::rate(index),
             "rate",
-            "g/h",
+            unit::G_PER_H,
             "Metered discharge the scaled_flow element drives",
         ),
         (points::run(index), "run", "", "Run feedback contact"),
@@ -1687,7 +1792,12 @@ fn wire_pump(
             "Stroke pulse the counter accumulates",
         ),
         (points::cmd(index), "cmd", "", "Field run command"),
-        (points::speed(index), "speed", "%", "Analog speed demand"),
+        (
+            points::speed(index),
+            "speed",
+            unit::PERCENT,
+            "Analog speed demand",
+        ),
     ] {
         signal(
             plant,
@@ -1860,16 +1970,18 @@ fn wire_pump(
             "Stroke preset reached",
         ),
     ] {
-        let unit = match point {
-            pump_point::DEMAND_IN | pump_point::SPEED_ENG | pump_point::SPEED_ENG_IN => "g/h",
-            pump_point::STROKES => "strokes",
+        let declared_unit = match point {
+            pump_point::DEMAND_IN | pump_point::SPEED_ENG | pump_point::SPEED_ENG_IN => {
+                unit::G_PER_H
+            }
+            pump_point::STROKES => unit::STROKES,
             _ => "",
         };
         signal(
             plant,
             PointId(base + point),
             &format!("{tag}-{name}"),
-            unit,
+            declared_unit,
             description,
             &group_name,
         );
@@ -1905,6 +2017,22 @@ fn wire_pump(
         "preset",
         Value::Int(config.stroke_preset),
     )])));
+
+    // The per-pump dimensional contract: the gated demand path is `g/h`
+    // end to end — `demand_in` through the speed gate to the
+    // `analog-output`'s `eng` — while `raw` and its bounds stay in `%`;
+    // the stroke count is `strokes`; the motor's `fault_ticks` and each
+    // alarm's `response_ticks` declare the kind's `ticks`.
+    plant.port_unit(speed_gate.id, "in", unit::G_PER_H);
+    plant.port_unit(speed_gate.id, "out", unit::G_PER_H);
+    plant.param_unit(speed_gate.id, "safe_value", unit::G_PER_H);
+    plant.port_unit(analog_out.id, "eng", unit::G_PER_H);
+    plant.port_unit(analog_out.id, "raw", unit::PERCENT);
+    plant.param_unit(analog_out.id, "eng_min", unit::G_PER_H);
+    plant.param_unit(analog_out.id, "eng_max", unit::G_PER_H);
+    plant.param_unit(analog_out.id, "raw_min", unit::PERCENT);
+    plant.param_unit(analog_out.id, "raw_max", unit::PERCENT);
+    plant.port_unit(counter.id, "count", unit::STROKES);
     let fault_alarm = plant.add(BoolLatchingAlarmSpec::new(
         parameters([
             ("priority", Value::Int(2)),
@@ -1929,6 +2057,9 @@ fn wire_pump(
             &format!("{tag}-pfault-alarm"),
         ),
     ));
+    plant.param_unit(motor.id, "fault_ticks", unit::TICKS);
+    plant.param_unit(fault_alarm.id, "response_ticks", unit::TICKS);
+    plant.param_unit(pfault_alarm.id, "response_ticks", unit::TICKS);
 
     // avail_i = remote-selected and in-service and pump-fault contact
     // healthy — the decision-52 availability wiring.

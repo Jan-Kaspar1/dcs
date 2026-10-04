@@ -185,6 +185,43 @@ def receipt_outcome(receipt):
     return next(iter(outcome))
 
 
+def stable_digest(entries):
+    """The sha256 a leg's digest line reports over `entries` — the
+    sorted-key JSON canonicalization every leg shares, with one nonce
+    class folded: a receipt's `submission.origin` is the minting run's
+    per-boot nonce (each `dcs-controller` process mints a fresh one),
+    so two identical passes can never carry the same value. Each
+    distinct origin is rewritten to its first-appearance ordinal —
+    `seq` keeps its real value and distinct origins stay distinct —
+    the same treatment the journal record's ephemeral listen port
+    gets: the submission identity's shape stays in the evidence
+    without its per-boot noise."""
+    origins = {}
+
+    def canonical(node):
+        if isinstance(node, dict):
+            submission = node.get("submission")
+            if isinstance(submission, dict) and "origin" in submission:
+                origin = submission["origin"]
+                if origin not in origins:
+                    origins[origin] = len(origins)
+                node = dict(
+                    node, submission={**submission, "origin": origins[origin]}
+                )
+            return {key: canonical(node[key]) for key in sorted(node)}
+        if isinstance(node, (list, tuple)):
+            # Digest entries carry tuples too — journal records and
+            # role transitions — and a tuple nests receipts just as a
+            # list does: descend either way so a wrapped submission's
+            # nonce canonicalizes the same.
+            return [canonical(item) for item in node]
+        return node
+
+    return hashlib.sha256(
+        json.dumps(canonical(entries), sort_keys=True).encode()
+    ).hexdigest()
+
+
 def declared_signal_index(model):
     """The signal index the emitted model document declares — the same
     derived view `GET /signals` serves, resolved here from the document
@@ -986,18 +1023,15 @@ def run_surface(monitor, model, schema_out=None):
     emitted = sum(
         1 for entry in journal if "event_emitted" in entry.get("event", {})
     )
-    digest = hashlib.sha256(
-        json.dumps(
-            {
-                "signals": served,
-                "descriptors": snapshot["descriptors"],
-                "parameters": snapshot["parameters"],
-                "schema": schema,
-                "journal": journal,
-            },
-            sort_keys=True,
-        ).encode()
-    ).hexdigest()
+    digest = stable_digest(
+        {
+            "signals": served,
+            "descriptors": snapshot["descriptors"],
+            "parameters": snapshot["parameters"],
+            "schema": schema,
+            "journal": journal,
+        }
+    )
     writable = sum(1 for entry in declared["points"] if entry["writable"])
     print(
         f"surface-digest {digest} — {len(declared['points'])} points "
@@ -1165,9 +1199,7 @@ def main():
             for failure in failures:
                 eprint(f"scenario: {failure}")
             return 1
-        digest = hashlib.sha256(
-            json.dumps(digest_entries, sort_keys=True).encode()
-        ).hexdigest()
+        digest = stable_digest(digest_entries)
         print(f"scenario-digest {digest}")
         return 0
 

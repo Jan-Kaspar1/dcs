@@ -213,6 +213,16 @@ const SCHEMA_SOURCE: &str = r##"{
         "value_type": { "$ref": "#/$defs/value-kind" }
       }
     },
+    "port": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["direction", "value_type"],
+      "properties": {
+        "direction": { "$ref": "#/$defs/direction" },
+        "value_type": { "$ref": "#/$defs/value-kind" },
+        "unit": { "type": ["string", "null"] }
+      }
+    },
     "channel-ref": {
       "type": "object",
       "additionalProperties": false,
@@ -514,7 +524,8 @@ const SCHEMA_SOURCE: &str = r##"{
         "journaled": { "type": "boolean" },
         "record": {
           "anyOf": [{ "$ref": "#/$defs/recording-duty" }, { "type": "null" }]
-        }
+        },
+        "unit": { "type": ["string", "null"] }
       },
       "allOf": [
         {
@@ -650,9 +661,13 @@ const SCHEMA_SOURCE: &str = r##"{
         "rationalization": {
           "anyOf": [{ "$ref": "#/$defs/rationalization" }, { "type": "null" }]
         },
+        "parameter_units": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
         "ports": {
           "type": "object",
-          "additionalProperties": { "$ref": "#/$defs/endpoint-shape" }
+          "additionalProperties": { "$ref": "#/$defs/port" }
         }
       },
       "allOf": [

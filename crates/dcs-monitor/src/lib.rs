@@ -327,6 +327,22 @@
 //! the lock's; every other path — the paced loop's cycle-end persist
 //! included — only queues, never waits.
 //!
+//! The checkpoint is one run's state, so its file is single-writer
+//! like the two append sinks: a [`StateWriterLock`] holds an exclusive
+//! advisory lock on a `.lock` sidecar beside the path — a sibling the
+//! write-then-rename never replaces, which is why a lock taken on the
+//! checkpoint itself would detach from the path at the first save.
+//! A second live writer on one state file is refused where the sink
+//! opens, naming the checkpoint, the sidecar, and the live-holder
+//! conflict, instead of leaving last-writer-wins for a restart to
+//! discover as a foreign run's tick domain, receipts, and component
+//! state adopted under a matching model fingerprint. A caller that
+//! holds the claim itself — the controller takes it before it reads
+//! the checkpoint to resume — hands it in through `state_writer` so
+//! the resume and every later save are one guard. A dead holder's lock
+//! releases with its descriptor, so the restart that resumes the dead
+//! run's checkpoint re-acquires it.
+//!
 //! The alarm flood and performance report (`dcs-alarm-report`, backed by
 //! [`alarm_report`]) is tooling-side aggregation over that record — the
 //! flood-and-performance decision's computing surface: it consumes
@@ -355,14 +371,23 @@
 //! inline-SVG trend through `since`-cursor polling; the journal pane
 //! lists quality transitions and settled command receipts in tick order
 //! — and submits `write_value` commands to `/command`, displaying the
-//! returned receipt. The page also reports its own delivery honesty —
+//! returned receipt. Every request the page issues rides a shared
+//! abort deadline, so a hung connection degrades into the named feed
+//! state instead of pinning the view on last-known values. The page
+//! also reports its own delivery honesty —
 //! the consumer-side gap/freshness state the bounded-publication
 //! decision requires: a `since`-cursor read stepping over an evicted
 //! stretch marks the feed line "publication gap", a snapshot re-serving
 //! the same publication's seq and tick marks it "stale publication",
-//! each rendered beside the view — distinct from a peer's unreachable
+//! a regressed publication identity, a new journal `run_boundary`, or a
+//! changed history `run` mark names the source's restart and resets the
+//! cursors to re-read the new lifetime's streams, each rendered beside
+//! the view — distinct from a peer's unreachable
 //! redundancy fault and from a point's non-Good quality — and cleared
-//! on the next in-sequence, fresh publication. The snapshot's
+//! on the next in-sequence, fresh publication. Command and force value
+//! entries parse strictly against the declared kind — a Boolean accepts
+//! only the named tokens — so arbitrary text is refused client-side
+//! rather than reaching the wire coerced to `false`. The snapshot's
 //! `io_health` section renders as the
 //! I/O-health pane: the executor's boundary counters (failed reads,
 //! failed writes, failed cyclic exchanges, consecutive failures) with
@@ -554,14 +579,14 @@ pub use pair::{
     PeerStatus, PeerView,
 };
 pub use recorder::MonitorConfig;
-pub use state_file::{DEFAULT_STATE_DRAIN_CAPACITY, StateSink};
+pub use state_file::{DEFAULT_STATE_DRAIN_CAPACITY, StateSink, StateWriterLock};
 pub use store::{Publication, PublicationGap, PublicationPage};
 
 use dcs_core::{
     CarryoverReport, Command, CommandError, CommandOutcome, CommandReceipt, DurableEntry,
     HistorySinkHealth, JournalEntry, JournalSinkHealth, PointHistory, PointId, PublicationHealth,
-    ResourceView, Role, RoleReport, SchemaView, StandbySync, StateSinkHealth, SwitchError,
-    TelemetrySnapshot, Tick,
+    ResourceView, RestartConsultOutcome, Role, RoleReport, SchemaView, StandbySync,
+    StateSinkHealth, SwitchError, TelemetrySnapshot, Tick,
 };
 use dcs_model::SignalIndex;
 use dcs_runtime::{
@@ -1108,6 +1133,18 @@ pub struct Monitor<'d> {
     /// a dead announced hint falls back within. Outside `shared`:
     /// request-path bookkeeping like `announced_verify`.
     claimed_verify: Mutex<Option<ClaimedVerify>>,
+    /// The last foreign-writer diagnosis pass the tracking path ran —
+    /// the monitor endpoint the field's standing claim named, when
+    /// the keyed pull ran, and what it answered. This is the pair
+    /// key's one job the rest of the platform cannot do: proving
+    /// whether the process holding the field belongs to the keyed line
+    /// at all. A pass inside its [`ANNOUNCED_VERIFY_RETRY`] window
+    /// suppresses the re-pull, so a dead or hostile declared endpoint
+    /// costs one bounded pull per window rather than one per scan,
+    /// while a changed declaration — a new owner — is diagnosed on the
+    /// next cycle. Outside `shared`: pull-path bookkeeping beside
+    /// `claimed_verify`.
+    foreign_verify: Mutex<Option<ForeignVerify>>,
     /// The last orphan-resolution probe pass's bookkeeping — the
     /// candidate set probed, in probe order, and the wall-clock time
     /// the pass ran. `track_cycle` runs the probe on every orphaned
@@ -1248,6 +1285,40 @@ struct ClaimedVerify {
     at: Instant,
 }
 
+/// What one diagnosis pass answered for the field's standing writer —
+/// the two readings [`Monitor::diagnose_foreign_writer`] can return.
+/// There is no third: every case where no fresh answer was earned is
+/// `Absent`, so the narrower verdict can never outlive the writer it
+/// was earned against.
+enum WriterDiagnosis {
+    /// No writer is outside the line: a pass ran and answered — the
+    /// named writer proved the line's key, or could not be reached — or
+    /// no writer could be asked at all (an unkeyed run, a field owner, a
+    /// claim declaring no monitor, an own-monitor or undialable
+    /// declaration). Either way the run falls back to the orphan
+    /// verdict's conditional claim.
+    Absent,
+    /// A pass ran and diagnosed the named writer: it answered and its
+    /// document could not prove this line's pair key.
+    Foreign(SocketAddr),
+}
+
+/// One foreign-writer diagnosis pass's bookkeeping — the monitor
+/// endpoint the field's standing claim named, the wall-clock time the
+/// keyed pull ran, and what it answered. The tracking path re-pulls
+/// only a changed declaration, or one whose pass aged past
+/// [`ANNOUNCED_VERIFY_RETRY`]; a pass that answered is the peer's
+/// standing verdict, a suppressed one leaves it untouched.
+struct ForeignVerify {
+    /// The declared monitor endpoint the pass pulled.
+    monitor: SocketAddr,
+    /// When the pass ran.
+    at: Instant,
+    /// Whether the pass diagnosed the writer: the endpoint answered and
+    /// its document could not prove the line's pair key.
+    foreign: bool,
+}
+
 /// One orphan-resolution probe pass's bookkeeping — the candidate set
 /// probed, in probe order, and the wall-clock time the pass ran. The
 /// tracking path re-probes only a changed set or one whose pass aged
@@ -1367,11 +1438,22 @@ impl<'d> Monitor<'d> {
         // The state-file sink's writer spawns at bind beside the
         // recorder's journal drain — its shared counters stamp every
         // publication's `state_sink` section from the bind-time read
-        // model on.
-        let state_sink = config
-            .state_file
-            .as_ref()
-            .map(|path| StateSink::new(path, config.state_drain_capacity));
+        // model on. The sink takes the checkpoint's single-writer lock
+        // unless the caller already holds it for this process
+        // (`state_writer`): a second live writer on the same path is
+        // refused here naming the conflict (finding
+        // state-file-shared-between-processes-not-detected), which is
+        // the checkpoint sink's half of the append sinks' single-writer
+        // rule.
+        let state_sink = match (config.state_file.as_deref(), config.state_writer.clone()) {
+            (None, _) => None,
+            (Some(path), Some(writer)) => Some(StateSink::with_writer(
+                path,
+                config.state_drain_capacity,
+                writer,
+            )?),
+            (Some(path), None) => Some(StateSink::new(path, config.state_drain_capacity)?),
+        };
         let mut recorder = recorder::Recorder::new(config, peer.tick(), peer.executor().anchor())?;
         // A `--state-file`-restored executor already carries the run's
         // state — the receipt log and the restored image are this run's
@@ -1401,6 +1483,7 @@ impl<'d> Monitor<'d> {
             announced: Mutex::new(VecDeque::new()),
             announced_verify: Mutex::new(None),
             claimed_verify: Mutex::new(None),
+            foreign_verify: Mutex::new(None),
             resolve_verify: Mutex::new(None),
             adopted: Mutex::new(None),
             resolved: Mutex::new(None),
@@ -1415,14 +1498,20 @@ impl<'d> Monitor<'d> {
     /// Arms `POST /scan` with `driven` wiring and returns the monitor —
     /// see [`Driven`]. Meaningful only on an unpaced monitor: a paced
     /// one refuses `POST /scan`, so the wiring never runs. The `track`
-    /// address also becomes the promotion-boundary pull's source. A
-    /// driven peer whose tracking source is declared by *name* — the
-    /// `host:port` a `--standby`/`--peer` argument carries — installs
-    /// it through [`with_standby_target`](Self::with_standby_target)
-    /// instead, so each pull resolves the name anew rather than
-    /// pinning the address it resolved to once.
+    /// address also becomes the promotion-boundary pull's source, and
+    /// mirrors into the peer so every checkpoint it serves — and the
+    /// `after_scan` state-file persist — stamps it as
+    /// `tracking_source`. A driven peer whose tracking source is
+    /// declared by *name* — the `host:port` a `--standby`/`--peer`
+    /// argument carries — installs it through
+    /// [`with_standby_target`](Self::with_standby_target) instead, so
+    /// each pull resolves the name anew rather than pinning the address
+    /// it resolved to once.
     pub fn driven(mut self, driven: Driven<'d>) -> Self {
         self.standby_source = driven.track.map(TrackTarget::Addr);
+        if let Some(track) = driven.track {
+            self.shared.lock().unwrap().peer.note_tracking_source(track);
+        }
         self.driven = driven;
         self
     }
@@ -1431,7 +1520,9 @@ impl<'d> Monitor<'d> {
     /// a paced `--standby` run's target, which the pacing loop owns and
     /// `Driven` never sees. `POST /promote` runs one final pull against
     /// it so the promoted run carries every command the active admitted
-    /// up to the promote request.
+    /// up to the promote request. The same address mirrors into the
+    /// peer so its served and persisted checkpoints stamp it as
+    /// `tracking_source`.
     pub fn with_standby_source(self, source: SocketAddr) -> Self {
         self.with_standby_target(TrackTarget::Addr(source))
     }
@@ -1445,7 +1536,20 @@ impl<'d> Monitor<'d> {
     /// same tracking misses an unreachable endpoint produces until the
     /// peer returns under it.
     pub fn with_standby_target(mut self, target: TrackTarget) -> Self {
-        self.standby_source = Some(target);
+        self.standby_source = Some(target.clone());
+        // A configured `Addr` mirrors into the peer so its served and
+        // persisted checkpoints stamp it as `tracking_source`, naming
+        // the incumbent's checkpoint stream to a later restart-as-active
+        // consult. A `Name` carries no address until a pull resolves
+        // it, so it names no stamped source — the consult then falls
+        // back to whatever the served line announced.
+        if let TrackTarget::Addr(source) = target {
+            self.shared
+                .lock()
+                .unwrap()
+                .peer
+                .note_tracking_source(source);
+        }
         self
     }
 
@@ -2130,7 +2234,9 @@ impl<'d> Monitor<'d> {
                 | PeerEvent::ClaimRearm(_)
                 | PeerEvent::SourceRestart(_)
                 | PeerEvent::PromotionRefusal(_)
+                | PeerEvent::ForeignClaimPreempt(_)
                 | PeerEvent::SupersededCommand { .. }
+                | PeerEvent::RehomedReceipt { .. }
                 | PeerEvent::AdoptionReceipt(_) => {}
             }
         }
@@ -2167,6 +2273,11 @@ impl<'d> Monitor<'d> {
                 PeerEvent::SupersededCommand { index, receipt } => {
                     recorder.note_settled(Some(index), receipt, tick);
                 }
+                PeerEvent::RehomedReceipt {
+                    prior,
+                    index,
+                    receipt,
+                } => recorder.note_rehomed(prior, index, receipt, tick),
                 PeerEvent::AdoptionReceipt(receipt) => {
                     recorder.note_settled(None, receipt, tick);
                 }
@@ -2176,6 +2287,7 @@ impl<'d> Monitor<'d> {
                 | PeerEvent::ClaimObservation(_)
                 | PeerEvent::StartupRefusal(_)
                 | PeerEvent::PromotionRefusal(_)
+                | PeerEvent::ForeignClaimPreempt(_)
                 | PeerEvent::RoleChange(_) => {}
             }
         }
@@ -2219,6 +2331,11 @@ impl<'d> Monitor<'d> {
                 PeerEvent::SupersededCommand { index, receipt } => {
                     recorder.note_settled(Some(index), receipt, tick);
                 }
+                PeerEvent::RehomedReceipt {
+                    prior,
+                    index,
+                    receipt,
+                } => recorder.note_rehomed(prior, index, receipt, tick),
                 PeerEvent::AdoptionReceipt(receipt) => {
                     recorder.note_settled(None, receipt, tick);
                 }
@@ -2227,6 +2344,7 @@ impl<'d> Monitor<'d> {
                 | PeerEvent::ClaimObservation(_)
                 | PeerEvent::StartupRefusal(_)
                 | PeerEvent::PromotionRefusal(_)
+                | PeerEvent::ForeignClaimPreempt(_)
                 | PeerEvent::RoleChange(_) => {}
             }
         }
@@ -2247,6 +2365,34 @@ impl<'d> Monitor<'d> {
             .unwrap()
             .recorder
             .note_reinitialized(report);
+    }
+
+    /// Journals a restart-as-active incumbent consult that ran before
+    /// this monitor bound — the pre-claim check a relaunched
+    /// launched-active made against the checkpoint stream its persisted
+    /// state (or configured `--peer`) named — attributed to the run's
+    /// resumed tick. Landing it after the bind keeps the durable record
+    /// in process-lifetime order: the run-boundary marker first, the
+    /// consult's audit behind it, before the startup claim.
+    pub fn note_restart_consult(&self, source: String, outcome: RestartConsultOutcome) {
+        let mut shared = self.shared.lock().unwrap();
+        let tick = shared.peer.tick();
+        shared.recorder.note_restart_consult(tick, source, outcome);
+    }
+
+    /// Journals pending commands a restart-as-active consult's adoption
+    /// adjudicated — the restartee's own still-`Accepted` receipts the
+    /// adopted line's submission window passed without carrying, each
+    /// already settled `Rejected` carrying `Superseded` beside its
+    /// absolute submission index — so the settle dedup the ordinary
+    /// settle path runs on applies to them too — attributed to the
+    /// resumed tick, behind the consult's own entry.
+    pub fn note_superseded(&self, superseded: Vec<(u64, CommandReceipt)>) {
+        let mut shared = self.shared.lock().unwrap();
+        let tick = shared.peer.tick();
+        for (index, receipt) in superseded {
+            shared.recorder.note_settled(Some(index), receipt, tick);
+        }
     }
 
     /// Marks a tracking peer degraded after a checkpoint fetch produced
@@ -2339,15 +2485,56 @@ impl<'d> Monitor<'d> {
         let report = track_and_record(&mut self.shared.lock().unwrap(), &self.store, move || {
             pulled
         });
-        if matches!(report, TrackReport::Applied(_))
-            && matches!(
-                self.shared.lock().unwrap().peer.report().sync,
-                Some(StandbySync::Orphaned { .. })
-            )
-        {
+        let orphaned = matches!(
+            self.shared.lock().unwrap().peer.report().sync,
+            Some(StandbySync::Orphaned { .. } | StandbySync::Usurped { .. })
+        );
+        if matches!(report, TrackReport::Applied(_)) && orphaned {
             self.resolve_tracking_source();
         }
+        // The tracked line's ownerless verdict is where the pair key's
+        // one remaining question gets asked: is the writer the field
+        // does have a member of this line, or a process that took the
+        // field outright? The diagnosis runs on the same cycle as the
+        // orphan verdict it reframes — outside `shared`, so its bounded
+        // pull stalls this request and not the paced scan — and its
+        // answer lands on the peer, where both promotion gates read it.
+        if orphaned {
+            match self.diagnose_foreign_writer() {
+                WriterDiagnosis::Foreign(writer) => self.note_foreign_writer(Some(writer)),
+                WriterDiagnosis::Absent => self.note_foreign_writer(None),
+            }
+        } else {
+            // A run no longer reporting an ownerless verdict is not
+            // tracking a non-owner, so it keeps no diagnosis. The
+            // reading is dropped outright rather than left standing for
+            // the next orphaned apply to pick up unverified: the writer
+            // may have changed hands many times over since the pass
+            // that earned it, and the promotion gate the next apply
+            // routes would be reading that old verdict.
+            self.note_foreign_writer(None);
+        }
         report
+    }
+
+    /// Records the diagnosis of the field's standing writer — the
+    /// narrower ownerless verdict the served `sync` reports when the
+    /// endpoint the field's own arbitration named could not prove this
+    /// line's pair key, and the claim shape both promotion gates read
+    /// from it. `Some(writer)` records the diagnosis,
+    /// `None` clears it back to the plain
+    /// [`StandbySync::Orphaned`] verdict.
+    ///
+    /// [`track_cycle`](Self::track_cycle) runs
+    /// [`diagnose_foreign_writer`](Self::diagnose_foreign_writer) and
+    /// records through here on every ownerless cycle; a consumer that
+    /// asks the question on its own cadence — rather than per tracking
+    /// pull — records its answer through the same seam, and the served
+    /// report refreshes with it.
+    pub fn note_foreign_writer(&self, writer: Option<SocketAddr>) {
+        let mut shared = self.shared.lock().unwrap();
+        shared.peer.note_foreign_writer(writer);
+        self.store.sync_liveness(shared.peer.report());
     }
 
     /// Counts one produced-nothing pull against the learned pin the
@@ -2446,6 +2633,13 @@ impl<'d> Monitor<'d> {
             match event {
                 PeerEvent::RoleChange(change) => recorder.note_role_change(&change),
                 PeerEvent::PromotionRefusal(refusal) => recorder.note_promotion_refused(refusal),
+                // An armed gate that fired off a usurped verdict took
+                // the field from the standing writer the pair had
+                // diagnosed as outside its line — the audit record
+                // naming the endpoint the claim came from.
+                PeerEvent::ForeignClaimPreempt(preempt) => {
+                    recorder.note_foreign_claim_preempted(preempt);
+                }
                 PeerEvent::Divergence(_)
                 | PeerEvent::Resolution(_)
                 | PeerEvent::Reinitialization(_)
@@ -2456,6 +2650,7 @@ impl<'d> Monitor<'d> {
                 | PeerEvent::StartupRefusal(_)
                 | PeerEvent::SourceRestart(_)
                 | PeerEvent::SupersededCommand { .. }
+                | PeerEvent::RehomedReceipt { .. }
                 | PeerEvent::AdoptionReceipt(_) => {}
             }
         }
@@ -2534,6 +2729,16 @@ impl<'d> Monitor<'d> {
                     hints.retain(|&hint| hint != announced);
                     hints.push_front(announced);
                     hints.truncate(MAX_ANNOUNCED);
+                    // Mirror the newest accepted hint into the peer so
+                    // the checkpoints it serves — and a `--state-file`
+                    // persist — stamp it as `tracking_source`, naming
+                    // this instance's successor to a later
+                    // restart-as-active consult.
+                    self.shared
+                        .lock()
+                        .unwrap()
+                        .peer
+                        .note_announced_source(announced);
                 }
                 let mut checkpoint = self.shared.lock().unwrap().peer.checkpoint();
                 // Where this line's field ownership lives: a field
@@ -2713,6 +2918,7 @@ impl<'d> Monitor<'d> {
                             },
                             actor,
                             reason,
+                            submission: None,
                         };
                         recorder.note_settled(None, receipt.clone(), peer.tick());
                         receipt
@@ -2965,6 +3171,11 @@ impl<'d> Monitor<'d> {
                         PeerEvent::SupersededCommand { index, receipt } => {
                             recorder.note_settled(Some(index), receipt, tick);
                         }
+                        PeerEvent::RehomedReceipt {
+                            prior,
+                            index,
+                            receipt,
+                        } => recorder.note_rehomed(prior, index, receipt, tick),
                         PeerEvent::AdoptionReceipt(receipt) => {
                             recorder.note_settled(None, receipt, tick);
                         }
@@ -2973,6 +3184,7 @@ impl<'d> Monitor<'d> {
                         | PeerEvent::ClaimObservation(_)
                         | PeerEvent::StartupRefusal(_)
                         | PeerEvent::PromotionRefusal(_)
+                        | PeerEvent::ForeignClaimPreempt(_)
                         | PeerEvent::RoleChange(_) => {}
                     }
                 }
@@ -3021,6 +3233,15 @@ impl<'d> Monitor<'d> {
                 for event in peer.drain_pending() {
                     match event {
                         PeerEvent::RoleChange(change) => recorder.note_role_change(&change),
+                        // The granted promotion took the field from a
+                        // standing writer the pair had diagnosed as
+                        // unable to prove its line's key — journaled
+                        // beside the role transitions the request
+                        // walked, so the record names both ends of the
+                        // takeover.
+                        PeerEvent::ForeignClaimPreempt(preempt) => {
+                            recorder.note_foreign_claim_preempted(preempt);
+                        }
                         PeerEvent::Divergence(_)
                         | PeerEvent::Resolution(_)
                         | PeerEvent::Reinitialization(_)
@@ -3032,6 +3253,7 @@ impl<'d> Monitor<'d> {
                         | PeerEvent::SourceRestart(_)
                         | PeerEvent::PromotionRefusal(_)
                         | PeerEvent::SupersededCommand { .. }
+                        | PeerEvent::RehomedReceipt { .. }
                         | PeerEvent::AdoptionReceipt(_) => {}
                     }
                 }
@@ -3377,6 +3599,117 @@ impl<'d> Monitor<'d> {
         // successor still earns the pulls while a dead or foreign
         // endpoint cannot.
         self.resolve_tracking_source()
+    }
+
+    /// Diagnoses the field's standing writer against this line's pair
+    /// key — the one question no other path on this surface can ask,
+    /// and the one the pair's own recovery turns on. The field's own
+    /// arbitration names the writer ([`Peer::claimed_monitor`], the
+    /// endpoint the standing claim declared, refreshed by every claim
+    /// verdict this run's attachments meet); this asks *that endpoint*
+    /// for a checkpoint under a fresh `?prove=` nonce and reads the
+    /// answer. A member of this keyed line proves its line; a process
+    /// outside it cannot, whatever it serves.
+    ///
+    /// The verdict has exactly one shape that earns the diagnosis: the
+    /// endpoint **answered** and its document carried no valid
+    /// `line_proof`. Silence is not a verdict — a dead or frozen
+    /// writer is no proof of anything, and a probe that cannot reach it
+    /// leaves the run on the orphan verdict's conditional claim, where
+    /// the field's own arbitration decides. An endpoint that proves
+    /// the key is a legitimate pair member whatever the field says,
+    /// so the diagnosis clears. Suppressed inside the
+    /// [`ANNOUNCED_VERIFY_RETRY`] window on an unchanged declaration,
+    /// the same bound every other verify path here runs under, so a
+    /// hostile or dead endpoint costs one bounded pull per window
+    /// rather than one per scan.
+    ///
+    /// Keyed-only, and only while this run owns no field: an unkeyed
+    /// run holds no key to ask under, and a field owner has no writer
+    /// outside its line. Every case where *no writer can be asked* is
+    /// [`WriterDiagnosis::Absent`] rather than a shrug — an unkeyed run,
+    /// a field owner, a claim declaring no monitor (the field
+    /// arbitrating no writer at all, which a released foreign claim
+    /// leaves standing), a declaration naming this run's own monitor or
+    /// an undialable wildcard bind. All of those are the plain
+    /// [`StandbySync::Orphaned`] verdict with its conditional claim, and
+    /// saying so is what keeps the narrower verdict honest about a
+    /// writer that is no longer there.
+    ///
+    /// A diagnosed writer journals its own refusal like every other
+    /// probe here ([`TrackingSourceRefused`](dcs_core::JournalEvent::TrackingSourceRefused)),
+    /// so the strand's cause is durable audit, and the peer's report
+    /// then names it as [`StandbySync::Usurped`] rather than
+    /// [`StandbySync::Orphaned`].
+    fn diagnose_foreign_writer(&self) -> WriterDiagnosis {
+        // Keyed-only: there is no line key to ask a candidate under on
+        // an unkeyed run, and an unkeyed run's peers never claimed a
+        // line in the first place.
+        if self.pair_key.is_none() {
+            return WriterDiagnosis::Absent;
+        }
+        let claimed = {
+            let shared = self.shared.lock().unwrap();
+            if shared.peer.owns_field() {
+                return WriterDiagnosis::Absent;
+            }
+            // The field named no endpoint for its claim — an unclaimed
+            // field, a tool's claim, or a build predating the
+            // declaration. There is no writer to be outside the line,
+            // so the verdict is the ownerless one: the narrower reading
+            // is not a shrug that survives the writer's departure.
+            match shared.peer.claimed_monitor() {
+                Some(claimed) => claimed,
+                None => return WriterDiagnosis::Absent,
+            }
+        };
+        // A verdict naming this run's own monitor names no other
+        // writer, and an undialable bind address is no endpoint at
+        // all — the same two refusals the adoption paths apply, and the
+        // same plain ownerless verdict they leave behind.
+        if claimed == self.local_addr() || claimed.ip().is_unspecified() {
+            return WriterDiagnosis::Absent;
+        }
+        {
+            // A pass inside its window stands as the verdict: the
+            // suppression bounds the *pull*, never the diagnosis, and a
+            // cleared answer keeps clearing until a fresh pass says
+            // otherwise.
+            let last = self.foreign_verify.lock().unwrap();
+            if let Some(last) = &*last
+                && last.monitor == claimed
+                && last.at.elapsed() < ANNOUNCED_VERIFY_RETRY
+            {
+                return if last.foreign {
+                    WriterDiagnosis::Foreign(claimed)
+                } else {
+                    WriterDiagnosis::Absent
+                };
+            }
+        }
+        let nonce = Some(mint_generation());
+        // The whole question in one bounded ask: an endpoint that
+        // answers without the key is outside this line, and one that
+        // does not answer at all is unknown.
+        let foreign = match MonitorClient::with_timeout(claimed, CHECKPOINT_PULL_TIMEOUT)
+            .checkpoint_tracking(None, nonce)
+        {
+            Ok(pulled) => !self.proven(&pulled, nonce),
+            Err(_) => false,
+        };
+        *self.foreign_verify.lock().unwrap() = Some(ForeignVerify {
+            monitor: claimed,
+            at: Instant::now(),
+            foreign,
+        });
+        if !foreign {
+            return WriterDiagnosis::Absent;
+        }
+        self.note_source_refusal(
+            claimed,
+            "the field's standing writer cannot prove this line's pair key".to_string(),
+        );
+        WriterDiagnosis::Foreign(claimed)
     }
 
     /// The field-arbitrated successor half of the tracking-source
@@ -4080,6 +4413,13 @@ fn track_and_record(
             // here, one entry per distinct refusal cause the streak
             // produced.
             PeerEvent::PromotionRefusal(refusal) => recorder.note_promotion_refused(refusal),
+            // The budget-th orphaned pull that self-promoted off a
+            // usurped verdict took the field from the standing writer
+            // the diagnosis named — the audit record the automatic
+            // half of the recovery owes beside its transitions.
+            PeerEvent::ForeignClaimPreempt(preempt) => {
+                recorder.note_foreign_claim_preempted(preempt);
+            }
             PeerEvent::RoleChange(change) => recorder.note_role_change(&change),
             // Pending commands an adopted checkpoint abandoned — the
             // demoted run's suspended queue the tracked line never
@@ -4092,6 +4432,16 @@ fn track_and_record(
             PeerEvent::SupersededCommand { index, receipt } => {
                 recorder.note_settled(Some(index), receipt, tick);
             }
+            // A settled receipt the same adoption displaced by a
+            // submission-index collision and re-minted past the
+            // adopted window's high-water: its verdict journaled under
+            // the prior index already, so the settle record only
+            // re-keys onto the index the served window now carries.
+            PeerEvent::RehomedReceipt {
+                prior,
+                index,
+                receipt,
+            } => recorder.note_rehomed(prior, index, receipt, tick),
             PeerEvent::AdoptionReceipt(receipt) => {
                 recorder.note_settled(None, receipt, tick);
             }
@@ -4148,7 +4498,9 @@ fn scan_and_record(shared: &mut Shared<'_>, store: &Store) -> Tick {
             | PeerEvent::ClaimRearm(_)
             | PeerEvent::SourceRestart(_)
             | PeerEvent::PromotionRefusal(_)
+            | PeerEvent::ForeignClaimPreempt(_)
             | PeerEvent::SupersededCommand { .. }
+            | PeerEvent::RehomedReceipt { .. }
             | PeerEvent::AdoptionReceipt(_) => {}
         }
     }
@@ -5797,6 +6149,7 @@ mod tests {
             source_owns_field: None,
             line_owner: None,
             line_proof: None,
+            tracking_source: None,
         };
         let own = checkpoint();
 
@@ -5965,6 +6318,7 @@ mod tests {
             source_owns_field: None,
             line_owner: None,
             line_proof: None,
+            tracking_source: None,
         };
         let own = checkpoint();
 

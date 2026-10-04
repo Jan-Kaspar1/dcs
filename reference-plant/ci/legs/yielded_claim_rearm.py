@@ -98,7 +98,6 @@ fires rather than passing an unexercised contract.
 """
 
 import argparse
-import hashlib
 import json
 import os
 import sys
@@ -791,15 +790,17 @@ def yielded_claim_rearm_pass(args, tamper):
             and "run_boundary" not in record.get("event", {})
         ]
         # The fenced start's own recorded evidence — the named
-        # refusal verdict, the observed incumbent's attribution, and
-        # the active -> standby stand-down — is the launch's
-        # journaled verdict, not the field seizure the refusal
-        # exists to stop; only records past it mean the claim
-        # reached farther than it allows.
+        # refusal verdict, the observed incumbent's attribution, the
+        # pre-claim `restart_consult` the launch runs against the
+        # incumbent's checkpoint stream, and the active -> standby
+        # stand-down — is the launch's journaled verdict, not the
+        # field seizure the refusal exists to stop; only records past
+        # it mean the claim reached farther than it allows.
         restartee_overreach = [
             record for record in restartee_entries
             if "field_claim_observed" not in record.get("event", {})
             and "startup_claim_refused" not in record.get("event", {})
+            and "restart_consult" not in record.get("event", {})
             and (record.get("event", {}).get("role_changed", {})
                  .get("to") != "standby")
         ]
@@ -1089,9 +1090,7 @@ def main():
         return 1
     if failures:
         return 1
-    digest = hashlib.sha256(
-        json.dumps(digest_entries, sort_keys=True).encode()
-    ).hexdigest()
+    digest = simulate.stable_digest(digest_entries)
     print(
         f"yielded-claim-rearm-digest {digest} — tracking by tick "
         f"{evidence['converged']}, the yielded claim's same-owner "

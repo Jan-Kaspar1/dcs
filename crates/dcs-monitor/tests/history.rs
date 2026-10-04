@@ -378,6 +378,7 @@ fn commands_are_journaled_with_their_final_outcomes() {
                         command: accepted.command,
                         outcome: CommandOutcome::Applied { tick: Tick(3) },
                         actor: None,
+                        submission: None,
                         reason: None,
                     },
                 },
@@ -411,6 +412,7 @@ fn commands_are_journaled_with_their_final_outcomes() {
                         },
                     },
                     actor: None,
+                    submission: None,
                     reason: None,
                 },
             }
@@ -779,6 +781,7 @@ fn a_receipted_write_to_a_journaled_point_journals_receipt_and_transition() {
                             command: receipt.command,
                             outcome: CommandOutcome::Applied { tick: Tick(2) },
                             actor: None,
+                            submission: None,
                             reason: None,
                         },
                     },

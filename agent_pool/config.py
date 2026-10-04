@@ -85,8 +85,18 @@ def load(path=None):
         spacing = factory.get('launch_spacing_seconds', 5)
         if type(spacing) not in (int, float) or not 0 <= spacing <= 30:
             raise ValueError('factory.launch_spacing_seconds must be between 0 and 30')
+        retries = factory.get('max_timeout_retries', 2)
+        if type(retries) is not int or not 0 <= retries <= 5:
+            raise ValueError('factory.max_timeout_retries must be an integer from 0 to 5')
+        delay = factory.get('timeout_retry_delay_seconds', 60)
+        if type(delay) not in (int, float) or not 1 <= delay <= 3600:
+            raise ValueError('factory.timeout_retry_delay_seconds must be between 1 and 3600')
         if factory['workspace_slots'] < factory['worker_slots']:
             raise ValueError('factory.workspace_slots must cover worker_slots')
+    planning = config.get('planning', {})
+    if not isinstance(planning, dict) or type(planning.get('enabled', True)) is not bool:
+        raise ValueError('planning.enabled must be a boolean')
+    config['planning'] = dict(planning, enabled=planning.get('enabled', True))
     config.setdefault('required_checks', DEFAULT_CHECKS)
     if config['required_checks'] != DEFAULT_CHECKS:
         raise ValueError('Required CI checks cannot be weakened in active configuration')

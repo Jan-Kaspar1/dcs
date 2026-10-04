@@ -406,6 +406,66 @@ pub fn settled_receipts(journal: &[JournalEntry]) -> Vec<CommandReceipt> {
         .collect()
 }
 
+/// The served log's comparable audit shape. `submission` names the
+/// minting run (#775): a pair's adopted log carries it verbatim — that
+/// is what makes the peers' logs byte-identical — while an
+/// independent run mints under its own origin, so cross-run
+/// comparisons strip it.
+pub fn audit(receipts: Vec<CommandReceipt>) -> Vec<CommandReceipt> {
+    receipts
+        .into_iter()
+        .map(|receipt| CommandReceipt {
+            submission: None,
+            ..receipt
+        })
+        .collect()
+}
+
+/// Strips each settlement's `submission` from `entries`: the minted
+/// origin names the run (#775) — run-unique like the ephemeral ports —
+/// so identical-runs comparisons drop it while keeping every settled
+/// fact the record carries.
+pub fn scrub_submissions(entries: &mut [JournalEntry]) {
+    for entry in entries {
+        if let JournalEvent::CommandSettled { receipt } = &mut entry.event {
+            receipt.submission = None;
+        }
+    }
+}
+
+/// Replaces every `submission.origin` nonce in a serialized value with
+/// its first-appearance ordinal — each process mints the nonce (#775),
+/// so identical scripted runs legitimately differ there the way they
+/// do on ephemeral ports. `seq` stays literal: the mint order is the
+/// run's own.
+pub fn canonicalize_origins(value: &mut serde_json::Value, seen: &mut Vec<u64>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for child in map.values_mut() {
+                canonicalize_origins(child, seen);
+            }
+            if let Some(serde_json::Value::Object(submission)) = map.get_mut("submission")
+                && let Some(origin) = submission.get("origin").and_then(|v| v.as_u64())
+            {
+                let index = seen
+                    .iter()
+                    .position(|&nonce| nonce == origin)
+                    .unwrap_or_else(|| {
+                        seen.push(origin);
+                        seen.len() - 1
+                    });
+                submission.insert("origin".to_string(), index.into());
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                canonicalize_origins(item, seen);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Pumps one accepted connection against the real monitor: two copy
 /// loops, one per direction, each ending by half-closing the other
 /// side so the request/response pair completes and the sockets close

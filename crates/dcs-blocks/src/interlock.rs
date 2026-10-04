@@ -470,6 +470,7 @@ mod tests {
             parameters,
             rationalization: None,
             ports: BTreeMap::new(),
+            parameter_units: BTreeMap::new(),
         };
         let mut block = Interlock::from_parameters(
             "ilk",

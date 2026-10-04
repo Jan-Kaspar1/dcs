@@ -623,6 +623,7 @@ mod tests {
             .collect(),
             rationalization: None,
             ports: BTreeMap::new(),
+            parameter_units: BTreeMap::new(),
         };
         let block =
             BoolLatchingAlarm::from_parameters("bal", IN, ACK, ALARM, UNACK, &instance.parameters)

@@ -59,8 +59,10 @@ def main():
         subprocess.run(['systemctl', '--user', 'stop', 'dcs-agents.service'], check=True)
     elif args.command == 'status':
         from .admission import Admission
-        print(json.dumps({'paused':state.paused(), 'pause_reason':state.get('pause_reason'), 'integrity_error':state.get('integrity_error'), 'last_error':state.get('last_error'), 'capacity':state.capacity(), 'merges':state.get('merges',0), 'factory':state.get('factory:status'), 'merge_flow':state.merge_flow(), 'planner':state.get('planner'), 'areas':state.get('area_allocation') or {}, 'admission':Admission(state, config).summary(), 'review':state.review_summary(), 'qa':qa_section(config, state), 'jobs':state.jobs()}, indent=2))
+        print(json.dumps({'paused':state.paused(), 'pause_reason':state.get('pause_reason'), 'integrity_error':state.get('integrity_error'), 'last_error':state.get('last_error'), 'capacity':state.capacity(), 'merges':state.get('merges',0), 'factory':state.get('factory:status'), 'merge_flow':state.merge_flow(), 'planner':state.get('planner'), 'planning':config.get('planning', {'enabled':True}), 'areas':state.get('area_allocation') or {}, 'admission':Admission(state, config).summary(), 'review':state.review_summary(), 'qa':qa_section(config, state), 'jobs':state.jobs()}, indent=2))
     elif args.command == 'plan':
+        if not config['planning']['enabled']:
+            parser.error('Planning is disabled; work the existing backlog or re-enable planning in configuration')
         if state.paused():
             parser.error('Resume before requesting a planning pass')
         state.set('plan:requested', True)

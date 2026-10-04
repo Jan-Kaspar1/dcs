@@ -479,6 +479,7 @@ mod tests {
             parameters,
             rationalization: None,
             ports: BTreeMap::new(),
+            parameter_units: BTreeMap::new(),
         };
         let mut ao =
             AnalogOutput::<f64>::from_parameters("ao", ENG, RAW, &instance.parameters).unwrap();

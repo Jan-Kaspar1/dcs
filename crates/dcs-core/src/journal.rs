@@ -360,6 +360,26 @@ pub enum JournalEvent {
         /// The named refusal the served document earned.
         detail: String,
     },
+    /// This run took the field's write-ownership claim away from a
+    /// live standing writer it had diagnosed as unable to prove this
+    /// line's pair key — the takeover a
+    /// [`StandbySync::Usurped`](crate::StandbySync) verdict arms, and
+    /// the audit counterpart of [`FieldClaimLost`](Self::FieldClaimLost):
+    /// that record names the run that *lost* the claim, this one names
+    /// the endpoint a run *took it from*, so the pair's own record
+    /// says which process held the field across the whole episode. The
+    /// unconditional claim is the deliberate takeover shape and does
+    /// not journal this entry on its own — only a standing writer the
+    /// pair had diagnosed as outside its line is named, because that is
+    /// the one preemption a reader of the record cannot otherwise
+    /// reconstruct from the role transitions. One entry journals per
+    /// granted claim taken this way, attributed to the scan tick the
+    /// promotion's claim ran at.
+    ForeignClaimPreempted {
+        /// The monitor endpoint the field's arbitration named for the
+        /// standing writer this run's claim took the field from.
+        writer: SocketAddr,
+    },
     /// A new process lifetime began — the served form of the journal
     /// file's run-boundary marker. A monitor bound over a journal file
     /// that already records earlier lifetimes journals it once at
@@ -375,6 +395,64 @@ pub enum JournalEvent {
     RunBoundary {
         /// Which lifetime begins — the file counts runs from 1.
         run: u64,
+    },
+    /// A relaunched launched-active consulted the incumbent's
+    /// checkpoint stream before taking the field's write-ownership
+    /// claim — the restart-as-active consult. The unconditional startup
+    /// claim cannot tell a dead owner's relaunch from a restart while
+    /// the promoted peer holds the field, so the restartee asks the
+    /// peer its persisted checkpoint names — or its configured `--peer`
+    /// — for the incumbent's checkpoint first and adopts the live
+    /// line's newer state, instead of silently rolling the field back
+    /// to its stale persisted checkpoint. The entry is the claiming
+    /// line's own audit of the takeover: `source` the peer the
+    /// checkpoint was pulled from, `outcome` what the consult found
+    /// and did — see [`RestartConsultOutcome`].
+    RestartConsult {
+        /// The peer's monitor address the consult pulled from.
+        source: String,
+        /// What the consult found and did.
+        outcome: RestartConsultOutcome,
+    },
+}
+
+/// What a relaunched launched-active's incumbent consult found and did
+/// — the outcome [`JournalEvent::RestartConsult`] records.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RestartConsultOutcome {
+    /// The incumbent's checkpoint stream carried a newer line — a
+    /// newer tick on the run's own generation, or the field owner's own
+    /// new generation — and the restartee adopted it in place of its
+    /// own resumed state: the receipted commands, forces, tuning, and
+    /// run state the incumbent accumulated across the gap survive the
+    /// takeover rather than silently rolling back to the restartee's
+    /// persisted checkpoint.
+    Adopted {
+        /// The tick the restartee's own checkpoint stood at — the
+        /// persisted state the adoption superseded; `None` on a cold
+        /// start with no resumed state.
+        superseded_at: Option<Tick>,
+        /// The adopted checkpoint's tick — where the incumbent's line
+        /// stood at the consult.
+        resumed_at: Tick,
+    },
+    /// The incumbent answered but its stream carried nothing newer
+    /// than the restartee's own checkpoint — a restart whose persisted
+    /// state was already current, standing as it resumed.
+    Standing {
+        /// The tick the incumbent's stream stood at.
+        incumbent_at: Tick,
+    },
+    /// The consult produced no adoptable checkpoint — the incumbent
+    /// was unreachable, the consulted peer does not own the field, or
+    /// its checkpoint could not apply — so the restartee claims from
+    /// its own persisted state: the documented dead-owner recovery,
+    /// journaled because the incumbent's stream could not arbitrate
+    /// this takeover.
+    Unadopted {
+        /// Why no checkpoint was adopted.
+        detail: String,
     },
 }
 
@@ -483,6 +561,7 @@ mod tests {
                         },
                         outcome: CommandOutcome::Applied { tick: Tick(4) },
                         actor: None,
+                        submission: None,
                         reason: None,
                     },
                 },
@@ -629,6 +708,37 @@ mod tests {
                 tick: Tick(21),
                 event: JournalEvent::FieldOrphaned { aligned: Tick(20) },
             },
+            JournalEntry {
+                seq: 20,
+                tick: Tick(22),
+                event: JournalEvent::RestartConsult {
+                    source: "10.0.0.5:9081".to_string(),
+                    outcome: RestartConsultOutcome::Adopted {
+                        superseded_at: Some(Tick(19)),
+                        resumed_at: Tick(40),
+                    },
+                },
+            },
+            JournalEntry {
+                seq: 21,
+                tick: Tick(23),
+                event: JournalEvent::RestartConsult {
+                    source: "10.0.0.6:9081".to_string(),
+                    outcome: RestartConsultOutcome::Standing {
+                        incumbent_at: Tick(7),
+                    },
+                },
+            },
+            JournalEntry {
+                seq: 22,
+                tick: Tick(24),
+                event: JournalEvent::RestartConsult {
+                    source: "10.0.0.7:9081".to_string(),
+                    outcome: RestartConsultOutcome::Unadopted {
+                        detail: "connect failed".to_string(),
+                    },
+                },
+            },
         ];
         let json = serde_json::to_string(&entries).unwrap();
         assert_eq!(
@@ -652,6 +762,7 @@ mod tests {
         assert!(json.contains("\"tracking_source_adopted\""), "{json}");
         assert!(json.contains("\"tracking_source_refused\""), "{json}");
         assert!(json.contains("\"run_boundary\""), "{json}");
+        assert!(json.contains("\"restart_consult\""), "{json}");
         // A `field_claim_lost` entry an older build journaled carried
         // no claimant field; it still decodes, the verdict reading as
         // unattributed rather than failing the file.
@@ -686,6 +797,7 @@ mod tests {
             },
             outcome: CommandOutcome::Applied { tick: Tick(14) },
             actor: Some("operator-3".to_string()),
+            submission: None,
             reason: None,
         };
         let entry = JournalEntry {

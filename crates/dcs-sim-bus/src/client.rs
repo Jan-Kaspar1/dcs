@@ -57,6 +57,14 @@ pub enum LinkError {
     /// decode as a [`BusRequest`]. `detail` is the server's diagnostic
     /// text.
     InvalidRequest(String),
+    /// The exchange answered [`BusResponse::Missed`] — the device's
+    /// scripted-outcome queue (`ScriptExchange` development tooling)
+    /// decided this cycle would not complete: nothing published, no
+    /// census latched. Unlike a severed link the answer is in-band, so
+    /// the connection — and the writer claim bound to it — stays up:
+    /// a scripted flaky device cannot free a claim only the holder's
+    /// disconnect or `release_writer` may release.
+    Missed,
     /// The request mutates the shared device but another attachment
     /// holds the device's write-ownership claim — the fencing verdict
     /// of the failover decision. Reads still succeed; writing again
@@ -80,7 +88,9 @@ impl LinkError {
     /// point the protocol promises, which surfaces as `Disconnected`.
     pub fn at_point(self, point: PointId) -> IoError {
         match self {
-            Self::Disconnected | Self::InvalidRequest(_) => IoError::Disconnected(point),
+            Self::Disconnected | Self::InvalidRequest(_) | Self::Missed => {
+                IoError::Disconnected(point)
+            }
             Self::Timeout => IoError::Timeout(point),
             Self::Fenced => IoError::Fenced(point),
         }
@@ -95,6 +105,7 @@ impl fmt::Display for LinkError {
             Self::InvalidRequest(detail) => {
                 write!(f, "server refused the request: {detail}")
             }
+            Self::Missed => write!(f, "a scripted miss answered the exchange"),
             Self::Fenced => {
                 write!(
                     f,

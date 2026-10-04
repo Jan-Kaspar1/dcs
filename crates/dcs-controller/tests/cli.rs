@@ -1,6 +1,7 @@
 //! CLI tests for the `dcs-controller` binary: deterministic `--ticks`
 //! output and nonzero exits naming the failing element.
 
+use std::path::Path;
 use std::process::Command;
 
 const BINARY: &str = env!("CARGO_BIN_EXE_dcs-controller");
@@ -140,6 +141,44 @@ fn aliased_persistence_paths_are_a_usage_error() {
     ]);
     assert_eq!(output.status.code(), Some(2));
 
+    // Finding state-file-shared-between-processes-not-detected: the
+    // checkpoint's single-writer lock lives on the `.lock` sidecar its
+    // rename never replaces, which makes that sidecar a persistence
+    // path of its own. An append sink pointed at it would hold the
+    // lock every state-file run needs — the one alias the file locks
+    // cannot catch, because the append sink takes the sidecar first —
+    // so the pair is a usage error named at parse too.
+    let state = dir.join("writer-lock.json");
+    let sidecar = {
+        let mut sidecar = state.as_os_str().to_os_string();
+        sidecar.push(".lock");
+        sidecar.to_string_lossy().into_owned()
+    };
+    for second in ["--journal-file", "--history-file"] {
+        let output = run(&[
+            TANK_LOOP,
+            "--scan-ms",
+            "100",
+            "--listen",
+            "127.0.0.1:0",
+            "--state-file",
+            state.to_str().unwrap(),
+            second,
+            &sidecar,
+        ]);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{second} on --state-file's writer lock must exit 2"
+        );
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains("--state-file") && stderr.contains(second),
+            "{second}: {stderr}"
+        );
+        assert!(stderr.contains("writer lock"), "{second}: {stderr}");
+    }
+
     // Distinct paths launch cleanly — a paced --ticks run that scans
     // and exits is the contract the alias refusal must not trip.
     let state = dir.join("state.json");
@@ -172,6 +211,11 @@ fn aliased_persistence_paths_are_a_usage_error() {
         head.lines().next().unwrap().contains("run_boundary"),
         "the history file keeps append-format records: {head}"
     );
+    // The writer lock rode its own sidecar beside the checkpoint and
+    // released with the run — the file the next restart re-takes.
+    let mut sidecar = state.as_os_str().to_os_string();
+    sidecar.push(".lock");
+    assert!(Path::new(&sidecar).is_file());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

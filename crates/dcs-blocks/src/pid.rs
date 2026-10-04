@@ -524,6 +524,7 @@ mod tests {
             parameters,
             rationalization: None,
             ports: BTreeMap::new(),
+            parameter_units: BTreeMap::new(),
         };
         let pid = Pid::from_parameters("pid", SP, PV, OUT, &instance.parameters).unwrap();
         // Optional ki/kd default to zero.

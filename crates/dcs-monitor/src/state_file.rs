@@ -42,9 +42,36 @@
 //! path, so a crash mid-write leaves at worst a sibling `.tmp`
 //! remainder, never a torn target the next resume would have to
 //! reject.
+//!
+//! The checkpoint is single-run state, so the durable file is
+//! single-writer like the append sinks — QA finding
+//! `state-file-shared-between-processes-not-detected` (#1341). The file
+//! carries one run's tick domain, its receipt log, and its component
+//! state: last-writer-wins across two live processes is not a torn
+//! document (the rename keeps every reader whole) but silent state
+//! confusion, because each writer's saves interleave and a restart
+//! resumes whichever run replaced the file last — foreign tick,
+//! receipts, and component state adopted under the model fingerprint
+//! that any same-model writer matches. A [`StateWriterLock`] refuses
+//! the second live writer by name instead.
+//!
+//! The lock rides a sibling `.lock` file rather than the checkpoint
+//! itself, and that placement is the whole reason the two append sinks
+//! cannot cover this sink: write-then-rename replaces the checkpoint's
+//! inode on every save, so a lock taken on the path detaches from it
+//! at the first save and the next process locks the fresh inode
+//! happily. The sidecar is never renamed — the writer only ever
+//! replaces the checkpoint — so the lock this run holds survives every
+//! save and a second process's open sees it. A dead holder's lock
+//! releases with its descriptor, so the restart that resumes the dead
+//! run's checkpoint re-acquires it, which is the recovery the file
+//! exists for; a sidecar that survives a run is inert, holding
+//! nothing.
 
 use crate::drain::{Drain, DrainShared};
 use dcs_runtime::Checkpoint;
+use std::fmt;
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -75,7 +102,9 @@ pub const STATE_DRAIN_WAIT: Duration = Duration::from_secs(30);
 /// The `--state-file` sink: a bounded queue of captured [`Checkpoint`]s
 /// drained by a dedicated writer that serializes each and atomically
 /// replaces the file — the capture under the executor lock, the file
-/// I/O off it.
+/// I/O off it. The sink carries the file's [`StateWriterLock`], so a
+/// second live writer on one path is refused when the sink opens, not
+/// discovered by a restart adopting someone else's run.
 pub struct StateSink {
     /// What a refusal or an attestation failure names — `state file
     /// <path>` — so the fatal report reads like the sink's own.
@@ -83,21 +112,66 @@ pub struct StateSink {
     /// The bounded queue and dedicated writer the captures drain
     /// through — see [`Drain`].
     drain: Drain<Checkpoint>,
+    /// The checkpoint's single-writer lock, held for as long as the
+    /// sink lives — declared after the drain so the last queued
+    /// capture's write lands before the lock releases with the sink.
+    #[expect(
+        dead_code,
+        reason = "the claim is held for the sink's lifetime and never read"
+    )]
+    writer: StateWriterLock,
 }
 
 impl StateSink {
     /// Spawns the sink's writer thread persisting `path`, `capacity`
-    /// the queue's declared bound. Each queued checkpoint serializes
-    /// and replaces the file by write-then-rename — atomic on one
+    /// the queue's declared bound, taking the checkpoint's
+    /// single-writer lock first — a second live writer on the same
+    /// path is refused here naming the file, the lock's sidecar, and
+    /// the live-holder conflict. Each queued checkpoint serializes and
+    /// replaces the file by write-then-rename — atomic on one
     /// filesystem — strictly in push order.
-    pub fn new(path: &Path, capacity: usize) -> Self {
-        let label = format!("state file {}", path.display());
+    pub fn new(path: &Path, capacity: usize) -> io::Result<Self> {
+        Self::with_writer(path, capacity, StateWriterLock::acquire(path)?)
+    }
+
+    /// As [`new`](Self::new) for a caller that already took the
+    /// checkpoint's writer lock for this process — the controller's
+    /// `--state-file` run holds it from before it reads the checkpoint
+    /// to the process's exit, so the resume and every later save are
+    /// one claim. The lock must be the one for `path`; a lock on
+    /// another file is a configuration error, refused by name rather
+    /// than silently pairing a claim with a file it does not guard.
+    pub fn with_writer(path: &Path, capacity: usize, writer: StateWriterLock) -> io::Result<Self> {
+        if writer.state_path() != path {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "the state-file writer lock taken for {} cannot guard {}: the sink's \
+                     writer lock must be the one acquired for its own path",
+                    writer.state_path().display(),
+                    path.display()
+                ),
+            ));
+        }
         let sink_path = path.to_path_buf();
-        Self {
-            drain: Drain::new(label.clone(), capacity, move |checkpoint| {
+        let label = format!("state file {}", path.display());
+        Ok(Self::assemble(
+            label.clone(),
+            Drain::new(label, capacity, move |checkpoint| {
                 write_state_file(&sink_path, checkpoint)
             }),
+            writer,
+        ))
+    }
+
+    /// Assembles a sink around an already-built drain — the one shape
+    /// [`new`](Self::new), [`with_writer`](Self::with_writer), and the
+    /// test seam share, so the writer lock is never left out of one.
+    fn assemble(label: String, drain: Drain<Checkpoint>, writer: StateWriterLock) -> Self {
+        Self {
             label,
+            drain,
+            writer,
         }
     }
 
@@ -144,11 +218,144 @@ impl StateSink {
     /// Test seam: wrap a constructed drain — the stalled- and
     /// failing-writer coverage drives the writer through closures a
     /// real file cannot produce deterministically, the same seam the
-    /// journal sink's tests use.
+    /// journal sink's tests use. The checkpoint's writer lock is taken
+    /// as a real sink's is, so the seam still refuses a second writer.
     #[cfg(test)]
-    pub(crate) fn for_test(label: String, drain: Drain<Checkpoint>) -> Self {
-        Self { label, drain }
+    pub(crate) fn for_test(
+        label: String,
+        path: &Path,
+        drain: Drain<Checkpoint>,
+    ) -> io::Result<Self> {
+        Ok(Self::assemble(
+            label,
+            drain,
+            StateWriterLock::acquire(path)?,
+        ))
     }
+}
+
+/// The `--state-file` checkpoint's single-writer lock — the guard QA
+/// finding `state-file-shared-between-processes-not-detected` (#1341)
+/// asks for, held the way the append sinks hold theirs but on a
+/// sidecar the checkpoint's own rename can never replace.
+///
+/// The checkpoint is one run's state: its tick domain, its receipt
+/// log, its component state, and the generation that identifies the
+/// run that wrote it. Two live processes persisting into one file is
+/// not a torn document — the write-then-rename keeps every read whole
+/// — but silent state confusion: their saves interleave, the file
+/// carries whichever run renamed last, and a restart resuming that
+/// file adopts the other run's tick domain, receipts, and component
+/// state, the model fingerprint that gates the resume matching for any
+/// same-model writer. The lock is what turns that into a refusal.
+///
+/// Two acquisitions of one lock are possible in a single process and
+/// are not a conflict: a controller takes the lock before it reads the
+/// checkpoint to resume, then the sink that writes it joins the same
+/// claim. That is why the lock is cloneable and compares by its
+/// checkpoint path — a clone shares one open descriptor, hence one
+/// advisory lock, so every holder in the process writes through one
+/// claim. A *second* acquisition of the sidecar — the live foreign
+/// writer this guard exists to catch — is refused by name.
+#[derive(Clone)]
+pub struct StateWriterLock {
+    /// The checkpoint this claim guards — the identity every refusal
+    /// and the lock's own comparison are stated in.
+    state_path: PathBuf,
+    /// The held sidecar descriptor: the exclusive advisory lock rides
+    /// it and releases with the last holder's close, whether that is a
+    /// graceful sink drop or the process's exit.
+    #[expect(
+        dead_code,
+        reason = "the descriptor is the lock's carrier, held for the claim's lifetime"
+    )]
+    lock: Arc<File>,
+}
+
+impl StateWriterLock {
+    /// Takes the checkpoint at `path` for this process: creates or
+    /// opens its `.lock` sidecar and holds an exclusive advisory lock
+    /// on it until the returned claim drops. `Err` names the sidecar
+    /// and the reason — the file could not be opened or locked, or a
+    /// live process already holds the writer lock, which is the
+    /// shared-state-file conflict the lock refuses by name.
+    pub fn acquire(path: &Path) -> io::Result<Self> {
+        let lock_path = Self::lock_path(path);
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|error| named(&lock_path, "cannot open state-file writer lock", error))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Self {
+                state_path: path.to_path_buf(),
+                lock: Arc::new(file),
+            }),
+            Err(TryLockError::WouldBlock) => Err(named(
+                &lock_path,
+                "cannot lock state file",
+                format!(
+                    "a live process already holds its writer lock — two writers on one \
+                     --state-file overwrite each other's run's tick domain, receipts, and \
+                     component state, and a restart resumes whichever wrote last; give each \
+                     process its own state file (the lock is the sibling {} and its holder's \
+                     identity is `fuser`/`lsof` on that path)",
+                    lock_path.display()
+                ),
+            )),
+            Err(TryLockError::Error(error)) => {
+                Err(named(&lock_path, "cannot lock state file", error))
+            }
+        }
+    }
+
+    /// The sidecar path `path`'s writer lock lives on — `<path>.lock`,
+    /// a sibling the checkpoint's write-then-rename never replaces,
+    /// which is what keeps the lock attached to the path across every
+    /// save. Declared beside [`acquire`](Self::acquire) so a caller
+    /// checking configuration against the sidecars compares the paths
+    /// the runtime actually locks.
+    pub fn lock_path(path: &Path) -> PathBuf {
+        let mut lock = path.as_os_str().to_os_string();
+        lock.push(".lock");
+        PathBuf::from(lock)
+    }
+
+    /// The checkpoint this claim guards — the path every refusal names.
+    pub fn state_path(&self) -> &Path {
+        &self.state_path
+    }
+}
+
+impl fmt::Debug for StateWriterLock {
+    /// The claim's identity is the checkpoint it guards: the held
+    /// descriptor is process state no caller compares.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StateWriterLock")
+            .field("state_file", &self.state_path)
+            .finish()
+    }
+}
+
+impl PartialEq for StateWriterLock {
+    /// Claims compare by the checkpoint they guard, so two claims on one
+    /// file are the same claim — the configuration checks can hold a
+    /// `MonitorConfig` carrying one and still compare it.
+    fn eq(&self, other: &Self) -> bool {
+        self.state_path == other.state_path
+    }
+}
+
+impl Eq for StateWriterLock {}
+
+/// An `io::Error` whose message names the file it happened on — the
+/// shape every file-side failure takes here, so a startup refusal
+/// identifies which file the run could not take.
+fn named(path: &Path, what: &str, error: impl fmt::Display) -> io::Error {
+    io::Error::other(format!("{what} {}: {error}", path.display()))
 }
 
 /// Persists `checkpoint` as `path`'s new contents: serialize, write to
@@ -212,6 +419,7 @@ mod tests {
             source_owns_field: None,
             line_owner: None,
             line_proof: None,
+            tracking_source: None,
         }
     }
 
@@ -236,7 +444,7 @@ mod tests {
     fn a_pushed_checkpoint_replaces_the_file_attested() {
         let dir = scratch("roundtrip");
         let path = dir.join("state.json");
-        let sink = StateSink::new(&path, 8);
+        let sink = StateSink::new(&path, 8).unwrap();
 
         let ordinal = sink.offer(checkpoint(7)).unwrap();
         sink.attest(ordinal, Duration::from_secs(10)).unwrap();
@@ -257,6 +465,8 @@ mod tests {
     /// checkpoint can never be overwritten by an older one.
     #[test]
     fn checkpoints_replace_the_file_in_push_order() {
+        let dir = scratch("push-order");
+        let path = dir.join("state.json");
         // The writer logs each replace's tick instead of touching a
         // file — the assertion is the pushes' order surviving to it.
         let written = Arc::new(Mutex::new(Vec::new()));
@@ -267,7 +477,7 @@ mod tests {
                 Ok(())
             }
         });
-        let sink = StateSink::for_test("state file test".to_string(), drain);
+        let sink = StateSink::for_test("state file test".to_string(), &path, drain).unwrap();
 
         let mut last = None;
         for tick in 1..=5_u64 {
@@ -279,6 +489,93 @@ mod tests {
             (1..=5_u64).map(Tick).collect::<Vec<_>>(),
             "the writer's replace order is the pushes' order"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #1341: the checkpoint's single-writer lock. A second live
+    /// writer on one path is refused by name — the conflict the shared
+    /// state file used to pass in silence, two processes each
+    /// overwriting the other's run's tick domain, receipts, and
+    /// component state until a restart adopted whichever wrote last.
+    #[test]
+    fn a_second_live_writer_on_one_state_file_is_refused_naming_the_conflict() {
+        let dir = scratch("single-writer");
+        let path = dir.join("state.json");
+
+        // The first writer holds the claim, and a save lands through
+        // it — the write-then-rename replacing the checkpoint's inode.
+        let first = StateSink::new(&path, 8).unwrap();
+        let ordinal = first.offer(checkpoint(3)).unwrap();
+        first.attest(ordinal, Duration::from_secs(10)).unwrap();
+        assert_eq!(read_checkpoint(&path).tick, Tick(3));
+
+        // The misconfiguration — a second live writer on the same
+        // path — is refused where the sink opens, naming the
+        // checkpoint, the sidecar the lock lives on, and the conflict.
+        // The rename above is why the sidecar exists: the lock stayed
+        // attached to the path across it.
+        let error = match StateSink::new(&path, 8) {
+            Ok(_) => panic!("a second live writer on one state file must be refused"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(message.contains(path.to_str().unwrap()), "{message}");
+        assert!(
+            message.contains(StateWriterLock::lock_path(&path).to_str().unwrap()),
+            "{message}"
+        );
+        assert!(message.contains("writer lock"), "{message}");
+
+        // The holder keeps saving undisturbed — the refused second
+        // writer touched nothing — and its file stays this run's.
+        let ordinal = first.offer(checkpoint(9)).unwrap();
+        first.attest(ordinal, Duration::from_secs(10)).unwrap();
+        assert_eq!(read_checkpoint(&path).tick, Tick(9));
+
+        // Once the holder dies — its descriptor releasing the lock —
+        // the next writer takes the claim and resumes the file, which
+        // is the restart the checkpoint exists for.
+        drop(first);
+        let second = StateSink::new(&path, 8).unwrap();
+        let ordinal = second.offer(checkpoint(12)).unwrap();
+        second.attest(ordinal, Duration::from_secs(10)).unwrap();
+        assert_eq!(read_checkpoint(&path).tick, Tick(12));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One claim, two holders: the controller takes the lock before it
+    /// reads the checkpoint to resume, then the sink that writes it
+    /// joins the same claim rather than colliding with its own
+    /// process's. A claim for another checkpoint cannot stand in —
+    /// that pairing would guard the wrong file.
+    #[test]
+    fn one_claim_serves_the_resume_and_the_sink_that_writes_it() {
+        let dir = scratch("one-claim");
+        let path = dir.join("state.json");
+        let other = dir.join("other.json");
+
+        let claim = StateWriterLock::acquire(&path).unwrap();
+        let sink = StateSink::with_writer(&path, 8, claim.clone()).unwrap();
+        let ordinal = sink.offer(checkpoint(5)).unwrap();
+        sink.attest(ordinal, Duration::from_secs(10)).unwrap();
+        assert_eq!(read_checkpoint(&path).tick, Tick(5));
+        assert_eq!(claim.state_path(), path);
+        // Claims name the checkpoint they guard, so the configuration
+        // checks can compare a config carrying one.
+        assert_eq!(claim, claim.clone());
+
+        // The foreign claim is a configuration error, refused rather
+        // than paired with a file it does not guard.
+        let foreign = StateWriterLock::acquire(&other).unwrap();
+        let error = match StateSink::with_writer(&path, 8, foreign) {
+            Ok(_) => panic!("a claim for another checkpoint must be refused"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains(other.to_str().unwrap()),
+            "{error}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// #982's stalled sink: a writer parked inside its write drains
@@ -314,7 +611,8 @@ mod tests {
                 write_state_file(&sink_path, checkpoint)
             }
         });
-        let sink = StateSink::for_test(format!("state file {}", path.display()), drain);
+        let sink =
+            StateSink::for_test(format!("state file {}", path.display()), &path, drain).unwrap();
 
         // The first capture reaches the writer, which parks inside
         // its write; the queue then holds two more. Every offer still
@@ -390,7 +688,8 @@ mod tests {
                 write_state_file(&fail_path, checkpoint)
             },
         );
-        let sink = StateSink::for_test(format!("state file {}", path.display()), drain);
+        let sink =
+            StateSink::for_test(format!("state file {}", path.display()), &path, drain).unwrap();
 
         // The first capture lands; the second's write fails. Which
         // offer first meets the recorded failure races the writer, so
@@ -463,7 +762,8 @@ mod tests {
                 write_state_file(&sink_path, checkpoint)
             }
         });
-        let sink = StateSink::for_test(format!("state file {}", path.display()), drain);
+        let sink =
+            StateSink::for_test(format!("state file {}", path.display()), &path, drain).unwrap();
 
         let first = sink.offer(checkpoint(1)).unwrap();
         sink.offer(checkpoint(2)).unwrap();
@@ -496,6 +796,9 @@ mod tests {
         use dcs_core::{Direction, IoDriver, IoError, PointId, Sample, Value, ValueKind};
         use dcs_runtime::{Executor, PointMap};
         use std::collections::HashMap;
+
+        let dir = scratch("monitor-boundary");
+        let path = dir.join("state.json");
 
         /// The same minimal in-memory driver the monitor tests use.
         struct StubDriver {
@@ -551,7 +854,9 @@ mod tests {
                 Ok(())
             }
         });
-        monitor.with_state_sink(StateSink::for_test("state file test".to_string(), drain));
+        monitor.with_state_sink(
+            StateSink::for_test("state file test".to_string(), &path, drain).unwrap(),
+        );
 
         // One capture parks the writer; the queue then holds two more —
         // the scan path never waits on any of it.
@@ -586,5 +891,6 @@ mod tests {
         let (lock, cvar) = &*gate;
         *lock.lock().unwrap() = true;
         cvar.notify_all();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

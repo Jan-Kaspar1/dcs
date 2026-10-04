@@ -16,7 +16,7 @@ they cannot diverge from the code before the tag is cut.
 | Commit | *pending* — the tagged `main` commit carrying this record, the revision this record's schemas are emitted at |
 | Crate versions | `0.3.0` for every crate in the release set — one workspace version covers `dcs-build`, `dcs-core`, `dcs-model` (and the `dcs-model` / `dcs-controller` binaries built from it); the `[workspace.package]` bump lands with the cut |
 | Plant-model JSON Schema | `plant-model.schema.json` beside this record — `dcs-model schema` emitted at the recorded commit, pinned byte-for-byte with its sha256 by the schema drift test in `crates/dcs-model/tests/schema.rs` |
-| Plant-model schema sha256 | `04c5a0c8fb1bff547f5d5f289936a945e6883970fed6fa7c63b2f291420133c5` |
+| Plant-model schema sha256 | `07f9f93d1475c7bc783e99e4e7807fe5706a1549302a3701b67212bb3e793301` |
 | Served-registry JSON Schema | `block-interfaces.schema.json` beside this record — `dcs-model interface-schema` emitted at the recorded commit, pinned byte-for-byte with its sha256 by the drift test in `crates/dcs-model/tests/interface_schema.rs` |
 | Served-registry schema sha256 | `ddc00496814a4e8cd0d6ec8a5d9fbb95e83f518dcd927b17a4802f13ac84013a` |
 | Dynamics-document JSON Schema | `dynamics.schema.json` beside this record — `dcs-plant-server --dynamics-schema` emitted at the recorded commit, pinned byte-for-byte with its sha256 by the drift test in `crates/dcs-plant/tests/dynamics_schema.rs`. The first record carrying it: `v0.2.0`'s recorded commit predates the dynamics-document schema emission (#870) |
@@ -69,10 +69,13 @@ What the tranche changed for consumers:
   for the consumer-owned deployment manifest (#909). This is the first
   record carrying them; the served-registry schema is unchanged since
   `v0.2.0`'s cut. The plant-model emission was unchanged through this
-  tranche and moved once after this record was written: #907's
+  tranche and moved twice after this record was written: #907's
   `record` io_point field — the durable-history decision's declared
-  recording duty — added its `recording-duty` definition, an additive
-  optional field a `v0.2.0` document never carries. The
+  recording duty — added its `recording-duty` definition, and #548's
+  declared-unit metadata — optional `unit` on io points, ports, and
+  signals plus `parameter_units` beside a component's `parameters` —
+  added theirs; all are additive optional fields a `v0.2.0` document
+  never carries. The
   deployment-manifest emission likewise moved once after this record
   was written: #1282's optional per-controller `history_file` —
   decision 102's durable process-history mount — an additive-optional

@@ -93,6 +93,38 @@
 //! `a` = 6 + 3·i + 0/1/2. Every point's signal sits at `10000 +
 //! point`. The scheme is deterministic in declaration order, so
 //! identical builder invocations emit identical documents.
+//!
+//! ## Declared units
+//!
+//! This plant adopts the platform's declared-unit metadata (the
+//! dimensional-discipline decision the released `dcs-build` surface
+//! carries) the same way a customer composition would: the engineering
+//! unit is declared once, on the point, through
+//! `PlantBuilder::unit`, and every signal inherits it at `build` rather
+//! than carrying a display string of its own that could drift beside
+//! the value it names. The wet-well levels are `m`, the station flow
+//! meters are `m3/h`, and the chain's and pump group's stage counts are
+//! `pumps`. The kinds `dcs-build` leaves unit-transparent carry their
+//! dimension on the instance through `PlantBuilder::port_unit` and
+//! `PlantBuilder::param_unit`: the `failover-select`'s three level
+//! ports, the `threshold-chain`'s `level`, and the level alarms'
+//! limits and hysteresis are `m`; the chain's and group's stage-count
+//! ports are `pumps`; the per-pump protection `interlock`'s pass-through
+//! and its safe value are `m`; and every `*_ticks` interval is `ticks`,
+//! from the group's staging bounds through the hand-leg holdout and the
+//! motor's fault budget to each alarm's shelving bound and response
+//! budget and the exercise table's step intervals. A connection whose
+//! two ends declare disagreeing units now fails the emitted document by
+//! the named `ConnectionUnitMismatch` instead of passing every check.
+//!
+//! The station power guard and the per-pump cause guards stay
+//! undeclared on purpose: their analog `in` binds a held anchor rather
+//! than a process quantity, so a dimension there would claim
+//! engineering the wiring does not carry. The exercise table's driven
+//! values stay undeclared too — they exist to exercise the command and
+//! event vocabulary. The Bool permissive, alarm, status, and mode
+//! carriers stay uncheckable rather than dimensioned; their signals
+//! keep the deliberate `""` marker.
 
 use dcs_build::specs::{
     BoolGateInstance, BoolGateSpec, DigitalInputSpec, FailoverSelectSpec, InterlockSpec,
@@ -100,8 +132,8 @@ use dcs_build::specs::{
     MotorSpec, PumpGroupInstance, PumpGroupSpec, SequencerSpec, ThresholdChainSpec, TimerSpec,
 };
 use dcs_build::{
-    parameters, BuildError, Direction, InPoint, PlantBuilder, PointId, Rationalization, SignalId,
-    Sink, Source, Value,
+    parameters, unit, BuildError, Direction, InPoint, PlantBuilder, PointId, Rationalization,
+    SignalId, Sink, Source, Value,
 };
 use dcs_model::PlantModel;
 
@@ -800,7 +832,7 @@ pub fn lift_station(config: &SiteConfig) -> Result<Station, BuildError> {
             "Held permissive for the per-pump cause guards — a cause alarm stands in every service state",
         ),
     ] {
-        let unit = match point {
+        let declared = match point {
             carriers::LEVEL_SEL
             | carriers::LEVEL_CHAIN_IN
             | carriers::LEVEL_LAH_IN
@@ -812,7 +844,7 @@ pub fn lift_station(config: &SiteConfig) -> Result<Station, BuildError> {
             &mut plant,
             PointId(point),
             name,
-            unit,
+            declared,
             description,
             "station",
         );
@@ -970,6 +1002,51 @@ pub fn lift_station(config: &SiteConfig) -> Result<Station, BuildError> {
             "power-fail-alarm",
         ),
     ));
+
+    // The site's dimensional contract: this composition declares the
+    // unit on every quantity-bearing point — the wet-well levels in
+    // `m`, the station flow in `m3/h`, the chain's and group's stage
+    // counts in `pumps` — and on every unit-transparent port and
+    // parameter it wires, so a connection joining ends whose
+    // engineering disagrees fails the document by name instead of
+    // passing every check. The `*_ticks` intervals are the kinds' own
+    // dimension; the levels the alarms observe and bound are `m`.
+    plant.port_unit(failover.id, "primary", unit::M);
+    plant.port_unit(failover.id, "backup", unit::M);
+    plant.port_unit(failover.id, "out", unit::M);
+    plant.port_unit(chain.id, "level", unit::M);
+    plant.port_unit(chain.id, "demand", unit::PUMPS);
+    for parameter in ["cutoff", "stop", "start", "lag_start", "high"] {
+        plant.param_unit(chain.id, parameter, unit::M);
+    }
+    plant.port_unit(group.id, "demand", unit::PUMPS);
+    plant.port_unit(group.id, "duty", unit::PUMPS);
+    plant.port_unit(group.id, "staged", unit::PUMPS);
+    for parameter in ["start_delay_ticks", "restage_delay_ticks", "min_off_ticks"] {
+        plant.param_unit(group.id, parameter, unit::TICKS);
+    }
+    if config.rotation_ticks.is_some() {
+        plant.param_unit(group.id, "rotation_ticks", unit::TICKS);
+    }
+    for alarm in [lah.id, lal.id] {
+        plant.port_unit(alarm, "in", unit::M);
+        for parameter in ["low_limit", "high_limit", "hysteresis"] {
+            plant.param_unit(alarm, parameter, unit::M);
+        }
+        for parameter in ["max_shelve_ticks", "response_ticks"] {
+            plant.param_unit(alarm, parameter, unit::TICKS);
+        }
+    }
+    for alarm in [
+        backup_alarm.id,
+        none_available_alarm.id,
+        all_faulted_alarm.id,
+        power_fail_alarm.id,
+    ] {
+        for parameter in ["max_shelve_ticks", "response_ticks"] {
+            plant.param_unit(alarm, parameter, unit::TICKS);
+        }
+    }
 
     // Measurement path: failover-select's output fans out to the chain
     // and both level alarms through the carrier; the chain's demand
@@ -1135,6 +1212,11 @@ pub fn lift_station(config: &SiteConfig) -> Result<Station, BuildError> {
         ("step_2_ticks", Value::Int(2)),
         ("step_2_out", Value::Float(0.5)),
     ])));
+    // The exercise table's step intervals are scan counts; its driven
+    // values stay undeclared — the consumer surface proof exercises
+    // the command and event vocabulary, not an engineering quantity.
+    plant.param_unit(exercise.id, "step_1_ticks", unit::TICKS);
+    plant.param_unit(exercise.id, "step_2_ticks", unit::TICKS);
     let exercise_run =
         plant.internal_input::<bool>(PointId(carriers::EXERCISE_RUN), false, true);
     let exercise_reset =
@@ -1270,19 +1352,35 @@ pub fn pump_tag(index: usize) -> String {
 /// Registers point `point`'s monitoring signal — `10000 + point` —
 /// carrying the unit/description/group metadata the monitoring
 /// surface renders from.
+///
+/// A non-empty `unit` is declared once, on the point — the wiring
+/// contract the connection and validation checks read — and the
+/// signal inherits it at `build`, so the string the operator surface
+/// renders cannot drift from the unit the value is carried in. The
+/// empty `""` stays signal-side: this station's deliberate
+/// "dimensionless" marker for the status, flag, and code points the
+/// wiring layer leaves uncheckable.
 fn signal(
     plant: &mut PlantBuilder,
     point: PointId,
     name: &str,
-    unit: &str,
+    declared: &str,
     description: &str,
     group: &str,
 ) {
-    plant
-        .signal(SignalId(SIGNAL_BASE + point.0), name, point)
-        .unit(unit)
-        .description(description)
-        .group(group);
+    if declared.is_empty() {
+        plant
+            .signal(SignalId(SIGNAL_BASE + point.0), name, point)
+            .unit(declared)
+            .description(description)
+            .group(group);
+    } else {
+        plant.unit(point, declared);
+        plant
+            .signal(SignalId(SIGNAL_BASE + point.0), name, point)
+            .description(description)
+            .group(group);
+    }
 }
 
 /// Declares one station alarm's points and wires them: the writable
@@ -1880,6 +1978,24 @@ fn wire_pump(
             &format!("{tag}-moisture-alarm"),
         ),
     ));
+
+    // The per-pump dimensional contract: the protection `interlock`
+    // gates the selected level, so its `in`/`out` and its `safe_value`
+    // are the level's `m`. The two cause guards beside it stay
+    // undeclared — their analog feeds are held anchors, not process
+    // quantities. The `timer`'s holdout interval, the `motor`'s
+    // feedback-disagreement budget, and each pump alarm's shelving
+    // bound and response budget are the kinds' declared `ticks`.
+    plant.port_unit(protect.id, "in", unit::M);
+    plant.port_unit(protect.id, "out", unit::M);
+    plant.param_unit(protect.id, "safe_value", unit::M);
+    plant.param_unit(holdout.id, "delay_ticks", unit::TICKS);
+    plant.param_unit(motor.id, "fault_ticks", unit::TICKS);
+    for alarm in [fault_alarm.id, thermal_alarm.id, moisture_alarm.id] {
+        for parameter in ["max_shelve_ticks", "response_ticks"] {
+            plant.param_unit(alarm, parameter, unit::TICKS);
+        }
+    }
 
     // Mode and service inversions; the group request carrier.
     plant.connect(mode, &inv_mode.input);
