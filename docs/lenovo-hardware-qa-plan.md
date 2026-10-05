@@ -2073,6 +2073,97 @@ Implementation order: second, after [daily architecture review](daily-architectu
   must fail naming the annunciation and the stop the honest run saw.
 
 
+### Landed 2026-10-04 (phantom source-restart leg, #694/#1132/#1133)
+
+- The same-generation `source_restarted` suppression contract is now
+  exercised per revision by scenario leg
+  `2195_phantom_source_restart`, filed in the launch-layout window
+  behind `2190_tracker_realign_tick_order` and ahead of the schedule's
+  `2200_failover` case. The defect it reproduces is the QA finding
+  `demote-track-journals-phantom-source-restart`: the regression
+  detector treated any checkpoint below the run's last alignment (or
+  below the run tick where none stood) as a source restart, so a
+  demoted peer's first tracking pull — the demotion having cleared
+  the alignment, leaving the served checkpoint one tick behind the
+  demoted run's own — and a same-generation peer merely lagging one
+  scan both tripped it and filled the durable journal with restarts
+  that never happened (seq 638 phantom with `was_aligned: null`,
+  seq 639 the one-tick regression). The fix reads the checkpoint's
+  `generation` stamp: the uninterrupted successor still stamps the
+  generation the demoted run's own captures carried, so the reset was
+  the peer's tracking state and nothing journals, while a source that
+  genuinely cold-restarts mints a new generation and the boundary is
+  preserved. The contract is WW-FND-004's named-evidence journal
+  clause and WW-LCM-001's continuity, consolidated from #694's fix,
+  its #731/#777 evidence, and the two filed exercise tickets.
+- Each pass stages both halves on the deployed pair. With the pair
+  settled and tracking, the field owner is demoted and the launched
+  standby promotes — the rig's armed standby claims the released
+  field on its next scan — and the demoted owner then follows its
+  successor across repeated tracking applies, each pull trailing the
+  served stream by a scan. Through the demoted peer's serving monitor
+  and its per-controller `--journal-file` the pass audits that no
+  `source_restarted` appeared: not on the first apply, whose
+  checkpoint regresses against the cleared alignment, and not on the
+  mid-tracking one-tick regressions the repeated applies open. The
+  tracked source's container is then cold-restarted through the
+  runner's `cold_restart_controller` seam (`docker stop`, its
+  host-side state.json dropped, `docker start`), so the resumed
+  process mints a fresh generation and serves a regressed stream —
+  and the tracking peer must journal exactly one `source_restarted`
+  carrying its named evidence, the prior alignment as `was_aligned`
+  and the resumed stream tick below it as `resumed_at`. The pass then
+  walks the documented order back so the pair rests on its launch
+  roles for the cases behind it.
+- Named diagnostics are `source-restart-evidence-failed` (a phantom
+  on the same-generation stream, the genuine cold restart journaling
+  none or more than one, an entry missing its `was_aligned`/
+  `resumed_at` evidence or claiming a resumed tick that never
+  regressed, the demoted peer never reconverging, the launch roles
+  unrestored) and `source-restart-evidence-nondeterministic` (a
+  refused demotion, promote or restart, a starved watch, an
+  unconverged baseline posture, the restart producing no regressed
+  stream, a duplicated boundary record, an armed failover firing
+  inside the held window, diverging pass digests), with the
+  self-check's `phantom-source-restart-unchecked` covering the planted
+  phantom, the silent and duplicated genuine restart, the entries
+  stripped of their named evidence, the malformed axis, the
+  unconverged reset and the unrestored roles. Two consecutive passes
+  produce identical digests. A run context carrying only one
+  endpoint, no cold-restart seam or no per-controller journal files,
+  an unreachable, unconverged or off-layout pair, and a staged run
+  whose served checkpoints predate the `generation` stamp the
+  suppression reads all report inconclusive.
+- The consumer-boundary mirror is
+  `reference-plant/ci/legs/phantom_source_restart.py` — one new file
+  under `ci/legs/`, discovered by the file-named convention, needing
+  no `check.sh`, boundary-lint or harness edit. It converges the
+  manifest-declared pair, gates the contract surface (each served
+  checkpoint carrying the integer `tick` and `generation`, each
+  declared `journal_file` readable), runs the demote/promote cycle
+  and its fail-back with the roles exchanged — auditing each
+  demoted peer's serving and durable journal for the phantom and the
+  served stream position's monotonicity — then cold-restarts the
+  field owner (its process stopped, its declared state file dropped, a
+  fresh process respawned on its declared listen address with nothing
+  to resume) and requires its tracking peer to journal exactly one
+  `source_restarted` in both records, carrying the named evidence. Its
+  two doctored cases — a phantom planted into the same-generation
+  audit, and the cold restart withheld while the leg still asserts its
+  one entry — must each fail carrying the leg's evidence. A pinned
+  release predating the `generation` stamp reports the leg's named
+  `phantom-source-restart-digest inconclusive` verdict rather than a
+  product failure.
+- The workspace half is a driven-pair regression in
+  `crates/dcs-controller/tests/hot_swap.rs` spanning the whole clause
+  rather than one transition: an orderly demote/promote cycle plus a
+  fail-back, each peer's demotion clearing its own alignment and
+  pulling its own successor repeatedly, neither peer's journal
+  carrying a `source_restarted`, the served `stream_tick` monotone
+  across both cycles, and the retained detection half — the tracked
+  source cold-restarted, its tracking peer journaling exactly one
+  boundary entry naming the alignment it broke.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,
