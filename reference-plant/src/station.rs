@@ -14,10 +14,20 @@
 //!
 //! - **Measurement:** a `failover-select` over the primary and backup
 //!   level channels feeds a `threshold-chain`, whose stage-count
-//!   `demand` drives `pump-group.demand`. A port output may drive only
-//!   one endpoint, so every fan-out goes through a declared internal
-//!   `Out` carrier plus one `In` consumer per reader — each link
-//!   crossing the one-scan boundary.
+//!   `demand` drives `pump-group.demand`. The primary level carries the
+//!   site's declared `stale_after_ticks` freshness budget (decision
+//!   45): a held field read ages to `Uncertain(Stale)` there rather
+//!   than serving a healthy
+//!   last-known value, and the budget is declared comfortably under the
+//!   pair's `failover_budget` so a frozen writer presents stale well
+//!   inside the switchover window. The backup level beside it declares
+//!   none, which is what makes the pair the site's freshness contract:
+//!   one budgeted measurement and one unbudgeted neighbour sharing a
+//!   field step is exactly the contrast the `ci/stale_freshness.py`
+//!   stage and the cadence leg under `ci/legs/` are read against. A
+//!   port output may drive only one endpoint, so every fan-out goes
+//!   through a declared internal `Out` carrier plus one `In` consumer
+//!   per reader — each link crossing the one-scan boundary.
 //! - **Pumps:** `N` `motor` instances under one `pump-group`; the
 //!   group's `cmd_i`/`run_i`/`fault_i`/`avail_i` indexed ports wire
 //!   per pump. `avail_i` is the aggregated availability: in-auto, in
@@ -273,6 +283,17 @@ const REPORT_RECORD_TICKS: u64 = 5;
 /// against it; the controller never enforces it.
 const REPORT_RETAIN_DAYS: u64 = 1095;
 
+/// The primary wet-well level's declared freshness budget, in run
+/// ticks — the site's one `stale_after_ticks` declaration. Sizing: a
+/// healthy field read lags its scan by a tick or two at most, so `2`
+/// never trips in service, while a frozen writer ages the held report
+/// past it inside the deployment's `failover_budget` of 3 — comfortably
+/// under the switchover bound, so the stale presentation lands inside
+/// the writer-loss window rather than after the pair has already
+/// switched. The value is site data, declared beside the other site
+/// parameterization, and the consumer's own composition owns it.
+const LEVEL_STALE_AFTER_TICKS: u64 = 2;
+
 /// One annunciation tier's class data — the site's alarm vocabulary,
 /// carried as the managed alarms' `priority`/`class`/`response_ticks`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -345,6 +366,13 @@ pub struct SiteConfig {
     pub motor_fault_ticks: i64,
     /// The level alarms' hysteresis band, in metres.
     pub level_alarm_hysteresis: f64,
+    /// The primary wet-well level's declared freshness budget, in run
+    /// ticks — decision 45's `stale_after_ticks` on the site's
+    /// budgeted measurement. A healthy field read lags its scan by a
+    /// tick or two at most, so the declared value never trips in
+    /// service; a frozen writer ages the held report past it inside the
+    /// failover budget that bounds the outage.
+    pub level_stale_after_ticks: u64,
     /// The site's alarm-lifecycle policy.
     pub alarms: AlarmPolicy,
 }
@@ -369,6 +397,7 @@ impl SiteConfig {
             min_off_ticks: 2,
             motor_fault_ticks: 2,
             level_alarm_hysteresis: 0.1,
+            level_stale_after_ticks: LEVEL_STALE_AFTER_TICKS,
             alarms: AlarmPolicy {
                 level: AlarmClass {
                     priority: 1,
@@ -552,7 +581,16 @@ pub fn lift_station(config: &SiteConfig) -> Result<Station, BuildError> {
     // go unused. The power-fail contact is a protection-layer reported
     // state — `journaled` so its transitions land in the durable
     // record beside its alarm's.
-    let level_primary = plant.field_input::<f64>(points::LEVEL_PRIMARY, level_primary_ch, false);
+    // The primary level carries the site's declared freshness budget
+    // (decision 45); the backup beside it declares none, so the pair is
+    // the site's freshness contract — one budgeted measurement and one
+    // unbudgeted neighbour sharing a single field step.
+    let level_primary = plant.field_input_stale_after::<f64>(
+        points::LEVEL_PRIMARY,
+        level_primary_ch,
+        false,
+        config.level_stale_after_ticks,
+    );
     let level_backup = plant.field_input::<f64>(points::LEVEL_BACKUP, level_backup_ch, false);
     plant.field_input::<f64>(points::INFLOW, inflow_ch, false);
     plant.field_input::<f64>(points::NET_FLOW, net_flow_ch, false);

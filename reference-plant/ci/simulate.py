@@ -144,6 +144,25 @@ def http_text(url):
         return response.read().decode()
 
 
+def dropped_request(error):
+    """Whether `error` names a request the monitor never ran — the
+    empty-body `500` a dropped request answers with (tiny_http's
+    `Request::drop` writes `Response::empty(500)`, so a shed or
+    listener-teardown drop carries no handler verdict), or the
+    refused/reset connection of a listener's rebind window. A
+    handler-answered failure carries its named body and is never a
+    drop, so resubmitting a dropped request can never replay work the
+    run already took."""
+    if isinstance(error, urllib.error.HTTPError):
+        if error.code != 500:
+            return False
+        try:
+            return not error.read().strip()
+        except OSError:
+            return True
+    return isinstance(error, OSError)
+
+
 def listen_address(process, what):
     """Reads the child's stderr until its `listening on <addr>` line."""
     for line in process.stderr:

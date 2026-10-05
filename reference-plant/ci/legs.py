@@ -222,6 +222,12 @@ def run_leg(args, leg, tamper=None):
 
 
 def main(argv=None):
+    # The stage's digest lines must survive a lost process: piped to
+    # check.sh, stdout block-buffers, and an external kill would take
+    # every landed leg's evidence with it. Line-buffering flushes each
+    # digest as the leg earns it, so a terminated run still reports how
+    # far the stage got.
+    sys.stdout.reconfigure(line_buffering=True)
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--plant-server", required=True)
     parser.add_argument("--controller", required=True)
