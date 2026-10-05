@@ -36,7 +36,13 @@ ci/lockfile.py         the committed-lockfile leg — the manifest's
                        declared pin read through `cargo metadata
                        --no-deps`, the lockfile parsed as TOML, the
                        release crates' recorded sources held to the
-                       pin before any fetch can rewrite the artifact
+                       pin before any fetch can rewrite the artifact,
+                       and the revision held to the one that pin names
+                       for every spelling Cargo accepts in `rev =` —
+                       a `tag`'s target and every ref a `rev` names
+                       read back off the remote, a full sha compared
+                       literally, a short sha held to abbreviate the
+                       recorded revision
 ci/alarm_validation.py the alarm-validation leg — the emitted model's
                        managed-alarm record audited, doctored copies
                        refused by the released `dcs-controller
@@ -188,8 +194,17 @@ declare must name the identical tag or `rev`.
 
 `rev = "<commit>"` names the identical immutable commit — the recorded
 commit `docs/releases/v0.10.0/record.md` carries — and is always
-supported. `Cargo.lock` is committed so every build resolves the same
-sources; a tag pin resolves the tag once and the committed lockfile
+supported. Cargo accepts any git rev in `rev =`, and a pin it resolves
+afresh on every resolve — a branch name, a tag name, an abbreviated sha
+— is checked the same way a `tag` is: the `lockfile` stage reads what
+the remote serves under that name and requires the lockfile to record
+exactly that, so a lockfile recording a commit the branch has moved
+past is `lockfile-stale` rather than a silent pass. Such a pin is
+checked, but it still resolves to whatever the branch names at the
+moment anyone runs `cargo update`, so prefer an immutable spelling —
+`tag = "<release>"` or a full-sha `rev =` — for anything a fresh clone
+has to reproduce. `Cargo.lock` is committed so every build resolves the
+same sources; a tag pin resolves the tag once and the committed lockfile
 records the commit it landed on. The two are one artifact, not two
 declarations that drift: the committed lockfile records this
 manifest's pin — the same remote, the same `tag`/`rev`, resolved to the
@@ -753,8 +768,8 @@ repin".
 
 An **incompatible** crossing fails with named diagnostics, never
 silently: a pin that resolves no release crates — or a remote the
-`lockfile` stage cannot query for the declared tag's target, which is
-unverifiable rather than absent — is `pin-unresolvable`;
+`lockfile` stage cannot query for the revision the declared pin names,
+which is unverifiable rather than absent — is `pin-unresolvable`;
 a committed `Cargo.lock` that records another remote, another
 `rev`/`tag`, or another revision than the manifest declares is
 `lockfile-stale`; a release crate recorded from a `path` into a

@@ -365,13 +365,17 @@ fn parse_reason(arg: Option<&str>) -> Result<QualityReason, String> {
     }
 }
 
-/// Parses `step`'s `<dt>`: a finite number of time units per step —
-/// the same argument `dcs-plant-ctl`'s `step` takes. The server's own
-/// check refuses a negative dt.
+/// Parses `step`'s `<dt>`: a finite number of time units per step,
+/// at most `dcs_sim::MAX_STEP_DT` — the same argument, and the same
+/// bound, `dcs-plant-ctl`'s `step` takes.
 fn parse_dt(arg: &str) -> Result<f64, String> {
     match arg.parse::<f64>() {
-        Ok(dt) if dt.is_finite() => Ok(dt),
-        _ => Err(format!("invalid step {arg:?}: expected a finite number")),
+        Ok(dt) if dt.is_finite() && dt <= dcs_sim::MAX_STEP_DT => Ok(dt),
+        _ => Err(format!(
+            "invalid step {arg:?}: expected a finite number no greater \
+             than {}",
+            dcs_sim::MAX_STEP_DT
+        )),
     }
 }
 

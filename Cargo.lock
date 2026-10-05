@@ -412,6 +412,7 @@ dependencies = [
  "dcs-sim-bus",
  "dcs-sim-net",
  "serde_json",
+ "signal-hook",
 ]
 
 [[package]]

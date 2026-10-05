@@ -49,6 +49,14 @@
 //! lands finite — where a committed non-finite result would have stayed
 //! corrupt until the field restarted.
 //!
+//! A step's `dt` is bounded by [`MAX_STEP_DT`]: one plant tick advances
+//! the field by one scan period, and a *finite but huge* `dt` — the shape
+//! a protocol-legal request can carry — is refused by name rather than
+//! applied. Applying one would wind an integrator's accumulator past the
+//! `f64` range, land an element's simulated clock where no later legal
+//! step can move it, and leave the field's own samples unspellable on
+//! the wire, all from a single accepted request.
+//!
 //! `SimDriver` also implements the driver half of the state-capture
 //! contract — [`IoDriver::capture_state`](dcs_core::IoDriver::capture_state)
 //! and [`IoDriver::restore_state`](dcs_core::IoDriver::restore_state) — so
@@ -65,7 +73,7 @@ mod schema;
 mod scripted;
 mod state;
 
-pub use driver::{Fault, PointInfo, SimDriver};
+pub use driver::{Fault, MAX_STEP_DT, PointInfo, SimDriver};
 pub use map::{
     BoolFlow, ChannelId, ChannelMap, ConfigError, DeadTime, Direction, FirstOrderLag, FlowSum,
     Integrator, Loopback, Noise, PointBinding, ProcessElement, ScaledFlow, SecondOrderLag,
