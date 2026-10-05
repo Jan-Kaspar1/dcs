@@ -526,13 +526,15 @@ impl RegisterBank {
     /// quality forward at the new tick — the field re-scanned, so the
     /// served report is fresh even though nothing wrote it.
     ///
-    /// `dt` must be finite and non-negative.
+    /// `dt` must be finite, non-negative, and at most
+    /// [`dcs_sim::MAX_STEP_DT`](dcs_sim::MAX_STEP_DT) — the bank's
+    /// `SimDriver` bound, unchanged by the register encoding.
     ///
     /// # Panics
     ///
-    /// Panics when `dt` is negative or non-finite; the server refuses
-    /// such a step request with [`BusError::InvalidRequest`] before it
-    /// reaches the bank.
+    /// Panics when `dt` is negative, non-finite, or above the bound;
+    /// the server refuses such a step request with
+    /// [`BusError::InvalidRequest`] before it reaches the bank.
     pub fn step(&self, dt: f64) -> Tick {
         self.driver.step(dt)
     }

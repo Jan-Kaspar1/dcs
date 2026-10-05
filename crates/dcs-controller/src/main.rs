@@ -1170,7 +1170,8 @@ controller scan.
                   delivery under the stdout_snapshot_drops counter
                   reported on stderr, never the scan's cadence
   --dt T          simulated process time per scan (default: scan period in
-                  seconds, or 1.0 when unpaced)
+                  seconds, or 1.0 when unpaced); at most 1000000 time
+                  units, the plant step contract's bound
   --listen ADDR   serve the monitoring endpoints on ADDR while the paced
                   scan runs; requires --scan-ms. While pacing, POST /scan is
                   refused: the wall clock owns the scan schedule
@@ -1446,6 +1447,19 @@ impl Options {
             && (!dt.is_finite() || dt < 0.0)
         {
             return Err("--dt must be finite and non-negative".to_string());
+        }
+        if let Some(dt) = dt
+            && dt > dcs_sim::MAX_STEP_DT
+        {
+            // The field refuses an over-bound step by name, so a run
+            // paced above the bound would die on its first scan with a
+            // wire diagnostic; the run defect is reported where it is
+            // configured instead.
+            return Err(format!(
+                "--dt must be at most {} — a scan period, bounded by \
+                 the plant's step contract",
+                dcs_sim::MAX_STEP_DT
+            ));
         }
         if auto_promote == Some(0) {
             return Err("--auto-promote must be at least one missed pull".to_string());
@@ -3716,6 +3730,49 @@ mod tests {
         ] {
             if let Err(error) = parse(listen, flag, target) {
                 panic!("{flag} {target} against --listen {listen} must parse: {error}");
+            }
+        }
+    }
+
+    /// Finding `huge-step-dt-poisons-plant-state`: a scan period is
+    /// the `dt` every plant step carries, and the field bounds it at
+    /// `dcs_sim::MAX_STEP_DT` — one accepted request above that bound
+    /// wound an element's accumulator past the `f64` range for every
+    /// attachment until the plant restarted. A run declaring such a
+    /// period would die on its first scan with a wire diagnostic, so
+    /// `Options::parse` refuses it where it is configured, naming the
+    /// bound, while an ordinary period still parses.
+    #[test]
+    fn an_over_bound_scan_period_fails_option_parsing() {
+        let base = [
+            "model.json".to_string(),
+            "--scan-ms".to_string(),
+            "100".to_string(),
+        ];
+        let parse = |dt: &str| {
+            Options::parse(
+                base.iter()
+                    .cloned()
+                    .chain(["--dt".to_string(), dt.to_string()]),
+            )
+        };
+
+        for over in ["1e7", "1e308"] {
+            let error = match parse(over) {
+                Ok(_) => panic!("--dt {over} is above the step bound and must fail parsing"),
+                Err(error) => error,
+            };
+            assert!(
+                error.contains("--dt") && error.contains(&dcs_sim::MAX_STEP_DT.to_string()),
+                "--dt {over}: {error}"
+            );
+        }
+
+        // The bound is a usable ceiling: an ordinary scan period and the
+        // bound itself both parse.
+        for legal in ["0.1", &dcs_sim::MAX_STEP_DT.to_string()] {
+            if let Err(error) = parse(legal) {
+                panic!("--dt {legal} must parse: {error}");
             }
         }
     }
