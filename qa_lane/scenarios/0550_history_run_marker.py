@@ -30,7 +30,13 @@ RUNS_BEFORE = frozenset({'scenario_parameter_tune_carryover'})
 # axis past the cursor, and the field owner's cold restart must answer
 # the held cursor with empty samples stamped with the bumped run while
 # the fresh axis climbs below it — the journal file gaining a
-# run-boundary marker per lifetime, the cold one's at tick 0. Named
+# run-boundary marker per lifetime, the cold one's at tick 0. The seq
+# vocabulary it reads is decision 104's: this leg's history `seq` and
+# `run` marks are the run-scoped history-ring domain, whose epoch is
+# the serving process lifetime, while the `seq` on a `GET /journal`
+# answer is the file-scoped durable stream continuing across the
+# restart — the two sharing one spelling, and a held cursor reset or
+# gapped on the run-scoped axis rather than starved by it. Named
 # diagnostics history-run-marker-failed for a contract miss and
 # history-run-marker-nondeterministic when the passes or the record
 # disagree with themselves; inconclusive when the rig is unreachable

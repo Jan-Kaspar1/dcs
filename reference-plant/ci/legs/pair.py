@@ -71,6 +71,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 
@@ -271,14 +272,32 @@ def get(url, what, failures):
         raise Abort
 
 
+# The resubmit bound on a dropped `POST /scan`: a shed or
+# listener-teardown drop answers an empty-body 500, and a listener's
+# rebind window refuses or resets the connection — both mean the batch
+# never ran, so resubmitting replays nothing. The bound spans the
+# monitor's own rebind window with margin; a monitor that stays dead
+# still fails the leg with the last transport error.
+SCAN_DROP_ATTEMPTS = 40
+SCAN_DROP_WAIT = 0.1
+
+
 def scan(url, failures):
     """Drive one scan through `POST /scan`; returns the served
     snapshot."""
-    try:
-        return simulate.http(f"{url}/scan", {"scans": 1})
-    except Exception as error:
-        failures.append(f"POST /scan on {url} answered {error}")
-        raise Abort
+    for attempt in range(SCAN_DROP_ATTEMPTS):
+        try:
+            return simulate.http(f"{url}/scan", {"scans": 1})
+        except Exception as error:
+            dropped = simulate.dropped_request(error)
+            if dropped and attempt + 1 < SCAN_DROP_ATTEMPTS:
+                time.sleep(SCAN_DROP_WAIT)
+                continue
+            detail = f"POST /scan on {url} answered {error}"
+            if dropped:
+                detail += " — the dropped request never ran"
+            failures.append(detail)
+            raise Abort
 
 
 def select_snapshot(snapshot):
