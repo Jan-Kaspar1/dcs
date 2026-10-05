@@ -12,11 +12,16 @@
 #                (path-dependency-leak), on the pin's own remote and
 #                the same `tag`/`rev` fragment Cargo.toml spells, one
 #                precise revision across all three — at the revision
-#                the declared pin names: the tag's target read back
-#                off the remote — a query the remote cannot answer
-#                refused as unverifiable, never read as an absent tag
-#                (pin-unresolvable) — the declared full-sha rev, or
-#                the release record's filled Commit field — the record
+#                the declared pin names, and at every spelling Cargo
+#                accepts in `rev =`: the tag's target and every ref a
+#                `rev` names — a branch, a tag, any other ref the
+#                remote serves under that name — read back off the
+#                remote, a query the remote cannot answer refused as
+#                unverifiable rather than read as an absent tag
+#                (pin-unresolvable), a full-sha `rev` compared
+#                literally, a short-sha `rev` held to abbreviate the
+#                recorded revision — or the release record's filled
+#                Commit field — the record
 #                fetched at the pinned rev through the same remote, or
 #                the substituted tree under DCS_RECORD_DIR. Read
 #                before any resolve can rewrite the file, so a
@@ -30,7 +35,13 @@
 #                record ahead of and behind the pinned block, and a
 #                path package's sourceless twin beside it — must each
 #                report their diagnostic (lockfile-stale-unchecked,
-#                path-dependency-leak-unchecked).
+#                path-dependency-leak-unchecked), beside each movable
+#                `rev` spelling checked on a scratch remote the stage
+#                seeds itself: a lockfile recording a revision its
+#                pin has moved past refused, the same spelling
+#                recording the revision the pin does name accepted, so
+#                a pin Cargo resolves afresh is never admitted and
+#                left unchecked.
 #                The stage's digest of the file is what the resolve
 #                stage re-checks, naming a rewrite the fallback fetch
 #                performs on the committed artifact.
@@ -308,8 +319,14 @@ TOOLS=""
 TOOLS_REV=""
 UPGRADE_DIR=""
 INSTALL_ROOTS=""
+PIN_SCRATCH=""
 RIG_DIR=""
 SCRATCH=""
+# The lockfile leg by absolute path: the movable-pin self-checks below
+# run it rooted in a scratch tree whose own manifest declares the pin
+# under test, and the leg resolves that manifest through `cargo
+# metadata` in the working directory.
+LEG="$(pwd)/ci/lockfile.py"
 
 fail() {
     echo "$1" >&2
@@ -318,6 +335,7 @@ fail() {
 
 cleanup() {
     if [ -n "$UPGRADE_DIR" ]; then rm -rf "$UPGRADE_DIR"; fi
+    if [ -n "$PIN_SCRATCH" ]; then rm -rf "$PIN_SCRATCH"; fi
     if [ -n "$RIG_DIR" ]; then rm -rf "$RIG_DIR"; fi
     if [ -n "$SCRATCH" ]; then rm -rf "$SCRATCH"; fi
     for dir in $INSTALL_ROOTS; do rm -rf "$dir"; done
@@ -406,18 +424,30 @@ PY
 # status 2 is a release crate recorded from a
 # non-git source or from no source at all — a `path` package into some
 # checkout carries neither, and is `path-dependency-leak`'s finding —
-# 3 a tag query the remote could not answer — `pin-unresolvable`'s
+# 3 a pin the remote could not answer — `pin-unresolvable`'s
 # finding, the served target unverifiable rather than absent — and 1
 # every other disagreement, `lockfile-stale`'s.
 lockfile_leg() {
     python3 ci/lockfile.py "${1:-Cargo.lock}" "$DCS_REMOTE" "${2:-}"
 }
 
+# The same leg over another tree's declared pin: $1 the scratch tree
+# whose manifest declares it, $2 the lockfile to read, $3 the remote
+# that pin must name, $4 the release record when one applies, else the
+# empty string. The leg reads the manifest through `cargo metadata`,
+# which resolves it in the working directory, so the run is rooted in
+# $1 and reaches the leg by absolute path — the only reason a scratch
+# pair can declare a pin of its own. The exit status is the leg's own,
+# as above.
+lockfile_leg_in() {
+    (cd "$1" && python3 "$LEG" "${2:-Cargo.lock}" "$3" "${4:-}")
+}
+
 # The leg's exit status named: a release crate recorded from a path
 # into some checkout — or with no source at all, as a path package is
-# written — is `path-dependency-leak`; a tag query the remote could
+# written — is `path-dependency-leak`; a pin the remote could
 # not answer is `pin-unresolvable` — the served target unverifiable,
-# never the absent-tag skip — and every other disagreement between
+# never the absent-ref skip — and every other disagreement between
 # the committed lockfile and this repository's declared pin is
 # `lockfile-stale`.
 lockfile_check() {
@@ -426,7 +456,7 @@ lockfile_check() {
     case "$status" in
         0) return 0 ;;
         2) fail "path-dependency-leak: a release crate is recorded from a non-git source — or from no source at all — in ${1:-Cargo.lock}" ;;
-        3) fail "pin-unresolvable: the remote could not be queried for the declared tag's target — ${1:-Cargo.lock}'s recorded revision is unverifiable" ;;
+        3) fail "pin-unresolvable: the remote could not be queried for the revision the declared pin names — ${1:-Cargo.lock}'s recorded revision is unverifiable" ;;
         *) fail "lockfile-stale: ${1:-Cargo.lock} does not record this repository's declared pin" ;;
     esac
 }
@@ -605,7 +635,7 @@ echo "  a lockfile recording a release crate twice refused"
 
 # The remote-side half of the same leg: a lockfile recording the
 # declared pin at a commit the pin does not name — the tag's served
-# target or the declared full-sha rev diverging from the recorded
+# target or the declared rev diverging from the recorded
 # revision — is `lockfile-stale`, and only the leg names it: `cargo
 # fetch --locked` resolves any commit the remote serves under a
 # matching query without re-checking the pin's target. The doctored
@@ -613,11 +643,13 @@ echo "  a lockfile recording a release crate twice refused"
 # upgrade baseline — a commit the remote serves that the declared pin
 # does not land on — exercising the target comparison the
 # recorded-revision self-checks cannot reach; the doctor reports the
-# refusal marker the recorded pin's shape must produce. A `rev` pin
-# naming a branch or tag rather than a full sha declares no
-# immutable target the leg can hold the record to — the upgrade
-# stage's repinned pipeline is one — so the planted case stands down
-# on that shape.
+# refusal marker the recorded pin's shape must produce. Every spelling
+# a `rev` may carry names a revision, so none stands down: a full sha
+# compares literally ("for rev"), any other spelling is read back off
+# the remote under that name ("names"). A `rev` naming a branch or tag
+# is exercised against this tree's own remote by the movable-pin
+# self-checks below, where the branch that moves is the one this check
+# seeded.
 WRONG_SHA_LOCK="$(mktemp)"
 EXPECT_WRONG="$(python3 - Cargo.lock "$WRONG_SHA_LOCK" "$DCS_UPGRADE_REV" <<'PY'
 import re, sys
@@ -645,26 +677,125 @@ if kinds == {"tag"}:
 elif kinds == {"rev"} and all(re.fullmatch(r"[0-9a-f]{40}", value) for value in values):
     marker = "for rev"
 elif kinds == {"rev"}:
-    marker = ""
+    marker = "names"
 else:
     sys.exit(f"doctor: release crates record unexpected pin kinds: {sorted(kinds)}")
-if marker:
-    open(wrong, "w").write(doctored)
+open(wrong, "w").write(doctored)
 print(marker)
 PY
 )"
-if [ -n "$EXPECT_WRONG" ]; then
-    if out="$(lockfile_leg "$WRONG_SHA_LOCK" 2>&1)"; then
-        fail "lockfile-stale-unchecked: a lockfile recording the pin at a commit the pin does not name passed the lockfile leg"
-    fi
-    case "$out" in
-        *"$EXPECT_WRONG"*) ;;
-        *) fail "lockfile-stale-unchecked: the wrong-target lockfile was refused without naming the pin's target: $out" ;;
-    esac
-    echo "  a lockfile recording a commit the declared pin does not name refused: lockfile-stale"
-else
-    echo "  the declared rev pin names no immutable target — no served-target comparison to exercise"
+if out="$(lockfile_leg "$WRONG_SHA_LOCK" 2>&1)"; then
+    fail "lockfile-stale-unchecked: a lockfile recording the pin at a commit the pin does not name passed the lockfile leg"
 fi
+case "$out" in
+    *"$EXPECT_WRONG"*) ;;
+    *) fail "lockfile-stale-unchecked: the wrong-target lockfile was refused without naming the pin's target: $out" ;;
+esac
+echo "  a lockfile recording a commit the declared pin does not name refused: lockfile-stale"
+
+# A `rev` Cargo resolves afresh on every resolve — a branch name, a
+# short sha, a tag name — names whatever the remote serves under that
+# name at check time, so the leg must compare against that target
+# instead of admitting the spelling uncompared. The reported defect
+# (`lockfile-leg-rev-compare-skipped-for-non-full-sha`): a full-sha
+# gate on the compare left every other spelling uncompared at all, so a
+# lockfile recording a commit the branch had moved past passed the
+# stage — the exact staleness class this stage exists to report,
+# accepted silently. The proof is hermetic: a scratch remote the stage
+# seeds itself serves two commits, a `main` moved past the first and a
+# tag on the second, and each spelling is checked twice — once
+# recording a revision the pin no longer names, which must be refused
+# naming both revisions, and once recording the revision it does name,
+# which must pass, so a leg that refused every movable pin would be
+# caught too.
+PIN_SCRATCH="$(mktemp -d)"
+PIN_REMOTE="$PIN_SCRATCH/movable-remote.git"
+PIN_SEED="$PIN_SCRATCH/seed"
+git init --quiet --bare "$PIN_REMOTE"
+git init --quiet -b main "$PIN_SEED"
+(
+    cd "$PIN_SEED"
+    git config user.email "ci@example.invalid"
+    git config user.name "reference plant ci"
+    git remote add origin "file://$PIN_REMOTE"
+    git commit --quiet --allow-empty -m base
+    git push --quiet origin main
+    git commit --quiet --allow-empty -m moved
+    git push --quiet origin main
+    git tag movable-tag
+    git push --quiet origin movable-tag
+)
+PIN_URL="file://$PIN_REMOTE"
+PIN_BASE="$(git -C "$PIN_SEED" rev-parse HEAD~1)"
+PIN_TIP="$(git -C "$PIN_SEED" rev-parse HEAD)"
+# An abbreviated rev no served commit shares with the recorded one: the
+# comparison the short-sha spelling exists for, deterministic under
+# construction rather than assumed by a hex-prefix collision check.
+PIN_SHORT="$(python3 - "$PIN_BASE" "$PIN_TIP" <<'PY'
+import sys
+base, tip = sys.argv[1], sys.argv[2]
+for width in range(4, 41):
+    if not base.startswith(tip[:width]):
+        sys.stdout.write(tip[:width])
+        break
+else:
+    sys.exit("no abbreviation distinguishes the two revisions")
+PY
+)"
+
+# One movable-pin case: $1 the declared `rev` spelling, $2 the revision
+# the lockfile records, $3 `refuse` or `accept`. A scratch manifest
+# declares the spelling and a scratch lockfile records $2 for every
+# release crate; both live under the scratch root, so the committed
+# pair stays pristine.
+movable_pin_case() {
+    local value="$1" recorded="$2" want="$3" dir out status=0
+    dir="$PIN_SCRATCH/$want-$(printf '%s' "$value" | tr -c 'a-zA-Z0-9' '_')"
+    mkdir -p "$dir/src"
+    printf 'fn main() {}\n' > "$dir/src/main.rs"
+    python3 - "$dir" "$PIN_URL" "$value" "$recorded" <<'PY'
+import sys
+directory, url, value, recorded = sys.argv[1:5]
+pin = '{ git = "%s", rev = "%s" }' % (url, value)
+open(f"{directory}/Cargo.toml", "w").write(
+    '[package]\nname = "movable-pin"\nversion = "0.1.0"\nedition = "2021"\n\n'
+    "[dependencies]\ndcs-build = %s\ndcs-model = %s\n" % (pin, pin)
+)
+blocks = "".join(
+    '[[package]]\nname = "%s"\nversion = "0.10.0"\nsource = "git+%s?rev=%s#%s"\n\n'
+    % (name, url, value, recorded)
+    for name in ("dcs-build", "dcs-core", "dcs-model")
+)
+open(f"{directory}/Cargo.lock", "w").write("version = 4\n\n" + blocks)
+PY
+    out="$(lockfile_leg_in "$dir" Cargo.lock "$PIN_URL" 2>&1)" || status=$?
+    case "$want" in
+        refuse)
+            [ "$status" -eq 1 ] \
+                || fail "lockfile-stale-unchecked: the \`rev = \"$value\"\` manifest recording $recorded passed the lockfile leg: $out"
+            case "$out" in
+                *"$recorded"*"$PIN_TIP"*) ;;
+                *) fail "lockfile-stale-unchecked: the \`rev = \"$value\"\` refusal named neither the recorded revision nor the revision the pin names: $out" ;;
+            esac
+            echo "  a \`rev = \"$value\"\` lockfile recording $recorded refused: lockfile-stale"
+            ;;
+        *)
+            [ "$status" -eq 0 ] \
+                || fail "lockfile-stale-unchecked: a \`rev = \"$value\"\` lockfile recording the revision the pin names was refused: $out"
+            case "$out" in
+                *"records rev=$value at $recorded"*) ;;
+                *) fail "lockfile-stale-unchecked: the \`rev = \"$value\"\` pass reported no recorded pin: $out" ;;
+            esac
+            echo "  a \`rev = \"$value\"\` lockfile recording the revision the pin names accepted"
+            ;;
+    esac
+}
+movable_pin_case main "$PIN_BASE" refuse
+movable_pin_case main "$PIN_TIP" accept
+movable_pin_case "$PIN_SHORT" "$PIN_BASE" refuse
+movable_pin_case "$PIN_SHORT" "$PIN_TIP" accept
+movable_pin_case movable-tag "$PIN_BASE" refuse
+movable_pin_case movable-tag "$PIN_TIP" accept
 
 echo "== resolve =="
 # `cargo fetch --locked` is the fast path and, with a committed
