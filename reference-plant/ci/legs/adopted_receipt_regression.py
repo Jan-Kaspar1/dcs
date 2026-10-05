@@ -34,20 +34,29 @@ whole staging, with no freeze and no timing race. The run:
   files the durable half reads. A pinned release predating that
   surface reports `receipt-regression-digest inconclusive`, never a
   failure;
+- issues the documented switch — `POST /demote` on the manifest's
+  field owner, `POST /promote` on its converged standby — so the
+  admission is staged on the member carrying the manifest's declared
+  `--peer` wiring: its own later demotion follows the ex-owner's
+  monitor as its configured source, so the adoption under test runs
+  directly. The ex-owner holds no configured source, and a peer's
+  staler window legitimately fails the announced-source proof a
+  demotion without one must pass, so staging on it would be refused
+  before the regression could be presented at all;
 - records the admission's absolute submission index and submits a
   receipted `write_value` on the declared writable point;
-- scans the *standby* and only the standby, so its pull carries the
+- scans the *follower* and only the follower, so its pull carries the
   still-pending admission — its served window now shows the index
   `accepted`, the staler view the contract is about — while the
   owner's own boundary has not run yet;
 - scans the owner: its field-owning boundary applies the admission
   and journals the settle, so the owner holds the terminal verdict;
 - demotes the owner and scans it: its tracking pull adopts the
-  standby's window, whose view of that index is the staler `accepted`
+  follower's window, whose view of that index is the staler `accepted`
   — the regression the contract refuses. The owner's receipt must
-  still read the terminal verdict, the admission must not be
-  re-queued, and the field must not see a second application;
-- scans the standby to close the window — the covering adoption that
+  still read the terminal verdict, and the admission must not be
+  re-queued onto the field;
+- scans the follower to close the window — the covering adoption that
   confirms the verdict — and audits through both peers' serving
   monitors and both declared durable journals: each carries exactly
   one `command_settled` for the admission and each keeps serving the
@@ -60,8 +69,8 @@ The contract postdates the release line's v0.3.0 cut: where the
 launched tooling predates it the run's own evidence is the
 pre-contract shape — a checkpoint carrying no receipt window or
 admission counters, a receipt dropping its declared `actor`/`reason`,
-the standby's pull never carrying the pending admission, or the
-demote dropping the admission instead of holding it — and the leg
+the follower's pull never carrying the pending admission, or a
+demotion that drops the admission instead of holding it — and the leg
 reports `receipt-regression-digest inconclusive` rather than
 asserting until the manifest repins a release carrying the contract.
 
@@ -111,6 +120,7 @@ LEG = {
     "order": 605,
     "title": "the adopted-receipt-regression leg",
     "passes": "adopted-receipt-regression",
+    "failed": "receipt-regression-failed",
     "tampers": [
         {
             "name": "expect-regressed",
@@ -331,15 +341,16 @@ def pre_contract_shape(observed):
 
 
 def regression_pass(args, tamper):
-    """The adopted-receipt-regression run: converge, stage the staler
-    receipt view the finding records — the standby's pull carrying
-    the pending admission while the owner's own boundary has not run —
-    settle the admission on the owner, demote it into an adoption of
-    that staler view, close the window with the covering pull, audit
-    both monitors and both durable journals for the single settle,
-    and restore the launch roles. Returns `(digest_entries, evidence,
-    failures)`; raises `Inconclusive` where the pinned release
-    predates the contract."""
+    """The adopted-receipt-regression run: converge, switch so the
+    admission lands on the peer carrying the declared tracking wiring,
+    stage the staler receipt view the finding records — the follower's
+    pull carrying the pending admission while the owner's own boundary
+    has not run — settle the admission on the owner, demote it into an
+    adoption of that staler view, close the window with the covering
+    pull, audit both monitors and both durable journals for the single
+    settle, and restore the launch roles. Returns `(digest_entries,
+    evidence, failures)`; raises `Inconclusive` where the pinned
+    release predates the contract."""
     declared = pair.manifest_pair(args.manifest)
     if declared is None:
         raise Abort(
@@ -414,11 +425,48 @@ def regression_pass(args, tamper):
             }
         )
 
-        # Phase 2 — the admission: the receipted write mints on the
+        # Phase 2 — the documented switch: the manifest's field owner
+        # demotes and its converged standby promotes. The admission is
+        # staged on the *promoted* peer because that is the member
+        # carrying the manifest's declared `--peer` wiring: its own
+        # later demotion follows the ex-owner's monitor as its
+        # configured source, so the adoption the contract is about
+        # runs directly, with no announced-source verification standing
+        # between the demote and the pull. (The ex-owner holds no
+        # configured source — its demotion proves an announced hint —
+        # and a peer's staler window legitimately fails that proof: it
+        # plants an `In` value its own receipt log does not account
+        # for, so the announced contract would refuse the demote
+        # before the regression could be staged at all.)
+        switched = rig.switch(
+            duty_url,
+            standby_url,
+            failures,
+            demote_what="the manifest's field owner",
+            promote_what="its converged standby",
+            promote_note=" — staging the admission on the peer that "
+                        "carries the declared tracking wiring",
+            audit_receipts=True,
+        )
+        owner_url, owner_name = standby_url, standby_name
+        peer_url, peer_name = duty_url, duty_name
+        evidence["switched"] = {
+            "owner": switched["promoted_role"].get("role"),
+            "peer": claim_reclaim.sync_state(switched["demoted_role"]),
+        }
+        digest_entries.append(
+            {
+                "phase": "switch",
+                "owner": switched["promoted_role"].get("role"),
+                "peer": claim_reclaim.sync_state(switched["demoted_role"]),
+            }
+        )
+
+        # Phase 3 — the admission: the receipted write mints on the
         # field owner, whose own boundary has not run yet.
-        index = next_receipt_index(duty_url, "GET /checkpoint", failures)
+        index = next_receipt_index(owner_url, "GET /checkpoint", failures)
         status, receipt = pair.request(
-            f"{duty_url}/command",
+            f"{owner_url}/command",
             {"command": command, "actor": ACTOR, "reason": REASON},
         )
         evidence["submission"] = {"status": status, "receipt": receipt}
@@ -439,41 +487,41 @@ def regression_pass(args, tamper):
             {"phase": "admit", "index": index, "receipt": receipt}
         )
 
-        # Phase 3 — the staler view: only the standby is scanned, so
-        # its pull carries the still-pending admission into its own
+        # Phase 4 — the staler view: only the tracking peer is scanned,
+        # so its pull carries the still-pending admission into its own
         # window while the owner's boundary never ran. That served
         # `accepted` view of the admission's own index is the document
         # the owner's later adoption will pull.
-        pair.scan(standby_url, failures)
+        pair.scan(peer_url, failures)
         time.sleep(FETCH_SETTLE_S)
         carried = admission_receipts(
-            served(standby_url, "GET /receipts", failures),
+            served(peer_url, "GET /receipts", failures),
             command, ACTOR,
         )
         evidence["stale_view"] = verdict(carried[-1]) if carried else None
         if not carried:
             raise Inconclusive(
-                "the standby's pull never carried the pending "
+                "the tracking peer's pull never carried the pending "
                 "admission into its own window — the staler view the "
                 "contract is about never formed; the pinned release "
                 "predates the adopted-receipt-regression contract"
             )
         if simulate.receipt_outcome(carried[-1]) != "accepted":
             raise Inconclusive(
-                "the standby's window reads "
+                "the tracking peer's window reads "
                 f"{simulate.receipt_outcome(carried[-1])} for the "
                 "pending admission instead of the pending view — the "
                 "staging never formed; the pinned release predates "
                 "the adopted-receipt-regression contract"
             )
         digest_entries.append(
-            {"phase": "stale", "standby_view": "accepted"}
+            {"phase": "stale", "peer_view": "accepted"}
         )
 
-        # Phase 4 — the owner's own settle: its field-owning boundary
+        # Phase 5 — the owner's own settle: its field-owning boundary
         # applies the admission and journals the terminal verdict.
-        owner_scan = pair.scan(duty_url, failures)
-        settled = index_receipt(duty_url, index, "GET /checkpoint",
+        owner_scan = pair.scan(owner_url, failures)
+        settled = index_receipt(owner_url, index, "GET /checkpoint",
                                 failures)
         evidence["settled"] = verdict(settled) if settled else None
         if settled is None or not admission_hit(settled, command, ACTOR):
@@ -499,32 +547,33 @@ def regression_pass(args, tamper):
             raise Abort
         digest_entries.append({"phase": "settled", "view": verdict(settled)})
 
-        # Phase 5 — the adoption of the staler view: the owner
-        # demotes and its tracking pull lands on the standby's window,
-        # whose view of the admission's own index is the staler
-        # `accepted`. The merge must refuse the regression: the
-        # owner's receipt keeps its terminal verdict, the admission is
-        # not re-queued, and the field sees no second application.
-        rig.demote(duty_url, failures, what="the settled field owner")
-        observations = {duty_name: [verdict(settled)],
-                        standby_name: []}
+        # Phase 6 — the adoption of the staler view: the owner demotes
+        # and its tracking pull lands on the follower's window, whose
+        # view of the admission's own index is the staler `accepted`.
+        # The merge must refuse the regression: the owner's receipt
+        # keeps its terminal verdict, and the admission is not
+        # re-queued — a regressed entry would land the command a second
+        # time at this run's next boundary, which is what the queue
+        # depth reads.
+        rig.demote(owner_url, failures, what="the settled field owner")
+        observations = {owner_name: [verdict(settled)], peer_name: []}
         roles = []
         scan = owner_scan
         for _ in range(WATCH_SCANS):
-            scan = pair.scan(duty_url, failures)
-            report = pair.get(f"{duty_url}/role", "GET /role", failures)
+            scan = pair.scan(owner_url, failures)
+            report = pair.get(f"{owner_url}/role", "GET /role", failures)
             roles.append(report.get("role"))
             observed = index_receipt(
-                duty_url, index, "GET /checkpoint", failures
+                owner_url, index, "GET /checkpoint", failures
             )
-            observations[duty_name].append(
+            observations[owner_name].append(
                 verdict(observed) if observed is not None else None
             )
             if claim_reclaim.tracking(report):
                 break
         evidence["adoption_roles"] = roles
-        evidence["owner_views"] = observations[duty_name]
-        after = index_receipt(duty_url, index, "GET /checkpoint",
+        evidence["owner_views"] = observations[owner_name]
+        after = index_receipt(owner_url, index, "GET /checkpoint",
                               failures)
         if after is None or not admission_hit(after, command, ACTOR):
             failures.append(
@@ -532,39 +581,38 @@ def regression_pass(args, tamper):
                 f"stale-view adoption — {after}"
             )
             raise Abort
-        if simulate.snapshot_point(scan, point) != {"bool": value}:
+        depth = (scan.get("command_queue") or {}).get("depth")
+        if depth:
             failures.append(
                 "receipt-regression-failed: the stale-view adoption "
-                "re-applied the command on the field — point "
-                f"{point} reads "
-                f"{simulate.snapshot_point(scan, point)} where the "
-                f"settled value {{'bool': {value}}} stood"
+                f"re-queued the settled admission — the demoted owner's "
+                f"command_queue depth reads {depth}"
             )
             raise Abort
         digest_entries.append(
             {"phase": "adopt", "roles": roles[:1],
-             "view": verdict(after)}
+             "view": verdict(after), "queue": 0}
         )
 
-        # Phase 6 — the covering adoption: the standby is scanned so
-        # its own window catches up, and the pair's pulls confirm the
-        # terminal verdict on both sides.
+        # Phase 7 — the covering adoption: the follower is scanned so
+        # its own window catches up on the settle, and the pair's pulls
+        # confirm the terminal verdict on both sides.
         for _ in range(WINDOW_SCANS):
-            pair.scan(standby_url, failures)
+            pair.scan(peer_url, failures)
             time.sleep(FETCH_SETTLE_S)
-            standby_rows = admission_receipts(
-                served(standby_url, "GET /receipts", failures),
+            peer_rows = admission_receipts(
+                served(peer_url, "GET /receipts", failures),
                 command, ACTOR,
             )
-            observations[standby_name].append(
-                verdict(standby_rows[-1]) if standby_rows else None
+            observations[peer_name].append(
+                verdict(peer_rows[-1]) if peer_rows else None
             )
-            duty_rows = admission_receipts(
-                served(duty_url, "GET /receipts", failures),
+            owner_rows = admission_receipts(
+                served(owner_url, "GET /receipts", failures),
                 command, ACTOR,
             )
-            observations[duty_name].append(
-                verdict(duty_rows[-1]) if duty_rows else None
+            observations[owner_name].append(
+                verdict(owner_rows[-1]) if owner_rows else None
             )
         evidence["observations"] = observations
 
@@ -589,11 +637,13 @@ def regression_pass(args, tamper):
             }
         )
 
-        # Phase 7 — the journals: exactly one `command_settled` per
+        # Phase 8 — the journals: exactly one `command_settled` per
         # admission on each peer's served journal and each declared
-        # durable file.
+        # durable file. The `seq` numbers ride the evidence and the
+        # counts alone the digest — two runs' files number their own
+        # records independently.
         journaled = {}
-        for name, url in peers.items():
+        for name, url in ((owner_name, owner_url), (peer_name, peer_url)):
             entries = pair.get(f"{url}/journal", "GET /journal", failures)
             journaled[name] = settle_rows(entries, command, ACTOR)
         durable = {}
@@ -644,10 +694,18 @@ def regression_pass(args, tamper):
         evidence["journaled"] = journaled
         evidence["durable"] = durable
         digest_entries.append(
-            {"phase": "journaled", "journaled": journaled}
+            {
+                "phase": "journaled",
+                "journaled": {
+                    name: len(rows) for name, rows in journaled.items()
+                },
+                "durable": {
+                    name: len(rows) for name, rows in durable.items()
+                },
+            }
         )
 
-        # Phase 8 — the launch roles: the manifest's field owner is
+        # Phase 9 — the launch roles: the manifest's field owner is
         # promoted back and the pair reconverges `active` plus
         # `tracking`.
         promoted = rig.promote(
@@ -757,11 +815,11 @@ def main():
     digest = simulate.stable_digest(digest_entries)
     print(
         f"receipt-regression-digest {digest} — one admission applied "
-        "on the field owner while its standby held a staler pending "
+        "on the field owner while its follower held a staler pending "
         "view of the same index, the owner's adoption of that staler "
-        "window kept the terminal verdict, one command_settled per "
-        "admission on both served and durable journals, the launch "
-        "roles restored"
+        "window kept the terminal verdict and re-queued nothing, one "
+        "command_settled per admission on both served and durable "
+        "journals, the launch roles restored"
     )
     return 0
 

@@ -464,6 +464,13 @@ def _collision_pass(ctx, number, owner, peer, points):
                       'value': {'bool': second}}}}
         record.update({'point': point, 'raced': raced_actor,
                        'minted': minted_actor})
+        # The absolute index each line will mint at, read *before*
+        # either submits — the submission is what mints there, so a
+        # read after it names the successor of the contested position.
+        # The holder's read precedes the promotion because every read
+        # drives a scan, and the holder's next scan is the fenced
+        # detection scan that closes its reporting window.
+        raced['index'] = _next_receipt_index(ctx, owner_base)
         # The promotion boundary's final-sync fetch meets the
         # pre-admission document, and its claim preempts the holder.
         status, body = _settle_call(peer_base + '/promote')
@@ -473,6 +480,17 @@ def _collision_pass(ctx, number, owner, peer, points):
                    + ' answered ' + str(status) + ': '
                    + json.dumps(body)[:300])
             return {}, violations, evidence
+        # The successor's own high-water: the promotion's carry lifted
+        # nothing here, so the split mint is the shape the contract
+        # adjudicates only when the two lines mint at one index.
+        minted['index'] = _next_receipt_index(ctx, peer_base)
+        record['indices'] = {'raced': raced['index'],
+                             'minted': minted['index']}
+        if minted['index'] != raced['index']:
+            record['missed'] = 'no split mint'
+            _restore_launch_roles(ctx, owner, peer,
+                                  time.monotonic() + COLLISION_SETTLE)
+            continue
         # The raced admission, fired into the fenced-but-still-
         # reporting holder's window — it admits the command at the
         # index the sibling is about to mint from, and its detection
@@ -489,15 +507,11 @@ def _collision_pass(ctx, number, owner, peer, points):
                                   time.monotonic() + COLLISION_SETTLE)
             continue
         record['submission'] = {'status': status, 'receipt': receipt}
-        raced['index'] = _next_receipt_index(ctx, owner_base) \
-            if status == 200 and _outcome_key(receipt) == 'accepted' \
-            else None
-        if raced['index'] is None:
+        if status != 200 or _outcome_key(receipt) != 'accepted':
             record['missed'] = 'no admission'
             _restore_launch_roles(ctx, owner, peer,
                                   time.monotonic() + COLLISION_SETTLE)
             continue
-        raced['index'] = None
         # The successor's own admission at the same absolute index: the
         # split mint the collision is.
         try:

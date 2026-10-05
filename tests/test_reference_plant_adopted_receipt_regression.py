@@ -120,10 +120,14 @@ class Registration(unittest.TestCase):
 
     def test_the_named_diagnostics_follow_the_stem_convention(self):
         # The issue names receipt-regression-failed and
-        # receipt-regression-nondeterministic — the driver's defaults
-        # off the file stem, neither spelled in the literal.
+        # receipt-regression-nondeterministic; the driver derives its
+        # failed diagnostic off the file stem unless the literal
+        # declares one, so the leg spells the issue's name — the
+        # settled-receipt-arbitration leg's convention — while
+        # receipt-regression-nondeterministic is what the leg's own
+        # evidence lines report.
         self.assertEqual(leg.LEG["passes"], "adopted-receipt-regression")
-        self.assertNotIn("failed", leg.LEG)
+        self.assertEqual(leg.LEG["failed"], "receipt-regression-failed")
 
     def test_the_doctored_case_carries_named_evidence(self):
         tampers = {entry["name"]: entry for entry in leg.LEG["tampers"]}

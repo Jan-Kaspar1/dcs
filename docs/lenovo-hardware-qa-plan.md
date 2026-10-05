@@ -2073,6 +2073,112 @@ Implementation order: second, after [daily architecture review](daily-architectu
   must fail naming the annunciation and the stop the honest run saw.
 
 
+### Landed 2026-10-05 (adopted-stale-receipt regression leg, #1130/#1131)
+
+- The contract #709's fix establishes (WW-LCM-001's receipt-as-truth
+  clause): an adopted checkpoint's staler receipt view must not
+  regress a locally terminal outcome, so a later covering adoption
+  cannot re-settle an admission and journal a second identical
+  `command_settled` for it, and the pair's command audit carries
+  exactly one terminal settle per admission. The finding
+  `adopted-stale-receipt-view-regresses-settle-and-rejournals`
+  (defect; severity low; confidence medium), reported by run
+  `qax-20260919-006` against revision `cb10f21a` on rig `lenovo`,
+  module `dcs-monitor`, recorded both peers' durable journals
+  carrying the same receipt's `command_settled applied{61481}` twice
+  (a at seq 284 and 287, b at seq 284 and 292, b's second entry
+  landing inside its re-promote boundary while still attributed to the
+  original settle tick) — a replay of the already-recorded verdict the
+  recorder read as a fresh transition, not a new settle; a later plain
+  demote+promote cycle added no third entry, so the trigger is the
+  stale-view regression and not the role boundary. The recorder's
+  `record_scan` diffs receipt outcomes by absolute index, and
+  `adopt_receipts`' durable-truth-forward merge keeps the run's own
+  terminal verdict where the adopted window carries the same submission
+  still `accepted`, so a regressed entry never re-queues onto the
+  field either.
+- Scenario leg `1980_adopted_receipt_regression` stages the surviving
+  trigger on the deployed pair with the field held at a settled,
+  tracking state: a receipted command is submitted and the holder
+  demoted inside the receipt's suspension window so the receipt
+  persists `accepted` at the owner's index, the sibling promotes so its
+  boundary carry lifts the pending admission and its first
+  field-owning scan applies it and journals the settle, and the
+  successor is then demoted again so it tracks back and adopts the
+  predecessor's staler window — the predecessor's pull having been
+  paced behind that settle. The audit reads both peers' serving
+  monitors across the adoption window and both declared durable
+  journals: no peer's served receipt moves back to the pending view,
+  the two served receipts never disagree, and each peer carries at
+  most one `command_settled` for the admission.
+- Named diagnostics are `receipt-regression-failed` and
+  `receipt-regression-nondeterministic`, with the self-check's
+  `receipt-regression-unchecked` covering the planted negative — a leg
+  accepting a served `accepted` for an admission whose settle already
+  journaled, the defect the contract closed; two consecutive passes
+  produce identical digests; a run whose served surfaces predate the
+  receipt-attribution and checkpoint-window contract, whose ctx
+  declares no durable journal for one peer, whose pair never settles
+  tracking, or whose staging never lands the suspend/apply/adopt
+  sequence reports inconclusive; the pair leaves on its launch roles.
+  The consumer-boundary mirror is `reference-plant/ci/legs/
+  adopted_receipt_regression.py` — one new file under `ci/legs/`,
+  discovered by the file-named convention, needing no `check.sh`,
+  boundary-lint or harness edit. Its declared pair is driven, so the
+  staler view is staged by which peer is scanned when, with no freeze
+  and no timing race; it issues the documented switch first so the
+  admission lands on the member carrying the manifest's declared
+  `--peer` wiring, because the ex-owner holds no configured source and
+  a staler window legitimately fails the announced-source proof a
+  demotion without one must pass.
+
+### Landed 2026-10-05 (receipt-index collision audit-preservation leg, #1175/#1176)
+
+- The contract #775's fix establishes (WW-LCM-001's receipt-as-truth
+  clause): admission indices derive from a per-peer `attempts`
+  counter that converges only through checkpoint adoption, so inside
+  the promote/fence window both lines can mint receipts at the same
+  absolute index for different commands, and the served `/receipts`
+  must keep a servable record of every admitted command rather than
+  replacing a settled submission at a reused index. The re-home the fix
+  names as the displaced admission's preserved audit: the merge
+  re-mints the displaced receipt past the adopted window's high-water
+  with its command, actor, and terminal `superseded` verdict intact,
+  and the recorder's re-home re-keys the already-journaled settle's
+  new index instead of settling it a second time.
+- Scenario leg `1985_receipt_index_collision` stages the split mint on
+  the deployed pair: `POST /promote` on the standby first, so its
+  promotion-boundary fetch meets only the pre-admission document and
+  its window can never cover the admission the run lands next, then a
+  receipted `write_value` on the still-field-owning peer inside that
+  window — it accepts and is superseded by the fence — and then a
+  second receipted `write_value` on the new active, minting the same
+  absolute index. After convergence the audit reads both peers'
+  serving monitors and both declared durable journals: the displaced
+  admission's terminal verdict stays retrievable (the demoted holder
+  serves it re-minted past the contested index with its `superseded`
+  verdict, while the successor's own applied record stands at the
+  contested index), the two submissions never collapse onto one
+  record, and each peer records exactly one `command_settled` per
+  admission.
+- Named diagnostics are `receipt-collision-failed` and
+  `receipt-collision-nondeterministic`, with the self-check's
+  `receipt-collision-unchecked` covering the planted negative — a leg
+  accepting the displaced admission as served while only the
+  successor's receipt stands at the contested index, the silent
+  displacement the contract closed; two consecutive passes produce
+  identical digests; a run whose served surfaces predate the
+  receipt-attribution and checkpoint-window contract, whose ctx
+  declares no durable journal for one peer, whose pair never settles
+  tracking, or whose staging never lands the split mint reports
+  inconclusive; the pair leaves on its launch roles. The
+  consumer-boundary mirror is `reference-plant/ci/legs/
+  receipt_index_collision.py` — one new file under `ci/legs/`,
+  discovered by the file-named convention, needing no `check.sh`,
+  boundary-lint or harness edit, driving the declared pair so the
+  promote/fence window is staged by scan order alone.
+
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,

@@ -506,7 +506,13 @@ def collision_pass(args, tamper):
         digest_entries.append(dig)
 
         # Phase 4 — the colliding mint: a second receipted admission
-        # on the new active, minting the same absolute index.
+        # on the new active, minting the same absolute index. The
+        # index is read *before* the submission — the submission is
+        # what mints there, so a read after it names the successor of
+        # the contested position.
+        minted_index = next_receipt_index(
+            standby_url, "GET /checkpoint", failures
+        )
         status, minted = pair.request(
             f"{standby_url}/command",
             {
@@ -523,9 +529,6 @@ def collision_pass(args, tamper):
                 f"{minted}, expected an accepted receipt"
             )
             raise Abort
-        minted_index = next_receipt_index(
-            standby_url, "GET /checkpoint", failures
-        )
         evidence["minted_index"] = minted_index
         if minted_index != index:
             raise Inconclusive(
