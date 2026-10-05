@@ -2435,6 +2435,71 @@ class BornActiveActionTests(unittest.TestCase):
             ('exec', 'dcs-hw-qa-1-born-plant', 'dcs-plant-ctl',
              '127.0.0.1:' + str(runner.BORN_FIELD_PORT), 'list'))
 
+    def _served_field(self, mode='serving', document=None):
+        """The born field's staged launch with a derived document in
+        the run model's place."""
+        calls, events = [], []
+
+        def docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        with patch.object(runner, 'docker', docker):
+            info = runner.start_born_field(
+                self.cfg, self._record(), self.run_dir, self.model,
+                self.dynamics,
+                lambda event, detail=None: events.append(event), mode,
+                document=document)
+        return self._run(calls), info
+
+    def test_a_derived_document_replaces_the_served_field_model(self):
+        # The lane's own per-run variants (qa_lane/rig_model.py) are
+        # derived from the document this run mounted and staged beside
+        # the evidence, which the revision's extracted tree cannot carry.
+        # The field mounts the derived document in the run model's place
+        # and reports which document it actually serves, so the seat
+        # that mounts the same path and the field that serves it read
+        # one declaration.
+        derived = self.run_dir / 'derived' / 'writable-point.json'
+        derived.parent.mkdir(parents=True, exist_ok=True)
+        derived.write_text(json.dumps({'version': 1}))
+        launch, info = self._served_field(document=derived)
+        self.assertIn(str(derived) + ':/model/plant.json:ro', launch)
+        self.assertNotIn(str(self.model) + ':/model/plant.json:ro',
+                         launch)
+        self.assertEqual(info['model'], str(derived))
+        self.assertEqual(info['mode'], 'serving')
+
+    def test_a_missing_derived_document_fails_the_staging(self):
+        # A document the leg meant to derive but did not is a staging
+        # failure, not a launch that mounts nothing and serves the run
+        # model in its place.
+        with self.assertRaises(RuntimeError) as caught:
+            self._served_field(document=self.run_dir / 'absent.json')
+        self.assertIn('born field model missing', str(caught.exception))
+
+    def test_the_silent_field_refuses_a_document(self):
+        # The unreachable-field induction is a name that resolves with
+        # nothing listening; there is no document for it to serve, so
+        # taking one would silently stage a field instead.
+        with self.assertRaises(RuntimeError) as caught:
+            self._served_field(mode='silent',
+                               document=self.model)
+        self.assertIn('serves no document', str(caught.exception))
+
+    def test_scenario_ctx_names_the_runs_mounted_document(self):
+        # The writable-field-point leg derives from the document the run
+        # itself mounted; the ctx names it so a leg never reconstructs
+        # the revision's src_dir/sha join to find it.
+        events = []
+        ctx = runner._scenario_ctx(
+            self.cfg, self._record(), self.src, self.run_dir,
+            self.run_dir / 'evidence', 0,
+            lambda e, d=None: events.append(e))
+        self.assertEqual(ctx['mounted_model'],
+                         str(self.src / self.cfg['model_fixture']))
+        self.assertEqual(Path(ctx['mounted_model']), self.model)
+
     def test_born_field_ctl_execs_the_tool_inside_the_field(self):
         calls = []
 

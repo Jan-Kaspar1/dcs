@@ -66,8 +66,8 @@ pub use interface::{
     block_interfaces,
 };
 pub use io::{
-    CyclicIoDriver, Direction, DriverDiagnostics, ExchangeDiagnostics, Input, IoDriver, IoError,
-    LinkState, Output, PointType, TypedSample,
+    BusExchangeDiagnostics, CyclicIoDriver, Direction, DriverDiagnostics, ExchangeDiagnostics,
+    Input, IoDriver, IoError, LinkState, OperationalState, Output, PointType, TypedSample,
 };
 pub use journal::{
     EmittedEvent, EventRecord, EventValue, JournalEntry, JournalEvent, RestartConsultOutcome,

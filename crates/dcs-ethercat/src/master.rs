@@ -16,8 +16,8 @@
 use crate::params::{DeviceParameters, ImageOffset, StationIdentity};
 use crate::transport::{BusTransport, CycleOutcome, DiscoveredStation, TransportError};
 use dcs_core::{
-    CyclicIoDriver, Direction, DriverDiagnostics, ExchangeDiagnostics, IoDriver, IoError,
-    LinkState, PointId, Sample, Tick, Value, ValueKind,
+    BusExchangeDiagnostics, CyclicIoDriver, Direction, DriverDiagnostics, ExchangeDiagnostics,
+    IoDriver, IoError, LinkState, PointId, Sample, Tick, Value, ValueKind,
 };
 use dcs_model::DeviceId;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -140,6 +140,12 @@ struct BusState {
     /// Attached devices in attach order — the first is the bus's cyclic
     /// and diagnostics owner.
     attached: Vec<DeviceId>,
+    /// What the deployment bound this logical bus to — the host
+    /// interface name, or the `@`-prefixed path of a recorded run
+    /// replayed in its place. The monitoring surface reports it beside
+    /// the bus's own state, so an operator can see which segment the
+    /// published diagnostics describe.
+    binding: String,
 }
 
 /// One logical EtherCAT bus: the images, the transport, and the failure
@@ -289,10 +295,11 @@ fn image_bits(
 impl BusMaster {
     /// A master over an opened transport: the staged output image and
     /// the receive buffer sized from the discovered process data.
-    pub(crate) fn new(bus: &str, transport: Box<dyn BusTransport>) -> Self {
+    pub(crate) fn new(bus: &str, binding: &str, transport: Box<dyn BusTransport>) -> Self {
         Self {
             bus: bus.to_string(),
             state: Mutex::new(BusState {
+                binding: binding.to_string(),
                 staged: vec![0; transport.output_len()],
                 received: vec![0; transport.input_len()],
                 transport,
@@ -614,12 +621,13 @@ impl BusMaster {
     /// exchange counters — the cyclic half of the decision-22 surface.
     fn diagnostics(&self) -> DriverDiagnostics {
         let state = self.state.lock().unwrap();
+        let link = if state.misses > 0 || state.transport.link() == LinkState::Disconnected {
+            LinkState::Disconnected
+        } else {
+            LinkState::Connected
+        };
         DriverDiagnostics {
-            link: if state.misses > 0 || state.transport.link() == LinkState::Disconnected {
-                LinkState::Disconnected
-            } else {
-                LinkState::Connected
-            },
+            link,
             last_error: state.last_error.clone(),
             exchange: Some(ExchangeDiagnostics {
                 attempted: state.attempted,
@@ -627,6 +635,20 @@ impl BusMaster {
                 working_counter_mismatches: state.wkc_mismatches,
                 last_exchange_tick: state.last_exchange_tick,
                 missed_deadlines: state.missed_deadlines,
+                buses: vec![BusExchangeDiagnostics {
+                    device: None,
+                    bus: Some(self.bus.clone()),
+                    binding: Some(state.binding.clone()),
+                    state: Some(state.transport.state()),
+                    link,
+                    attempted: state.attempted,
+                    succeeded: state.succeeded,
+                    working_counter_mismatches: state.wkc_mismatches,
+                    missed_deadlines: state.missed_deadlines,
+                    failed_exchanges: state.attempted.saturating_sub(state.succeeded),
+                    last_exchange_tick: state.last_exchange_tick,
+                    last_error: state.last_error.clone(),
+                }],
             }),
         }
     }

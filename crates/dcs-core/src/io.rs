@@ -175,6 +175,104 @@ pub struct DriverDiagnostics {
     pub exchange: Option<ExchangeDiagnostics>,
 }
 
+/// A bus's operational state on the EtherCAT state path — the
+/// PRE-OP/SAFE-OP/OP vocabulary the field bus itself uses, plus the two
+/// states DCS owns around it.
+///
+/// The transport reports this through
+/// [`BusTransport::state`](crate::BusTransport::state), so the reported
+/// value is the segment's own AL state rather than a guess from whether
+/// the last exchange answered.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationalState {
+    /// No cyclic operation yet: the bus has not completed its
+    /// PRE-OP → SAFE-OP → OP entry.
+    #[default]
+    Init,
+    /// Configuration read, cyclic data not yet safe.
+    PreOp,
+    /// Outputs held safe, inputs live — outputs may not yet be applied.
+    SafeOp,
+    /// Cyclic operation: the staged image is published and the returned
+    /// image latched each exchange.
+    Op,
+}
+
+impl OperationalState {
+    /// The field-bus vocabulary's own spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Init => "init",
+            Self::PreOp => "pre-op",
+            Self::SafeOp => "safe-op",
+            Self::Op => "op",
+        }
+    }
+}
+
+impl std::fmt::Display for OperationalState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One bus's own exchange counters inside an aggregate
+/// [`ExchangeDiagnostics`] — the per-backend attribution a fan-out over
+/// several cyclic backends records.
+///
+/// A mixed-kind model (`sim` plus `ethercat` plus future fieldbuses) is the
+/// deployment shape the fan-out exists for, and a single aggregate row cannot
+/// name which bus a counter belongs to: a flaky first bus used to mask a
+/// second bus's first failure entirely, and its miss-streak escalation then
+/// tracked the wrong link. These rows keep each boundary's own outcome beside
+/// the sum, so a threshold breach is readable against the bus that caused it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BusExchangeDiagnostics {
+    /// The model device this bus belongs to, or [`None`] for a backend with
+    /// no device of its own — the shared local simulated backend.
+    pub device: Option<u64>,
+    /// The logical bus name the device declared, when the backend has one
+    /// — `ecat0` and friends. `None` for a backend with no declared bus.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bus: Option<String>,
+    /// What the deployment bound that logical bus to: a host interface
+    /// name, or the `@`-prefixed path of a recorded run replayed in its
+    /// place. `None` for a backend with no deployment binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<String>,
+    /// The bus's own operational state — `init` before the state path
+    /// completes, then `pre-op`, `safe-op`, and `op`. `None` for a
+    /// backend whose transport reports no state of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<OperationalState>,
+    /// The bus's reported link state, as its backend's own
+    /// [`DriverDiagnostics::link`].
+    pub link: LinkState,
+    /// This bus's `attempted`/`succeeded` pair.
+    pub attempted: u64,
+    /// Completed exchanges on this bus alone.
+    pub succeeded: u64,
+    /// Completed exchanges on this bus whose working counter fell short.
+    pub working_counter_mismatches: u64,
+    /// Exchange deadlines this bus reported missed.
+    pub missed_deadlines: u64,
+    /// This bus's own `attempted - succeeded`: the exchanges that did not
+    /// complete at *this* boundary. The aggregate's own `IoHealth`
+    /// `failed_exchanges` counts the fan-out's scan-level boundary once per
+    /// failed `exchange` call, so a multi-bus scan in which two buses failed
+    /// would read `1` there and `2` here — one counted boundary failure per
+    /// bus, never a second count of the same one.
+    pub failed_exchanges: u64,
+    /// The run tick of this bus's most recent completed exchange.
+    #[serde(default)]
+    pub last_exchange_tick: Option<Tick>,
+    /// This bus's own most recent failure description, so attribution does
+    /// not depend on the aggregate's joined `last_error` prose.
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
 /// The cyclic process-image exchange counters a [`CyclicIoDriver`]
 /// reports through [`IoDriver::diagnostics`] — the exchange half of the
 /// I/O-health surface.
@@ -185,6 +283,11 @@ pub struct DriverDiagnostics {
 /// held samples aging to `Stale`, `Disconnected` escalations — still
 /// count under the executor's boundary counters when the scan's reads
 /// see them.
+///
+/// The scalars aggregate over every bus a fan-out covers; [`buses`] carries
+/// each backend's own row so a counter stays attributable to the bus it
+/// happened on. It is empty on a single-bus driver, where the aggregate and
+/// the only bus agree by construction.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ExchangeDiagnostics {
     /// Exchanges the driver has attempted — one per `exchange` call.
@@ -206,6 +309,11 @@ pub struct ExchangeDiagnostics {
     /// exchange whose frame returned past its deadline counts here as
     /// well as under `succeeded`.
     pub missed_deadlines: u64,
+    /// Each contributing bus's own row, in backend order — the
+    /// attribution the aggregate scalars above cannot carry. Absent from
+    /// payloads serialized before this section existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub buses: Vec<BusExchangeDiagnostics>,
 }
 
 /// The driver-facing contract: untyped access to logical I/O points.
@@ -794,6 +902,7 @@ mod tests {
                     working_counter_mismatches: 1,
                     last_exchange_tick: Some(Tick(4)),
                     missed_deadlines: 2,
+                    buses: Vec::new(),
                 }),
             },
         ] {

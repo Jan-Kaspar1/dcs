@@ -690,6 +690,41 @@ pub struct HealthReport {
     /// freshness `live` alone cannot attest: a wedged scan loop reads
     /// as a growing age, a run that has not scanned yet as `null`.
     pub last_scan_age_ms: Option<u64>,
+    /// The build this process is: its crate version and, where the
+    /// build could supply one, the git revision it was compiled from.
+    ///
+    /// Identity is the first half of what an operator must be able to
+    /// read off a field run — "which build is talking to my rig, and
+    /// which model is it running" — and it is here rather than on the
+    /// bulk snapshot because the answer is fixed for the process's
+    /// life: it must still read while the bulk reads starve.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<BuildIdentity>,
+}
+
+/// The build identity a monitoring endpoint reports: the crate version
+/// and the git revision the binary was compiled from, where the build
+/// could supply one.
+///
+/// `git_sha` is absent rather than invented when the build did not carry
+/// one: the monitor does not invent a revision, and the hosting process
+/// decides — `dcs-controller` reads `DCS_BUILD_SHA` from its own
+/// environment, so a deployment or image that supplies the revision
+/// serves it and one that does not serves an absent field. An absent
+/// revision reports as absent, so a consumer can tell "not recorded"
+/// from "recorded, and here it is".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildIdentity {
+    /// The crate version this process was compiled from.
+    pub version: String,
+    /// The git revision this process was compiled from, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_sha: Option<String>,
+    /// The model fingerprint the served plant model carries, when the
+    /// process recorded one — the same value `/checkpoint` stamps, so an
+    /// operator reads the served bytes' identity beside the build's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_fingerprint: Option<String>,
 }
 
 /// The monitoring page served at `GET /` — see the crate docs.
@@ -1076,6 +1111,10 @@ pub struct Monitor<'d> {
     /// paces scans itself through [`paced_scan`](Self::paced_scan) and
     /// `POST /scan` is refused: the wall clock owns the scan schedule.
     paced: bool,
+    /// The build identity `GET /health` reports — set by
+    /// [`with_build`](Self::with_build) once the hosting process knows
+    /// its own version, revision, and the model it loaded.
+    build: Option<BuildIdentity>,
     /// The per-requested-scan wiring [`driven`](Self::driven) installed —
     /// consulted only on an unpaced monitor, where `POST /scan` runs.
     driven: Driven<'d>,
@@ -1436,6 +1475,16 @@ impl<'d> Monitor<'d> {
         Self::bind_paced_peer_with(addr, peer, signals, MonitorConfig::default())
     }
 
+    /// The build identity `GET /health` reports — the hosting process's
+    /// own declaration of what it is: its crate version, the git
+    /// revision it was compiled from where one was recorded, and the
+    /// fingerprint of the model it loaded. Call once, before serving
+    /// traffic; a later call replaces the declaration.
+    pub fn with_build(mut self, build: BuildIdentity) -> Self {
+        self.build = Some(build);
+        self
+    }
+
     /// As [`bind_paced_peer`](Self::bind_paced_peer) with explicit
     /// `config` retention bounds and journal-file sink.
     pub fn bind_paced_peer_with<A: ToSocketAddrs>(
@@ -1514,6 +1563,7 @@ impl<'d> Monitor<'d> {
             bound_addr,
             stopping: AtomicBool::new(false),
             paced: false,
+            build: None,
             driven: Driven::default(),
             state_sink,
             standby_source: None,
@@ -2915,6 +2965,7 @@ impl<'d> Monitor<'d> {
                         last_scan_age_ms: liveness
                             .last_scan
                             .map(|at| u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX)),
+                        build: self.build.clone(),
                     },
                 ),
                 None => json(503, "no liveness yet"),
@@ -6080,12 +6131,14 @@ mod tests {
                 role: Role::Active,
                 tick: Tick(7),
                 last_scan_age_ms: Some(12),
+                build: None,
             },
             HealthReport {
                 live: true,
                 role: Role::Standby,
                 tick: Tick::ZERO,
                 last_scan_age_ms: None,
+                build: None,
             },
         ] {
             let json = serde_json::to_string(&report).unwrap();
@@ -6100,6 +6153,7 @@ mod tests {
                 role: Role::Active,
                 tick: Tick(7),
                 last_scan_age_ms: Some(12),
+                build: None,
             })
             .unwrap(),
             r#"{"live":true,"role":"active","tick":7,"last_scan_age_ms":12}"#
@@ -6110,6 +6164,7 @@ mod tests {
                 role: Role::Standby,
                 tick: Tick::ZERO,
                 last_scan_age_ms: None,
+                build: None,
             })
             .unwrap(),
             r#"{"live":true,"role":"standby","tick":0,"last_scan_age_ms":null}"#

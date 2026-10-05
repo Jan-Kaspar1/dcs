@@ -133,6 +133,14 @@ pub struct IoHealth {
     /// ordinary [`failed_reads`](Self::failed_reads) failure. Always `0`
     /// for a non-cyclic driver; absent from snapshots serialized before
     /// the cyclic contract existed.
+    ///
+    /// On a fan-out over several cyclic buses this counts the fan-out's
+    /// own boundary — one per failed scan-level `exchange` call — while
+    /// each bus's own boundary is counted once in
+    /// [`ExchangeDiagnostics::buses`](crate::ExchangeDiagnostics) as that
+    /// bus's `failed_exchanges`. A scan in which two buses failed reads
+    /// `1` here and `1` in each bus row: one count per failed exchange,
+    /// never a second count of the same one.
     #[serde(default)]
     pub failed_exchanges: u64,
     /// Driver-boundary operations that have failed in a row: every
@@ -677,6 +685,7 @@ mod tests {
                         working_counter_mismatches: 1,
                         last_exchange_tick: Some(Tick(2)),
                         missed_deadlines: 1,
+                        buses: Vec::new(),
                     }),
                 }),
             },

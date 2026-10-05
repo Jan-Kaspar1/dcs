@@ -511,8 +511,17 @@ unique across the directory — runs each leg twice requiring identical
 digests, then exercises its declared tampers. The legs share the
 launch/settle/restore harness consolidated under #647 —
 `ci/legs/pair.py`'s `launch_pair`/`PairRig`, itself the stage's first
-leg — and each leg restores the pair's launch roles for the next. A
-leg's diagnostic stem is its file name with underscores turned to
+leg — and each leg restores the pair's launch roles for the next. The
+injected field-fault leg (`ci/legs/field_fault.py`) is the
+consumer-pair mirror of the QA rig's field-fault leg: it drives a
+declared field input through a quality fault the active's monitor must
+serve as substituted rather than silently `Good`, and through a
+disconnected-class fault whose boundary failure must surface on
+`io_health`'s counters with its tick and direction while the scan
+continues and no role moves — then clears both and reads the recovery
+on both peers' durable records, so the honest-degradation contract
+WW-OPS-003 asks of is proven on this pair rather than only on the rig.
+A leg's diagnostic stem is its file name with underscores turned to
 dashes: a violated contract fails `<stem>-failed`, two passes
 producing different digests fail `<stem>-nondeterministic`, and a
 doctored case passing silently or missing its named evidence fails
