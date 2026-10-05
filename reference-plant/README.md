@@ -518,6 +518,33 @@ newer command. Adding a leg is exactly one new file under
 document; the leg set and each leg's contract prose live in the
 directory and its docstrings.
 
+Two legs stage what the pair loses rather than what it switches.
+`ci/legs/standby_loss.py` stops the tracking standby's process on the
+declared deployment and watches the controller of record: a receipted
+write aimed at the *tracking* standby answers the named `not_active`
+admission refusal with no field effect and no journaled command on the
+field owner; across the whole down window the field owner keeps
+scanning, keeps its `active` role, keeps settling receipted commands,
+and journals no promotion or demotion of its own — peer loss is not an
+event it reacts to. The standby then relaunches onto the manifest's
+declared wiring and persistence, rejoins `standby`/`unsynchronized`,
+reconverges to `tracking` inside the leg's declared window, and a
+`POST /promote` fired at its monitor before that first transfer
+completes is refused with the named `not_converged` verdict.
+`ci/legs/plant_loss.py` stops the spawned `dcs-plant-server` instead:
+the field owner keeps scanning with degraded-but-serving telemetry —
+`io_health` counting the per-direction failures on both sides, the
+driver link reporting `disconnected` with a named `last_error`, and the
+field's own reads re-marked down at that link boundary — while the
+declared standby never promotes on a field outage. The respawned
+plant returns **fail closed**: third-party mutation probes answer the
+named `unclaimed` refusal, never `stepped` and never a silent write,
+until the recorded owner's bounded re-attach re-arms the claim through
+`ensure_writer`; the probes then answer `fenced` naming that same
+token, the field's `Good` reads recover, and the outage's counted
+failures are still counted rather than silently reset — with no
+controller restarted anywhere in the episode.
+
 One leg in particular is about this pair's operator console rather than
 its control behaviour: `ci/legs/responsiveness.py` holds the field
 owner's checkpoint source unreachable and drives a `POST /scan` batch

@@ -318,7 +318,7 @@ class RepromoteSuspendedSettleTests(unittest.TestCase):
         self.assertEqual(
             order.index(scenarios.scenario_settled_receipt_arbitration)
             + 1,
-            order.index(scenarios.scenario_command_across_promotion))
+            order.index(scenarios.scenario_adopted_receipt_regression))
         self.assertEqual(
             order.index(
                 scenarios.scenario_command_across_promotion) + 1,

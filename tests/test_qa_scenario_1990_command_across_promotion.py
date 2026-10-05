@@ -1,4 +1,4 @@
-"""The 1980_command_across_promotion leg's scenario unit coverage — the
+"""The 1990_command_across_promotion leg's scenario unit coverage — the
 feed fakes and TestCase classes for scenario_command_across_promotion,
 split per the one-module-per-leg convention (#940). The shared fakes and helpers live in
 tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
@@ -302,10 +302,10 @@ class CommandAcrossPromotionTests(unittest.TestCase):
         # settled-receipt-arbitration legs, ahead of the peer-announce
         # case and the tune case's a->b switch.
         self.assertEqual(
-            order.index(scenarios.scenario_settled_receipt_arbitration)
+            order.index(scenarios.scenario_receipt_index_collision)
             + 1,
             order.index(
-                scenarios.scenario_command_across_promotion))
+                scenarios.scenario_adopted_receipt_regression))
         self.assertEqual(
             order.index(
                 scenarios.scenario_command_across_promotion) + 1,

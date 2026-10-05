@@ -447,13 +447,19 @@ class SettledReceiptArbitrationTests(unittest.TestCase):
             + 1,
             order.index(
                 scenarios.scenario_settled_receipt_arbitration))
+        # The two receipt-window contracts behind it — the adopted
+        # stale-view regression and the collided submission index —
+        # run in the same launch-layout window and clear onto the
+        # peer-announce case with the entry roles restored.
         self.assertEqual(
             order.index(scenarios.scenario_settled_receipt_arbitration)
             + 1,
+            order.index(scenarios.scenario_adopted_receipt_regression))
+        self.assertEqual(
+            order.index(scenarios.scenario_receipt_index_collision) + 1,
             order.index(scenarios.scenario_command_across_promotion))
         self.assertEqual(
-            order.index(scenarios.scenario_command_across_promotion)
-            + 1,
+            order.index(scenarios.scenario_command_across_promotion) + 1,
             order.index(scenarios.scenario_peer_announce))
         self.assertIs(
             verify.case_function('settled-receipt-arbitration'),
