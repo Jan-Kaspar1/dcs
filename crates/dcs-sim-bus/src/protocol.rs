@@ -125,9 +125,11 @@ pub enum BusRequest {
     ListRegisters,
     /// Advances the device's logical tick by one — the explicit
     /// simulation step — stepping any declared dynamics by `dt` time
-    /// units. `dt` must be finite and non-negative; a step carrying
-    /// one that is not is refused with
-    /// [`BusError::InvalidRequest`].
+    /// units. `dt` must be finite, non-negative, and at most
+    /// [`dcs_sim::MAX_STEP_DT`](dcs_sim::MAX_STEP_DT) — the bound the
+    /// plant protocol's `step` applies, because the bank is a
+    /// `SimDriver` keyed by register; a step carrying any other `dt`
+    /// is refused with [`BusError::InvalidRequest`].
     Step {
         /// The simulated time this step advances the declared dynamics
         /// by — the same caller-supplied time base the plant
@@ -481,8 +483,10 @@ pub enum BusError {
         found: Value,
     },
     /// The request itself could not be served: a frame that does not
-    /// decode as a [`BusRequest`]. `detail` is human-readable
-    /// diagnostics, not a machine contract.
+    /// decode as a [`BusRequest`], or a [`BusRequest::Step`] whose `dt`
+    /// is negative, non-finite, or above
+    /// [`dcs_sim::MAX_STEP_DT`](dcs_sim::MAX_STEP_DT). `detail` is
+    /// human-readable diagnostics, not a machine contract.
     InvalidRequest {
         /// Why the request was refused.
         detail: String,
