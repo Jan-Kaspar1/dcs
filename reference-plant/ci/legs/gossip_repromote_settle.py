@@ -911,11 +911,15 @@ def main():
         )
     except Inconclusive as inconclusive:
         if args.tamper is not None:
+            declared = next(
+                tamper
+                for tamper in LEG["tampers"]
+                if tamper["name"] == args.tamper
+            )
             eprint(
-                "gossip-repromote-settle: the doctored "
-                f"{args.tamper} case wants a defect shape an "
-                "inconclusive run never reached — it offers the case "
-                "no evidence"
+                f"gossip-repromote-settle: {declared['evidence'][0]} — "
+                "an inconclusive run offers the doctored case no "
+                "evidence"
             )
             return 1
         eprint(f"gossip-repromote-settle: inconclusive — {inconclusive}")
