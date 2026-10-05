@@ -2036,6 +2036,28 @@ def start_controller(run_id, name, timeline, pair='deployed'):
     timeline('controller-started', container + ' running')
 
 
+def signal_controller(run_id, name, timeline, pair='deployed',
+                      signal='SIGTERM'):
+    """The signal half of the lifecycle action, alone: `docker kill
+    --signal=` on one of the run's controller containers — the seam
+    the graceful-shutdown case uses to deliver SIGTERM without the
+    SIGKILL a `docker stop` follows up with, so the process's own
+    shutdown path (scan-boundary stop, checkpoint flush, claim
+    release) is what the leg observes. The container stays put —
+    exited, not removed — so the case relaunches it with
+    `start_controller` onto the same mounts. `signal` names the
+    delivered signal (SIGTERM for the graceful path, a second one for
+    the prompt-exit path). Recorded on the run's action timeline; a
+    docker failure raises so the induction is reported as never
+    completed.
+    """
+    container = _controller_container(run_id, name, pair)
+    timeline('controller-signal',
+             'docker kill --signal=' + signal + ' ' + container)
+    docker('kill', '--signal=' + signal, container, timeout=30)
+    timeline('controller-signaled', container + ' signaled ' + signal)
+
+
 # The `docker logs --tail` bound the shared-state-file leg's exit read
 # uses, the same accounting BORN_LOG_TAIL states for the born seats: a
 # refusal the runtime reports on its own line is short, but a revision
@@ -3863,6 +3885,12 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
             run_id, name, timeline),
         'start_controller': lambda name: start_controller(
             run_id, name, timeline),
+        # The signal-only lifecycle action — `docker kill --signal=`
+        # with no SIGKILL follow-up — the graceful-shutdown case's
+        # delivery of SIGTERM (and of the second, prompt-exit signal)
+        # to the field-owning controller's container.
+        'signal_controller': lambda name, signal='SIGTERM': signal_controller(
+            run_id, name, timeline, signal=signal),
         # The member's process verdict — running/exit/log tail — the
         # read-only half the shared-state-file leg's refused launch
         # reports through once its container is down.
@@ -4128,6 +4156,8 @@ def _probe_ctx(ctx, cfg, record, src, run_dir, probe, mounts,
             run_id, name, timeline, pair='probe'),
         'start_controller': lambda name: start_controller(
             run_id, name, timeline, pair='probe'),
+        'signal_controller': lambda name, signal='SIGTERM': signal_controller(
+            run_id, name, timeline, pair='probe', signal=signal),
         'controller_state': lambda name: controller_state(
             run_id, name, pair='probe'),
         'pause_controller': lambda name: pause_controller(

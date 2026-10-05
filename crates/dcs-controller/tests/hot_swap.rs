@@ -24,7 +24,7 @@
 
 use dcs_core::{
     Command, CommandError, CommandOutcome, IoDriver, IoError, JournalEvent, PointId, Quality,
-    QualityReason, Role, StandbySync, SwitchError, Value, ValueKind,
+    QualityReason, Role, StandbySync, SwitchError, Tick, Value, ValueKind,
 };
 use dcs_monitor::MonitorClient;
 use dcs_sim_net::RemoteDriver;
@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 mod support;
 
 use support::{
-    SimTcp, controller_model, image_value, kill, reachable, spawn_controller,
+    Relay, SimTcp, controller_model, image_value, kill, reachable, spawn_controller,
     spawn_controller_paced, spawn_plant,
 };
 /// The shared plant's model — the dcs-plant tank loop: level raw (10)
@@ -506,6 +506,248 @@ fn a_demoted_peers_reconvergence_journals_no_source_restart() {
             .iter()
             .all(|entry| !matches!(entry.event, JournalEvent::SourceRestarted { .. })),
         "the demoted peer's journal must carry no source_restarted: {journal:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The consolidated regression for QA finding
+/// `source-restarted-journaled-on-demote-track` — one driven pair run
+/// spanning the whole clause rather than one transition: an
+/// uninterrupted same-generation checkpoint stream must journal
+/// **no** `source_restarted` across an orderly demote/promote cycle
+/// and the repeated tracking applies that follow it, first-pull lag
+/// and mid-tracking one-tick regressions included.
+///
+/// Three properties are read off the run, and none of them is the
+/// single-transition check the finding's original reproduction made:
+///
+/// - **the journal half** — after a demote/promote cycle and a
+///   fail-back, *neither* peer's durable record carries a
+///   `source_restarted`: every demotion clears the alignment its own
+///   next regression heuristic stood on, so each peer's first pull
+///   back onto its uninterrupted successor regresses in tick while
+///   naming the generation that peer's own captures stamped.
+/// - **the served-stream half** — the `stream_tick` each peer serves
+///   (defaulting to its own run tick where it declares no lead) never
+///   regresses across the cycle. A tracking run realigning its local
+///   tick onto a lagging stream must land at the run's own clock, so
+///   the served line the next peer pulls stays monotone; a realign
+///   that rewound the served position would hand the pair's successor
+///   a stream its predecessor had already published.
+/// - **the retained detection half** — the peer that pulls a
+///   genuinely cold-restarted source still takes exactly one
+///   `source_restarted`, carrying its `resumed_at` evidence. The
+///   suppression is scoped to the same generation and proves nothing
+///   if it also silences the boundary it exists to preserve.
+///
+/// The cold restart drops the tracked source's `--state-file` so the
+/// fresh process mints a new generation and serves a regressed stream
+/// — the harness has no container seam here, so the process is killed
+/// and relaunched the way `failover.rs`'s restart legs do it.
+#[test]
+fn an_orderly_switch_cycle_journals_no_source_restart_and_keeps_the_stream_monotone() {
+    let dir = std::env::temp_dir().join(format!("dcs-switch-cycle-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let pair_model = controller_model(
+        &dir,
+        "pair.json",
+        MODEL_SOURCE,
+        pair_plant.addr,
+        SimTcp::PerDevice,
+    )
+    .0;
+
+    let field = RemoteDriver::connect(pair_plant.addr).unwrap();
+    field.ensure_writer(SEED).unwrap();
+    field.write(SETPOINT, Value::Float(50.0)).unwrap();
+    field.release_writer().unwrap();
+
+    // The pair's launch shape: the field owner names no peer, the
+    // standby tracks it by `--standby` and announces its own monitor
+    // on every pull, so a demoted owner always has a successor to
+    // follow. `--state-file` gives the owner the declared persistence
+    // the cold-restart leg below drops; the tracking peer's configured
+    // source is the relay, so it keeps reaching the stream across the
+    // respawn's fresh ephemeral port.
+    let state_a = dir.join("state-a.json");
+    let mut active_process = spawn_controller(
+        &pair_model,
+        &["--state-file".to_string(), state_a.display().to_string()],
+        DT,
+    );
+    let relay = Relay::forwarding(active_process.addr);
+    let standby_process = spawn_controller(
+        &pair_model,
+        &["--standby".to_string(), relay.addr.to_string()],
+        DT,
+    );
+    let active = MonitorClient::new(active_process.addr);
+    let standby = MonitorClient::new(standby_process.addr);
+
+    // The served stream position each peer publishes, recorded per
+    // observation — `stream_tick` where the run carries a lead over
+    // the tracked line, its own run tick where it declares none.
+    fn stream_position(client: &MonitorClient) -> Tick {
+        let checkpoint = client.checkpoint().unwrap();
+        checkpoint.stream_tick.unwrap_or(checkpoint.tick)
+    }
+
+    let mut served: Vec<Tick> = Vec::new();
+
+    // One orderly cycle: the owner runs a scan past what the peer last
+    // pulled — the lead the demoted run holds over its successor's
+    // stream — demotes, the successor promotes, then both peers apply
+    // repeatedly while the successor leads by one scan at a time, the
+    // mid-tracking one-tick regression the second clause names.
+    let cycle = |owner: &MonitorClient, peer: &MonitorClient, served: &mut Vec<Tick>| {
+        owner.advance(1).unwrap();
+        owner.demote().unwrap();
+        owner.advance(1).unwrap();
+        peer.promote().unwrap();
+        peer.advance(1).unwrap();
+        for _ in 0..4 {
+            peer.advance(1).unwrap();
+            owner.advance(1).unwrap();
+        }
+        served.push(stream_position(peer));
+        served.push(stream_position(owner));
+    };
+
+    for _ in 0..5 {
+        standby.advance(1).unwrap();
+        active.advance(1).unwrap();
+    }
+    assert!(
+        matches!(
+            standby.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ),
+        "the standby never converged"
+    );
+    served.push(stream_position(&standby));
+    served.push(stream_position(&active));
+
+    cycle(&active, &standby, &mut served);
+    // The fail-back: the same shape with the roles exchanged, so each
+    // peer's own demotion clears its own alignment at least once.
+    cycle(&standby, &active, &mut served);
+
+    // The fail-back restores the pair's launch roles: the first-launched
+    // owner active again, the second tracking it — each peer having been
+    // demoted once and promoted once, so each cleared its own alignment
+    // and pulled its own successor's regressed stream.
+    let restored = active.role().unwrap();
+    assert_eq!(restored.role, Role::Active, "{restored:?}");
+    let tracking = standby.role().unwrap();
+    assert_eq!(tracking.role, Role::Standby, "{tracking:?}");
+    assert!(
+        matches!(tracking.sync, Some(StandbySync::Tracking { .. })),
+        "the tracking peer must reconverge across the fail-back: {tracking:?}"
+    );
+
+    for (name, client) in [("demoted", &standby), ("promoted", &active)] {
+        let journal = client.journal(0).unwrap();
+        assert!(
+            journal
+                .iter()
+                .all(|entry| !matches!(entry.event, JournalEvent::SourceRestarted { .. })),
+            "an uninterrupted same-generation stream must journal no \
+             source_restarted; the {name} peer recorded one: {journal:?}"
+        );
+    }
+
+    // The served stream each peer published across both cycles never
+    // regressed — the pair's line advanced while the tracking run
+    // realigned its local tick underneath it.
+    assert!(
+        served.windows(2).all(|pair| pair[0] <= pair[1]),
+        "the served checkpoint stream went non-monotone across the \
+         switch cycle: {served:?}"
+    );
+
+    // The retained detection half: the tracked source cold-restarts —
+    // its state file dropped, a fresh process minting a new generation
+    // and serving a regressed stream — and the tracking peer journals
+    // exactly one `source_restarted` carrying the evidence. The
+    // suppression above is scoped to the same generation; it must not
+    // silence the boundary it exists to preserve.
+    let aligned_before = match standby.role().unwrap().sync {
+        Some(StandbySync::Tracking { aligned }) => aligned,
+        other => panic!("the tracking peer never converged: {other:?}"),
+    };
+    // The cold restart binds a fresh ephemeral port, so the tracking
+    // peer's configured `--standby` reaches the respawned source
+    // through the relay the pair was launched onto — the same seam
+    // `failover.rs`'s restart legs stage their retarget on. The killed
+    // owner's field claim stands until the plant reaps its dead
+    // attachment, and the respawned process is launched with no
+    // `--state-file` at all: nothing to resume, a fresh generation.
+    kill(&mut active_process);
+    let _ = std::fs::remove_file(&state_a);
+    let _ = std::fs::remove_file(dir.join("state-a.json.lock"));
+    let reap = RemoteDriver::connect(pair_plant.addr).unwrap();
+    let reap_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match reap.claim_writer_unless_held(0xf00d) {
+            Ok(_) => break,
+            Err(dcs_sim_net::RemoteError::Fenced) => {
+                assert!(
+                    std::time::Instant::now() < reap_deadline,
+                    "the dead owner's field claim was never reaped"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => panic!("the conditional reap probe failed: {error}"),
+        }
+    }
+    reap.release_writer().unwrap();
+    let source = spawn_controller(&pair_model, &[], DT);
+    relay.retarget(source.addr);
+    let restarted = MonitorClient::new(source.addr);
+    for _ in 0..6 {
+        standby.advance(1).unwrap();
+        restarted.advance(1).unwrap();
+    }
+    let settled = standby.role().unwrap();
+    assert_eq!(settled.role, Role::Standby, "{settled:?}");
+    assert!(
+        matches!(settled.sync, Some(StandbySync::Tracking { .. })),
+        "the tracking peer must reconverge onto the restarted \
+         generation: {settled:?}"
+    );
+    let restarts: Vec<_> = standby
+        .journal(0)
+        .unwrap()
+        .into_iter()
+        .filter(|entry| matches!(entry.event, JournalEvent::SourceRestarted { .. }))
+        .collect();
+    assert_eq!(
+        restarts.len(),
+        1,
+        "a genuinely cold-restarted source must journal exactly one \
+         source_restarted on its tracking peer: {restarts:?}"
+    );
+    let JournalEvent::SourceRestarted {
+        was_aligned,
+        resumed_at,
+        ..
+    } = restarts[0].event
+    else {
+        unreachable!("the filter admitted only source_restarted entries")
+    };
+    assert_eq!(
+        was_aligned,
+        Some(aligned_before),
+        "the journaled restart must name the alignment its regression \
+         broke: {restarts:?}"
+    );
+    assert!(
+        resumed_at < aligned_before,
+        "the journaled restart must name the resumed stream tick below \
+         the alignment it broke: {restarts:?}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

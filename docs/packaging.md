@@ -119,6 +119,31 @@ freshness, its own attempted/succeeded/failed/short/late counters, and its last
 failure. Physical acceptance is the Lenovo QA lane's work
 (`docs/lenovo-hardware-qa-plan.md`); none of this establishes it.
 
+### Graceful shutdown
+
+SIGTERM or SIGINT stops the controller at a scan boundary within ten
+seconds — the pacing sleep is interruption-sliced, so a long scan
+period never delays the stop — then flushes the latest checkpoint to
+`--state-file` where configured (waiting at most five seconds for the
+sink's writer), releases the held plant write claim on the way out so
+a successor is never fenced by the dead claim, and exits 0. Only a
+failure exits nonzero, naming the reason. A second signal forces
+prompt exit with status 128+signo (143 for SIGTERM, 130 for SIGINT),
+skipping the flush and the release — the escape hatch a stalled
+sink's flush wait must not close. Runs without `--state-file` skip
+the flush; peers holding no field claim skip the release. The same
+contract is recorded on the binary's own `--help` text, so the image
+and the process agree:
+
+```sh
+docker kill --signal=SIGTERM ctrl-a
+```
+
+stops the field-owning peer gracefully — the surviving peer promotes
+(or a restarted container resumes the flushed checkpoint) without
+meeting the dead claim — while a plain `docker stop` (SIGTERM
+followed by SIGKILL) keeps its configured grace for the same path.
+
 ### Rolling a revised model
 
 The no-interruption path is the pair roll: start a third container as
