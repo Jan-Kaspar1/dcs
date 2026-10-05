@@ -151,12 +151,15 @@
 
 #![warn(missing_docs)]
 
+pub mod aeration;
 mod builder;
 pub mod dosing;
 pub mod dynamics;
 mod endpoint;
 pub mod ethercat;
+pub mod filter_bank;
 pub mod ijmuiden;
+pub mod library_plant;
 mod spec;
 pub mod specs;
 pub mod station;

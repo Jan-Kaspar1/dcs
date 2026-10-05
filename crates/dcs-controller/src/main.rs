@@ -7,7 +7,8 @@
 //! Usage: `dcs-controller <model-file> [--check] [--ticks N]
 //!         [--scan-ms MS] [--dt T] [--listen ADDR] [--standby ADDR]
 //!         [--remote ADDR] [--driven] [--auto-promote N]
-//!         [--owner-token N] [--state-file PATH] [--journal-file PATH]`
+//!         [--owner-token N] [--state-file PATH] [--journal-file PATH]
+//!         [--journal-capacity N]`
 //!
 //! `--check` is the engineering compile-check: the model is loaded,
 //! validated, and assembled through the standard registries — device
@@ -1120,6 +1121,12 @@ struct Options {
     /// restart. Requires `--listen`: the journal's recorder lives in
     /// the monitor.
     journal_file: Option<PathBuf>,
+    /// The journal's served-window and append-queue bound — the two
+    /// capacities `--journal-capacity` sizes together. A plant whose
+    /// own cold start journals more records than the default carries
+    /// declares its scale here; the bound is still a hard bound, only
+    /// one the plant's engineering data sizes.
+    journal_capacity: Option<usize>,
     /// Persist the durable process history to this append-only file
     /// and replay it at startup — the declared-`record` points'
     /// samples, run-boundary markers, and tick-domain seams surviving
@@ -1322,6 +1329,16 @@ controller scan.
                   controllers at one journal file. Requires --listen.
                   PATH must be distinct from --state-file, its .lock
                   writer-lock sidecar, and --history-file
+  --journal-capacity N
+                  size the transition journal's served window and its
+                  append queue, the default 1024 entries each. The
+                  served window answers GET /journal and the append
+                  queue bounds the --journal-file writer's handoff: a
+                  run whose own cold start journals more records than
+                  the bound carries would refuse a record rather than
+                  lose one unaccounted, so a plant larger than the
+                  default scale declares its own here. N must be
+                  non-zero
   --history-file PATH
                   persist the durable process history to PATH — the
                   declared-record points' samples, run-boundary
@@ -1364,6 +1381,7 @@ impl Options {
         let mut revised = false;
         let mut state_file = None;
         let mut journal_file = None;
+        let mut journal_capacity = None;
         let mut history_file = None;
         let mut owner_token = None;
         let mut pair_token = None;
@@ -1413,6 +1431,15 @@ impl Options {
                 "--state-file" => state_file = Some(PathBuf::from(value("--state-file")?)),
                 "--journal-file" => {
                     journal_file = Some(PathBuf::from(value("--journal-file")?));
+                }
+                "--journal-capacity" => {
+                    journal_capacity = Some(
+                        value("--journal-capacity")?
+                            .parse::<usize>()
+                            .map_err(|error| {
+                                format!("invalid --journal-capacity value: {error}")
+                            })?,
+                    );
                 }
                 "--history-file" => {
                     history_file = Some(PathBuf::from(value("--history-file")?));
@@ -1516,6 +1543,9 @@ impl Options {
         }
         if auto_promote == Some(0) {
             return Err("--auto-promote must be at least one missed pull".to_string());
+        }
+        if journal_capacity == Some(0) {
+            return Err("--journal-capacity must be at least one entry".to_string());
         }
         if revised && standby.is_none() && state_file.is_none() {
             return Err(
@@ -1681,6 +1711,7 @@ impl Options {
             revised,
             state_file,
             journal_file,
+            journal_capacity,
             history_file,
             owner_token,
             pair_token,
@@ -2681,6 +2712,17 @@ fn main() -> ExitCode {
     // never hold the lock on the file's I/O.
     let monitor_config = || MonitorConfig {
         journal_file: options.journal_file.clone(),
+        // A plant larger than the default scale declares its journal's
+        // served window and append queue together: one cold start at
+        // the composed library's size journals more records than the
+        // default carries, and the run must refuse a record rather
+        // than lose one unaccounted.
+        journal_capacity: options
+            .journal_capacity
+            .unwrap_or(MonitorConfig::default().journal_capacity),
+        journal_drain_capacity: options
+            .journal_capacity
+            .unwrap_or(MonitorConfig::default().journal_drain_capacity),
         history_file: options.history_file.clone(),
         state_file: options.state_file.clone(),
         // The run already holds the checkpoint's single-writer claim
@@ -3937,6 +3979,59 @@ mod tests {
                 panic!("{flag} {target} against --listen {listen} must parse: {error}");
             }
         }
+    }
+
+    /// Decision 112's declared-magnitude seam: a plant whose own cold
+    /// start journals more records than the default bound carries names
+    /// its own bound through `--journal-capacity`, and the run refuses
+    /// only the incoherent value. A zero bound would silently drop every
+    /// record — the loss decision 112 exists to keep impossible — so it
+    /// is refused at parse beside every other numeric option's rule, and
+    /// a non-numeric spelling names the flag rather than defaulting.
+    #[test]
+    fn the_journal_capacity_is_parsed_declared_and_refuses_zero() {
+        let base = [
+            "model.json".to_string(),
+            "--scan-ms".to_string(),
+            "100".to_string(),
+            "--listen".to_string(),
+            "127.0.0.1:0".to_string(),
+        ];
+        let parse = |value: &str| {
+            Options::parse(
+                base.iter()
+                    .cloned()
+                    .chain(["--journal-capacity".to_string(), value.to_string()]),
+            )
+        };
+
+        // A declared bound is carried through as written.
+        for value in ["1", "1840", "65536"] {
+            let options = match parse(value) {
+                Ok(options) => options,
+                Err(error) => panic!("--journal-capacity {value} must parse: {error}"),
+            };
+            assert_eq!(options.journal_capacity, Some(value.parse().unwrap()));
+        }
+
+        // The flag's own spelling: it is what an operator reads, so the
+        // refusal names it rather than a generic parse failure.
+        for value in ["0", "nope", "-1", ""] {
+            let error = match parse(value) {
+                Ok(_) => panic!("--journal-capacity {value:?} must fail parsing"),
+                Err(error) => error,
+            };
+            assert!(
+                error.contains("--journal-capacity"),
+                "--journal-capacity {value:?}: {error}"
+            );
+        }
+
+        // Absent, the option names no bound at all — the run takes both
+        // capacities from `MonitorConfig::default()`, which is the
+        // platform default no plant has to declare.
+        let options = Options::parse(base.iter().cloned()).unwrap();
+        assert_eq!(options.journal_capacity, None);
     }
 
     /// Finding `huge-step-dt-poisons-plant-state`: a scan period is

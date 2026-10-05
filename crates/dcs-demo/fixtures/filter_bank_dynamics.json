@@ -1,0 +1,263 @@
+[
+  {
+    "bool_flow": {
+      "input": 45,
+      "output": 25,
+      "on_rate": -0.3,
+      "off_rate": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        24,
+        25
+      ],
+      "output": 26,
+      "bias": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "integrator": {
+      "input": 26,
+      "output": 23,
+      "initial": 1.2
+    }
+  },
+  {
+    "threshold": {
+      "input": 23,
+      "output": 38,
+      "on": 0.08,
+      "off": 0.1,
+      "initial": false
+    }
+  },
+  {
+    "bool_flow": {
+      "input": 38,
+      "output": 27,
+      "on_rate": 1.0,
+      "off_rate": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "integrator": {
+      "input": 24,
+      "output": 28,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 28,
+      "output": 29,
+      "gain": 1.8,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 46,
+      "output": 30,
+      "gain": -0.0008,
+      "initial": 0.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        29,
+        30
+      ],
+      "output": 20,
+      "bias": 0.05,
+      "initial": 0.05
+    }
+  },
+  {
+    "first_order_lag": {
+      "input": 22,
+      "output": 21,
+      "time_constant": 0.6,
+      "initial": 0.05
+    }
+  },
+  {
+    "bool_flow": {
+      "input": 109,
+      "output": 89,
+      "on_rate": -0.3,
+      "off_rate": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        88,
+        89
+      ],
+      "output": 90,
+      "bias": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "integrator": {
+      "input": 90,
+      "output": 87,
+      "initial": 1.2
+    }
+  },
+  {
+    "threshold": {
+      "input": 87,
+      "output": 102,
+      "on": 0.08,
+      "off": 0.1,
+      "initial": false
+    }
+  },
+  {
+    "bool_flow": {
+      "input": 102,
+      "output": 91,
+      "on_rate": 1.0,
+      "off_rate": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "integrator": {
+      "input": 88,
+      "output": 92,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 92,
+      "output": 93,
+      "gain": 1.8,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 110,
+      "output": 94,
+      "gain": -0.0008,
+      "initial": 0.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        93,
+        94
+      ],
+      "output": 84,
+      "bias": 0.05,
+      "initial": 0.05
+    }
+  },
+  {
+    "first_order_lag": {
+      "input": 86,
+      "output": 85,
+      "time_constant": 0.6,
+      "initial": 0.05
+    }
+  },
+  {
+    "bool_flow": {
+      "input": 173,
+      "output": 153,
+      "on_rate": -0.3,
+      "off_rate": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        152,
+        153
+      ],
+      "output": 154,
+      "bias": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "integrator": {
+      "input": 154,
+      "output": 151,
+      "initial": 1.2
+    }
+  },
+  {
+    "threshold": {
+      "input": 151,
+      "output": 166,
+      "on": 0.08,
+      "off": 0.1,
+      "initial": false
+    }
+  },
+  {
+    "bool_flow": {
+      "input": 166,
+      "output": 155,
+      "on_rate": 1.0,
+      "off_rate": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "integrator": {
+      "input": 152,
+      "output": 156,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 156,
+      "output": 157,
+      "gain": 1.8,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 174,
+      "output": 158,
+      "gain": -0.0008,
+      "initial": 0.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        157,
+        158
+      ],
+      "output": 148,
+      "bias": 0.05,
+      "initial": 0.05
+    }
+  },
+  {
+    "first_order_lag": {
+      "input": 150,
+      "output": 149,
+      "time_constant": 0.6,
+      "initial": 0.05
+    }
+  }
+]
