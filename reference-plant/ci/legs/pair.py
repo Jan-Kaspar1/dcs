@@ -719,7 +719,7 @@ class PairRig:
 
 
 def launch_pair(args, manifest, tamper=None, auto_promote=None,
-                declared_binds=False, controller=None):
+                declared_binds=False, controller=None, persistence=True):
     """Resolve the declared standby pair and launch it on the released
     tooling — the bring-up the pair-stage legs share: each
     controller's declared persistence instantiated under a
@@ -733,7 +733,9 @@ def launch_pair(args, manifest, tamper=None, auto_promote=None,
     spawn's startup refusal reported through `Abort`. `manifest` is
     the manifest path or `manifest_pair`'s resolved `(manifest, duty,
     standby)` — callers resolving it themselves keep their own
-    no-pair wording. `auto_promote`, when given, arms the spawned
+    no-pair wording. `persistence=False` omits the optional file sinks
+    for a leg isolating the unpaced HTTP work bound; all other legs
+    instantiate the declared files. `auto_promote`, when given, arms the spawned
     standby's `--auto-promote` flag — the manifest's declared
     `failover_budget` carried to the invocation. `declared_binds`,
     when true, binds each controller's `--listen` on its declared
@@ -756,6 +758,14 @@ def launch_pair(args, manifest, tamper=None, auto_promote=None,
         )
     binary = controller or args.controller
     rig = PairRig(declared)
+    # Persistence is normally the manifest's declared deployment.
+    # A leg exercising an unpaced HTTP batch can opt out: its producer
+    # deliberately outruns the bounded persistence queues, whose fatal
+    # overflow contract is independent of the batch's cancellation bound.
+    # The durability, restart, and normal pair legs keep the default.
+    if not persistence:
+        rig.duty_files = dict.fromkeys(rig.duty_files)
+        rig.standby_files = dict.fromkeys(rig.standby_files)
     try:
         rig.plant, rig.plant_addr = spawn_plant(
             args.plant_server, args.model, args.dynamics
