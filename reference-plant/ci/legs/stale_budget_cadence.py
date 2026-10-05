@@ -464,6 +464,11 @@ def stale_budget_cadence_pass(args, tamper):
         ).get("tick")
         for _ in range(WINDOW_ROUNDS):
             http(f"{duty_url}/scan", {"scans": 1}, "POST /scan")
+            # Keep the control arm at the owner's demonstrated cadence.
+            # Parking it here lets checkpoint adoption jump its clock
+            # and teach the freshness sampler a longer arrival period;
+            # the later six-tick freeze may then legally stay Good.
+            http(f"{control_url}/scan", {"scans": 1}, "POST /scan")
             for _ in range(CADENCE_RATIO):
                 http(f"{subject_url}/scan", {"scans": 1}, "POST /scan")
         owner_now = http(f"{duty_url}/role", None, "GET /role").get("tick")
