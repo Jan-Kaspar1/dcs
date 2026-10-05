@@ -17,7 +17,10 @@
 //! the lockfile regenerated to follow it named `lockfile-stale`
 //! against the release record's `Commit` field — a tag query the
 //! remote cannot answer refused rather than read as the tag's
-//! absence — `cargo fetch
+//! absence, and every spelling Cargo resolves afresh in `rev =` — a
+//! branch name, a short sha, a tag name — held to the revision the
+//! remote serves under that name rather than admitted uncompared —
+//! `cargo fetch
 //! --locked` resolving without a
 //! re-resolve,
 //! byte-identical emit against the checked-in artifacts,
@@ -622,6 +625,50 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
     assert!(
         stdout.contains("a lockfile recording a release crate twice refused"),
         "the lockfile stage's duplicate-record doctored cases were not refused:\n{stdout}"
+    );
+    // The movable-pin half, the reported defect
+    // (`lockfile-leg-rev-compare-skipped-for-non-full-sha`): every
+    // spelling Cargo resolves afresh in `rev =` — the branch name, an
+    // abbreviated sha, a tag name — is compared against what the
+    // remote serves under that name, so a lockfile recording a
+    // revision its pin has moved past is refused, and the same
+    // spelling recording the revision the pin does name is accepted.
+    // A leg refusing every movable pin would pass the refusal half, so
+    // the accepted half is asserted beside it. Read the stage's own
+    // section — the upgrade stage re-runs the whole pipeline, and its
+    // repinned pass repeats the evidence.
+    let lock_stage = stdout
+        .split("== lockfile ==")
+        .nth(1)
+        .and_then(|tail| tail.split("== resolve ==").next())
+        .unwrap_or_else(|| panic!("the lockfile stage did not run:\n{stdout}"));
+    let movable: Vec<&str> = lock_stage
+        .lines()
+        .filter(|line| line.contains("a `rev = "))
+        .collect();
+    assert_eq!(
+        movable.len(),
+        6,
+        "the lockfile stage did not check every movable `rev` spelling, twice each:\n\
+         {lock_stage}"
+    );
+    assert_eq!(
+        movable
+            .iter()
+            .filter(|line| line.contains("refused: lockfile-stale"))
+            .count(),
+        3,
+        "the lockfile stage did not refuse every movable pin recording a revision its \
+         pin has moved past:\n{lock_stage}"
+    );
+    assert_eq!(
+        movable
+            .iter()
+            .filter(|line| line.contains("recording the revision the pin names accepted"))
+            .count(),
+        3,
+        "the lockfile stage refused a movable `rev` pin recording the revision it names:\n\
+         {lock_stage}"
     );
     let lock_line = stdout
         .lines()
