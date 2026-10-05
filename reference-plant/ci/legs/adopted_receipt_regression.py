@@ -117,7 +117,14 @@ import takeover
 # closed — must surface the named diagnostic on the honest terminal
 # record.
 LEG = {
-    "order": 605,
+    # 612 rather than the 605 slot the position was first drafted
+    # against: main's phantom-source-restart leg landed at 605 and pins
+    # tracker-realign and foreign-claim-release as its recorded
+    # neighbours, so no leg may sort between that pair. This leg takes
+    # the free slot above foreign-claim-release, beside its sibling
+    # collision leg, and clear of the pair stage's refusal of two legs
+    # at one order.
+    "order": 612,
     "title": "the adopted-receipt-regression leg",
     "passes": "adopted-receipt-regression",
     "failed": "receipt-regression-failed",

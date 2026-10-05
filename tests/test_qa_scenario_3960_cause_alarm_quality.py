@@ -738,13 +738,17 @@ class CauseAlarmTests(unittest.TestCase):
     def test_registered_in_scenarios(self):
         order = list(scenarios.SCENARIOS)
         # The cause-alarm leg sits with the alarm contract's cluster,
-        # after the consumed-edge lifecycle and before the schedule's
-        # closing observation case.
+        # after the consumed-edge lifecycle and before the
+        # graceful-shutdown case ahead of the schedule's closing
+        # observation case.
         self.assertEqual(
             order.index(scenarios.scenario_ack_edge_lifecycle) + 1,
             order.index(scenarios.scenario_cause_alarm_quality))
         self.assertEqual(
             order.index(scenarios.scenario_cause_alarm_quality) + 1,
+            order.index(scenarios.scenario_graceful_shutdown))
+        self.assertEqual(
+            order.index(scenarios.scenario_graceful_shutdown) + 1,
             order.index(scenarios.scenario_dcs_ctl))
         self.assertIs(verify.case_function('cause-alarm-quality'),
                       scenarios.scenario_cause_alarm_quality)

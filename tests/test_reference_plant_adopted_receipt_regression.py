@@ -116,7 +116,10 @@ class Registration(unittest.TestCase):
         }
         record = discovered["adopted_receipt_regression.py"]
         self.assertEqual(record["stem"], "adopted-receipt-regression")
-        self.assertEqual(record["order"], 605)
+        # The 612 slot main's phantom-source-restart leg's recorded
+        # neighbours leave free: 605 is that leg's own, and it pins the
+        # legs on either side of it, so nothing may sort between them.
+        self.assertEqual(record["order"], 612)
 
     def test_the_named_diagnostics_follow_the_stem_convention(self):
         # The issue names receipt-regression-failed and

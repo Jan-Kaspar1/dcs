@@ -2001,6 +2001,141 @@ Implementation order: second, after [daily architecture review](daily-architectu
   serving no finite float input, or a rig that applied an over-bound
   advance reports inconclusive.
 
+### Landed 2026-10-04 (bounded interlock-release orphan-window leg, #1179/#828)
+
+- The bounded orphan window a `POST /demote` landing inside the
+  interlock-release propagation window leaves behind — the per-revision
+  lane evidence for the contract #828's fix establishes (WW-LCM-001's
+  takeover-continuity clause, and the fail-safe rule that the field must
+  never stand energized under a standing protection trip with no
+  controller able to take over) — is exercised per revision by scenario
+  leg `3850_release_orphan_window` on the deployed pair. The station's
+  release propagates over driven scans, never on the write (`power-fail`
+  inverted into `power-ok`, `power-ok` dropping each pump's availability,
+  the protection interlock guarding the command, and only then the
+  group's staged image carrying the released `p10x-cmd`), so a legal
+  demote landing between the contact write and the scan that writes
+  that release abandons the in-flight write. The recorded finding left
+  both pumps hand-running and energized ~1 s through the demote with
+  both peers `standby`/`orphaned`, healing only when an operator promote
+  converged and wrote the safe command; #800's diverged-supersede
+  amendment closed the wedge behind that window, and #828 fixes the
+  bound itself — the window must not outlive it — which this leg pins
+  per revision.
+- Each pass settles the pair on its launch layout, joins the field's
+  standing writer claim under the owner's pinned `--owner-token`, hand-runs
+  both pumps through the bounded receipted operator path (the four
+  writable `p10x-mode`/`p10x-hand` writes, each settling `applied` and
+  attributed to the leg), drives the journaled `power-fail` contact
+  through the plant protocol while both outputs still read energized, and
+  demotes the owner in the same breath. The window is then watched
+  through the plant protocol's own field reads and both peers' serving
+  monitors across the declared bound (`ROW_BOUND` seconds of served
+  observation, polled one cadence short so an out-of-bound reading is a
+  real observation and never a measurement artefact — twelve seconds is
+  the rig's own armed recovery budget, the tracking member's declared
+  `--auto-promote 120` heartbeat pulls at its 100 ms cadence, so the
+  leg's own promote is provably no slower than what the runtime would
+  have done unattended): no peer may report
+  the promote-blocking `diverged`, the peer whose pull lands the
+  ownerless line must journal `field_orphaned`, `POST /promote` must be
+  answered `promoting` — never the `not_converged` refusal — and the
+  promoted peer's first field-owning scans must write the abandoned
+  release, after which the pair reconverges to one active plus one
+  tracking standby.
+- The window's *shape* is deliberately outside the digest: the contract
+  accepts either half — the pending write landing before the demotion
+  completes, or the promotion flushing it inside the bound — and which
+  half a pass observes is the rig's scan timing, not the build under test.
+  The digest records the bound's disposition (the energization never
+  outlived it, the promote converged, the pair reconverged, the rig
+  restored); the observed shape and the measured window ride the
+  evidence file and the case's observations, where the window is named
+  by its own bound.
+- Named diagnostics are `release-orphan-window-failed` (a hand run that
+  never energized both outputs, a receipted write that never settled
+  applied, a demote that never landed, a peer reporting the
+  promote-blocking `diverged`, a release the declared interlock chain does
+  not explain, an unjournaled orphan transition, a promote answered
+  `not_converged`, outputs energized past the declared bound, a pair that
+  never reconverged, a rig left tripped or hand-run) and
+  `release-orphan-window-nondeterministic` (a lost trip write, a lost
+  field read, a starved monitor, an empty window, an unsettled demotion, an
+  unread journal, two diverging digests), with the self-check's
+  `release-orphan-window-unchecked` covering every planted negative — the
+  issue's named doctored case among them, the outputs asserted as bounded
+  while they stay energized past the bound. Two consecutive passes produce
+  identical digests. A run context carrying only one endpoint, no plant
+  endpoint, no pinned owner tokens, an unreachable monitor, a model
+  declaring no power-fail interlock wiring, or pumps already standing in
+  hand reports inconclusive. A staged revision predating the contract
+  reports inconclusive too, on its behavioural signature: the ownerless
+  window's rows reporting `diverged` with the sibling's promote answered
+  `not_converged` — the shape #828 closed, which a build carrying the
+  fix cannot present.
+- The consumer-boundary mirror of this contract rides the reference
+  plant's redundant pair in clean CI as `ci/legs/release_orphan_window.py`
+  (#1180), where the same run drives the driven-scan rig: its declared
+  bound is `RELEASE_SCANS` driven pair ticks, the pair having no wall-clock
+  scans of its own, and its two doctored cases — `expect-flushed` and
+  `skip-promote` — flip the leg’s own expectations to the shapes the
+  honest episode must not present.
+
+### Landed 2026-10-04 (involuntary-demotion lazy hint-verification leg, #1484/#924)
+
+- The involuntary half of decision 92's announced-source contract — the
+  per-revision lane evidence for WW-LCM-001's takeover-continuity clause
+  and WW-FND-004's command integrity — is exercised on the deployed pair
+  by scenario leg `2140_involuntary_demote_verify`. Every leg filed
+  against the announced-hint seam so far drove the *request* boundary:
+  `POST /demote` can hang its verification on the call, pulling each
+  recorded `?peer=` hint once under the keyed `line_proof`. An
+  involuntary demotion — a field claim's mid-run loss, the superseded
+  owner demoting in place on its own fenced write — crosses no such
+  boundary, so nothing can hang a verify on it and the recorded set is
+  consumed from the tracking path instead, lazily. No leg reached that
+  path: the forged-checkpoint refusal leg proves the request boundary's
+  own verdict, and says nothing about what an unfenced verify consumes.
+- The episode stages the hostile endpoint the announce legs share — the
+  run's bridge-placed forge serving one staged document and ledgering
+  every pull that reaches it — and preempts the field claim through the
+  documented `POST /promote` on the tracking standby, never a demote
+  first, so the owner's demotion is the fencing path's alone. The staged
+  document is the owner's own checkpoint replayed as a standby-shaped
+  continuation with one internal `In` sample planted against the pass's
+  own settled write, so an adoption would be observable in the demoted
+  peer's served image and not only in its journal.
+- The leg judges the contract's four clauses on whichever posture the run
+  launches under, and the posture decides the verdict rather than the
+  rig: on a keyed run the recorded hint is a *verify candidate*, so the
+  forge's ledger must show the bounded verify pass and never a chase (a
+  hint followed as a pull target is dialed once per scan), the refused
+  probe must be journaled by name as `tracking_source_refused` — a
+  refused candidate is durable audit, never silence — and the verified
+  successor's endpoint pins into `tracking_source_adopted`; on an unkeyed
+  run a bare hint is no tracking source at all, so the ledger must read
+  *no* pull whatsoever and no refusal can journal either, because nothing
+  was served to refuse, while the peer still resolves through the field's
+  own arbitration and reports its honest `tracking`/`orphaned` verdict.
+  Neither posture may adopt the staged document, the demoted peer's
+  served line document must name the promoted successor, and the pair
+  must reconverge to exactly one `active` plus one `tracking` standby
+  with the claim and the entry roles restored for the legs behind it.
+- Named diagnostics are `demote-hint-verify-failed` (a chase past the
+  bounded allowance or a verify pass that never ran, a refusal that
+  vanished from the journal, an adoption naming the forge or no verified
+  source at all, a served document carrying the planted sample or
+  another `line_owner`, a pair that never reconverged, a demotion that
+  never landed in place, a refused claim preempt, a restore that never
+  settled) and `demote-hint-verify-nondeterministic` when the two
+  passes' digests diverge, with the self-check's
+  `demote-hint-verify-unchecked` covering every planted negative. Two
+  consecutive passes produce identical digests; a run carrying only one
+  endpoint, no forge action, a host-placed forge, no per-controller
+  journal files, no writable bool in-point to plant against, an
+  unreachable monitor, or a pair that never settled reports inconclusive.
+
+
 ### Landed 2026-10-04 (quality-aware cause-alarm leg, #827/#871/#1134/#1424)
 
 - The contract #827's fix establishes — a protection contact degraded
@@ -2073,6 +2208,97 @@ Implementation order: second, after [daily architecture review](daily-architectu
   must fail naming the annunciation and the stop the honest run saw.
 
 
+### Landed 2026-10-04 (phantom source-restart leg, #694/#1132/#1133)
+
+- The same-generation `source_restarted` suppression contract is now
+  exercised per revision by scenario leg
+  `2195_phantom_source_restart`, filed in the launch-layout window
+  behind `2190_tracker_realign_tick_order` and ahead of the schedule's
+  `2200_failover` case. The defect it reproduces is the QA finding
+  `demote-track-journals-phantom-source-restart`: the regression
+  detector treated any checkpoint below the run's last alignment (or
+  below the run tick where none stood) as a source restart, so a
+  demoted peer's first tracking pull — the demotion having cleared
+  the alignment, leaving the served checkpoint one tick behind the
+  demoted run's own — and a same-generation peer merely lagging one
+  scan both tripped it and filled the durable journal with restarts
+  that never happened (seq 638 phantom with `was_aligned: null`,
+  seq 639 the one-tick regression). The fix reads the checkpoint's
+  `generation` stamp: the uninterrupted successor still stamps the
+  generation the demoted run's own captures carried, so the reset was
+  the peer's tracking state and nothing journals, while a source that
+  genuinely cold-restarts mints a new generation and the boundary is
+  preserved. The contract is WW-FND-004's named-evidence journal
+  clause and WW-LCM-001's continuity, consolidated from #694's fix,
+  its #731/#777 evidence, and the two filed exercise tickets.
+- Each pass stages both halves on the deployed pair. With the pair
+  settled and tracking, the field owner is demoted and the launched
+  standby promotes — the rig's armed standby claims the released
+  field on its next scan — and the demoted owner then follows its
+  successor across repeated tracking applies, each pull trailing the
+  served stream by a scan. Through the demoted peer's serving monitor
+  and its per-controller `--journal-file` the pass audits that no
+  `source_restarted` appeared: not on the first apply, whose
+  checkpoint regresses against the cleared alignment, and not on the
+  mid-tracking one-tick regressions the repeated applies open. The
+  tracked source's container is then cold-restarted through the
+  runner's `cold_restart_controller` seam (`docker stop`, its
+  host-side state.json dropped, `docker start`), so the resumed
+  process mints a fresh generation and serves a regressed stream —
+  and the tracking peer must journal exactly one `source_restarted`
+  carrying its named evidence, the prior alignment as `was_aligned`
+  and the resumed stream tick below it as `resumed_at`. The pass then
+  walks the documented order back so the pair rests on its launch
+  roles for the cases behind it.
+- Named diagnostics are `source-restart-evidence-failed` (a phantom
+  on the same-generation stream, the genuine cold restart journaling
+  none or more than one, an entry missing its `was_aligned`/
+  `resumed_at` evidence or claiming a resumed tick that never
+  regressed, the demoted peer never reconverging, the launch roles
+  unrestored) and `source-restart-evidence-nondeterministic` (a
+  refused demotion, promote or restart, a starved watch, an
+  unconverged baseline posture, the restart producing no regressed
+  stream, a duplicated boundary record, an armed failover firing
+  inside the held window, diverging pass digests), with the
+  self-check's `phantom-source-restart-unchecked` covering the planted
+  phantom, the silent and duplicated genuine restart, the entries
+  stripped of their named evidence, the malformed axis, the
+  unconverged reset and the unrestored roles. Two consecutive passes
+  produce identical digests. A run context carrying only one
+  endpoint, no cold-restart seam or no per-controller journal files,
+  an unreachable, unconverged or off-layout pair, and a staged run
+  whose served checkpoints predate the `generation` stamp the
+  suppression reads all report inconclusive.
+- The consumer-boundary mirror is
+  `reference-plant/ci/legs/phantom_source_restart.py` — one new file
+  under `ci/legs/`, discovered by the file-named convention, needing
+  no `check.sh`, boundary-lint or harness edit. It converges the
+  manifest-declared pair, gates the contract surface (each served
+  checkpoint carrying the integer `tick` and `generation`, each
+  declared `journal_file` readable), runs the demote/promote cycle
+  and its fail-back with the roles exchanged — auditing each
+  demoted peer's serving and durable journal for the phantom and the
+  served stream position's monotonicity — then cold-restarts the
+  field owner (its process stopped, its declared state file dropped, a
+  fresh process respawned on its declared listen address with nothing
+  to resume) and requires its tracking peer to journal exactly one
+  `source_restarted` in both records, carrying the named evidence. Its
+  two doctored cases — a phantom planted into the same-generation
+  audit, and the cold restart withheld while the leg still asserts its
+  one entry — must each fail carrying the leg's evidence. A pinned
+  release predating the `generation` stamp reports the leg's named
+  `phantom-source-restart-digest inconclusive` verdict rather than a
+  product failure.
+- The workspace half is a driven-pair regression in
+  `crates/dcs-controller/tests/hot_swap.rs` spanning the whole clause
+  rather than one transition: an orderly demote/promote cycle plus a
+  fail-back, each peer's demotion clearing its own alignment and
+  pulling its own successor repeatedly, neither peer's journal
+  carrying a `source_restarted`, the served `stream_tick` monotone
+  across both cycles, and the retained detection half — the tracked
+  source cold-restarted, its tracking peer journaling exactly one
+  boundary entry naming the alignment it broke.
+
 ### Landed 2026-10-05 (adopted-stale-receipt regression leg, #1130/#1131)
 
 - The contract #709's fix establishes (WW-LCM-001's receipt-as-truth
@@ -2130,7 +2356,13 @@ Implementation order: second, after [daily architecture review](daily-architectu
   admission lands on the member carrying the manifest's declared
   `--peer` wiring, because the ex-owner holds no configured source and
   a staler window legitimately fails the announced-source proof a
-  demotion without one must pass.
+  demotion without one must pass. Its stage position is order 612, not
+  the 605 the leg was first drafted against: main's
+  phantom-source-restart leg landed at 605 and records
+  tracker-realign and foreign-claim-release as its neighbours, so no
+  leg may sort between that pair, and the pair stage refuses two legs
+  at one order rather than dropping either. The slot sits beside its
+  sibling collision leg at 615, above foreign-claim-release.
 
 ### Landed 2026-10-05 (receipt-index collision audit-preservation leg, #1175/#1176)
 

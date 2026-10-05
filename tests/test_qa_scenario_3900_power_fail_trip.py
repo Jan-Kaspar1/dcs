@@ -673,9 +673,15 @@ class PowerTripTests(unittest.TestCase):
     def test_registered_in_scenarios(self):
         order = list(scenarios.SCENARIOS)
         # The self-contained cluster ahead of the schedule's closing
-        # observation case.
+        # observation case. The bounded orphan-window leg shares this
+        # leg's power-fail wiring, restores the field state and the
+        # launch roles it drove, and therefore runs immediately ahead
+        # of the settled duty-demand baseline this leg reads.
         self.assertEqual(
             order.index(scenarios.scenario_unavailable_fallback) + 1,
+            order.index(scenarios.scenario_release_orphan_window))
+        self.assertEqual(
+            order.index(scenarios.scenario_release_orphan_window) + 1,
             order.index(scenarios.scenario_power_fail_trip))
         self.assertEqual(
             order.index(scenarios.scenario_power_fail_trip) + 1,
@@ -685,6 +691,9 @@ class PowerTripTests(unittest.TestCase):
             order.index(scenarios.scenario_cause_alarm_quality))
         self.assertEqual(
             order.index(scenarios.scenario_cause_alarm_quality) + 1,
+            order.index(scenarios.scenario_graceful_shutdown))
+        self.assertEqual(
+            order.index(scenarios.scenario_graceful_shutdown) + 1,
             order.index(scenarios.scenario_dcs_ctl))
         self.assertIs(verify.case_function('power-fail-trip'),
                       scenarios.scenario_power_fail_trip)

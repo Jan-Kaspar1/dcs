@@ -115,6 +115,20 @@
 //! descriptor, so the restart that resumes the dead run's checkpoint
 //! re-acquires it — the recovery this flag exists for, unchanged.
 //!
+//! Graceful shutdown (WW-LCM-001 continuity): SIGTERM or SIGINT stops a
+//! paced or driven run at a scan boundary within ten seconds — the
+//! pacing sleep is interruption-sliced, so a long scan period never
+//! delays it — then flushes the latest checkpoint through `--state-file`
+//! where configured (waiting at most five seconds for the sink's
+//! writer), releases the held plant write claim on the way out, and
+//! exits 0. Only a failure exits nonzero, naming the reason. A second
+//! signal forces prompt exit with status 128+signo (143 for SIGTERM,
+//! 130 for SIGINT), skipping the flush and the release — the escape
+//! hatch a stalled sink's flush wait must not close. Runs without
+//! `--state-file` skip the flush; peers holding no field claim skip
+//! the release. `docs/packaging.md` records the same contract for the
+//! container image.
+//!
 //! `--journal-file PATH` persists the transition journal the monitor
 //! records — the journal-persistence decision's durable audit trail:
 //! every journaled entry is appended to `PATH` as one line-delimited
@@ -359,10 +373,11 @@ use dcs_runtime::{
     Activation, Checkpoint, Executor, Peer, PeerEvent, TrackReport, WriteGate, mint_generation,
 };
 use dcs_sim_net::{ClaimGrant, RemoteDriver, RemoteError};
+use signal_hook::consts::{SIGINT, SIGTERM};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -900,6 +915,155 @@ fn owner_token() -> u64 {
     hasher.finish()
 }
 
+/// The graceful-shutdown bound: a SIGTERM/SIGINT stops the paced scan
+/// loop at a scan boundary within this long of the first signal — the
+/// pacing sleep below is interruption-sliced, so a long scan period
+/// never delays it — and the checkpoint flush waits at most
+/// [`SHUTDOWN_FLUSH_WAIT`] inside it. The QA rig's `docker kill
+/// --signal=SIGTERM` action and the reference-plant leg assert this
+/// bound; `docs/packaging.md` records it for the container image.
+const GRACEFUL_SHUTDOWN_BOUND: Duration = Duration::from_secs(10);
+/// How long the graceful exit waits for the `--state-file` sink's
+/// writer to durably land the final checkpoint — inside
+/// [`GRACEFUL_SHUTDOWN_BOUND`], off the executor lock. A stalled sink
+/// that overruns it fails the exit naming the file rather than
+/// running on without recovery state.
+const SHUTDOWN_FLUSH_WAIT: Duration = Duration::from_secs(5);
+/// The pacing sleep's interruption slice — the granularity a signal
+/// stops the scan loop at.
+const SHUTDOWN_POLL: Duration = Duration::from_millis(10);
+
+/// First-signal arrivals since process start — the scan loop's stop
+/// flag. The handler only counts; the loop stops itself at the next
+/// scan boundary, so a checkpoint is always whole.
+static SHUTDOWN_COUNT: AtomicU8 = AtomicU8::new(0);
+/// The first signal's number — what the graceful report names.
+static SHUTDOWN_SIGNAL: AtomicI32 = AtomicI32::new(0);
+
+/// Whether the run already failed — set by [`fail`] on every nonzero
+/// exit path. The graceful-shutdown branches consult it alongside
+/// [`shutdown_requested`]: a scan, step, or persist failure racing a
+/// signal keeps its nonzero verdict instead of being masked by a
+/// graceful 0 — "nonzero only on failure" cuts both ways.
+static RUN_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// Whether a SIGTERM/SIGINT has asked this process to stop at its next
+/// scan boundary.
+fn shutdown_requested() -> bool {
+    SHUTDOWN_COUNT.load(Ordering::SeqCst) != 0
+}
+
+/// The first shutdown signal's conventional name — SIGTERM or SIGINT —
+/// for the graceful report.
+fn shutdown_name() -> &'static str {
+    match SHUTDOWN_SIGNAL.load(Ordering::SeqCst) {
+        SIGTERM => "SIGTERM",
+        SIGINT => "SIGINT",
+        _ => "shutdown",
+    }
+}
+
+/// The signal handler's count step: the first SIGTERM/SIGINT arms the
+/// scan loop's boundary stop; a second one forces prompt exit with the
+/// conventional 128+signo status (143 for SIGTERM, 130 for SIGINT),
+/// skipping the checkpoint flush and the claim release — the escape
+/// hatch a stalled sink's flush wait must not close.
+fn on_shutdown_signal(signal: std::os::raw::c_int) {
+    if SHUTDOWN_COUNT.fetch_add(1, Ordering::SeqCst) >= 1 {
+        std::process::exit(128 + signal);
+    }
+    SHUTDOWN_SIGNAL.store(signal, Ordering::SeqCst);
+}
+
+/// Installs the graceful-shutdown signal handlers — SIGTERM and SIGINT
+/// arm the scan loop's boundary stop, a second one forcing prompt
+/// exit. A registration failure is a launch failure naming the signal
+/// machinery rather than a run without a stop path.
+fn install_shutdown_handlers() -> Result<(), String> {
+    for signal in [SIGTERM, SIGINT] {
+        unsafe {
+            signal_hook::low_level::register(signal, move || on_shutdown_signal(signal)).map_err(
+                |error| format!("cannot install shutdown handler for signal {signal}: {error}"),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// The graceful exit's final `--state-file` persist on a monitored run:
+/// captures the run's checkpoint under the shared lock — after the
+/// scan loop already stopped at its boundary, so this is the latest
+/// cycle's state — and waits at most [`SHUTDOWN_FLUSH_WAIT`] for the
+/// sink's writer to durably land it. A refusal or a wait the writer
+/// overruns fails the exit naming the file; no configured state file
+/// is a no-op. The wait rides the caller's thread alone, never the
+/// executor lock.
+fn flush_monitored_state(monitor: &Monitor<'_>, options: &Options) -> Result<(), String> {
+    monitor.persist_state()?;
+    if let Some(health) = monitor.flush_state_sink(SHUTDOWN_FLUSH_WAIT)
+        && (health.lost > 0 || health.drained + health.lost < health.accepted)
+    {
+        let path = options
+            .state_file
+            .as_deref()
+            .unwrap_or_else(|| Path::new("<state file>"));
+        return Err(format!(
+            "graceful shutdown: state file {} did not durably land the final checkpoint \
+             (accepted {}, drained {}, lost {})",
+            path.display(),
+            health.accepted,
+            health.drained,
+            health.lost
+        ));
+    }
+    Ok(())
+}
+
+/// The graceful exit's final `--state-file` persist on a monitorless
+/// run: hands the peer's checkpoint to the sink's bounded queue and
+/// waits at most [`SHUTDOWN_FLUSH_WAIT`] for the writer to durably
+/// land it — the same attestation the monitor's own persist carries.
+/// No configured state file is a no-op.
+fn flush_monitorless_state(
+    state_sink: &Option<StateSink>,
+    peer: &std::cell::RefCell<Peer<'_>>,
+) -> Result<(), String> {
+    match state_sink {
+        Some(sink) => {
+            let ordinal = sink.offer(peer.borrow().checkpoint())?;
+            sink.attest(ordinal, SHUTDOWN_FLUSH_WAIT)
+        }
+        None => Ok(()),
+    }
+}
+
+/// The graceful exit shared by every run mode once its scan loop or
+/// serve loop stopped on a signal: flushes the latest checkpoint where
+/// configured, releases the held plant write claim on the way out —
+/// best-effort, the demotion counterpart that marks a deliberate
+/// step-down so a successor's conditional claim takes the field
+/// without meeting a dead claim — and reports the named shutdown.
+/// `tick` is the stopped run's virtual tick for the report.
+fn finish_graceful_shutdown(driver: &Driver, options: &Options, tick: Tick) -> ExitCode {
+    driver.release_claim();
+    match &options.state_file {
+        Some(path) => eprintln!(
+            "graceful shutdown on {}: scan loop stopped at tick {}; checkpoint flushed to {}; \
+             field write claim released",
+            shutdown_name(),
+            tick.0,
+            path.display()
+        ),
+        None => eprintln!(
+            "graceful shutdown on {}: scan loop stopped at tick {}; no state file configured; \
+             field write claim released",
+            shutdown_name(),
+            tick.0
+        ),
+    }
+    ExitCode::SUCCESS
+}
+
 /// Parsed command line.
 struct Options {
     /// The plant model document to load.
@@ -1139,7 +1303,16 @@ controller scan.
 With neither --ticks nor --scan-ms, a paced run at 100 ms is assumed.
 A remote-attached standby is output-quiescent behind a write gate until
 POST /promote lifts it; a demoted remote active is re-quiesced the same
-way, so exactly one peer writes the shared plant.";
+way, so exactly one peer writes the shared plant.
+
+Signals: SIGTERM/SIGINT stop a paced or driven run gracefully — the
+scan loop stops at the next scan boundary (within 10 s), the latest
+checkpoint flushes to --state-file where configured (at most 5 s of
+the bound), the held field write claim releases, and the process
+exits 0; only a failure exits nonzero, naming the reason. A second
+signal forces prompt exit with status 128+signo, skipping the flush
+and the release.
+";
 
 impl Options {
     fn parse(args: impl Iterator<Item = String>) -> Result<Self, String> {
@@ -1589,6 +1762,7 @@ fn ip_is_local(ip: std::net::IpAddr) -> bool {
 }
 
 fn fail(message: impl std::fmt::Display) -> ExitCode {
+    RUN_FAILED.store(true, Ordering::SeqCst);
     eprintln!("error: {message}");
     ExitCode::FAILURE
 }
@@ -1960,6 +2134,22 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+
+    // The graceful-shutdown stop path: SIGTERM/SIGINT arm the scan
+    // loop's boundary stop — a second one forcing prompt exit — so
+    // the run owns its stop from here on, including the compile-check
+    // mode (which exits before any loop runs) and every fallible
+    // startup step below (a signal before the loops only moves their
+    // first boundary check up).
+    if let Err(error) = install_shutdown_handlers() {
+        return fail(error);
+    }
+    // The flush wait is the bound's inner budget — the stop itself
+    // lands within one scan period, the sink drain inside the rest.
+    debug_assert!(
+        SHUTDOWN_FLUSH_WAIT < GRACEFUL_SHUTDOWN_BOUND,
+        "the flush wait must fit inside the shutdown bound"
+    );
 
     let source = match std::fs::read_to_string(&options.model) {
         Ok(source) => source,
@@ -2369,7 +2559,30 @@ fn main() -> ExitCode {
             }
         }
         eprintln!("listening on {}", monitor.local_addr());
-        monitor.serve();
+        graceful_serve(&monitor);
+        // The graceful exit: a signal stopped the serve loop — flush
+        // the latest checkpoint where configured and release the held
+        // field claim on the way out. A flush failure exits nonzero
+        // naming the file. A latched startup refusal still decides a
+        // refused launch first, so a pairless refusal keeps its
+        // nonzero verdict even under a signal while a declared pair
+        // rejoins and exits graceful.
+        if shutdown_requested() && !RUN_FAILED.load(Ordering::SeqCst) {
+            if let Err(error) = flush_monitored_state(&monitor, &options) {
+                return fail(format!("graceful shutdown: {error}"));
+            }
+            if let Some(error) = monitor.drain_startup_refusal()
+                && let Err(error) = settle_activation(
+                    Ok(Activation::Refused { error }),
+                    &driver,
+                    owner,
+                    options.peer.is_some(),
+                )
+            {
+                return fail(error);
+            }
+            return finish_graceful_shutdown(&driver, &options, monitor.tick());
+        }
         // The driven run's serve loop stands down when a `POST /scan`
         // settles the deferred startup grant's refusal on a pairless
         // run — the born-active contract's `Refused` verdict arriving
@@ -2432,13 +2645,25 @@ fn main() -> ExitCode {
                 eprintln!("listening on {}", monitor.local_addr());
                 let step = || driver.step(dt, monitor.owns_field());
                 let mut puller = None;
-                run_monitored(
+                let result = run_monitored(
                     &monitor,
                     || tracked_cycle(&monitor, &mut puller, &driver, owner, &options),
                     step,
                     &options,
                     period.unwrap(),
-                )
+                );
+                // The graceful exit: a signal stopped the paced loop at
+                // its boundary — flush the latest checkpoint where
+                // configured and release the held field claim on the
+                // way out. A prior scan failure keeps its nonzero
+                // verdict instead of being masked by a graceful 0.
+                if shutdown_requested() && !RUN_FAILED.load(Ordering::SeqCst) {
+                    if let Err(error) = flush_monitored_state(&monitor, &options) {
+                        return fail(format!("graceful shutdown: {error}"));
+                    }
+                    return finish_graceful_shutdown(&driver, &options, monitor.tick());
+                }
+                result
             }
             None => {
                 // Without a monitor nothing external can promote this
@@ -2461,7 +2686,7 @@ fn main() -> ExitCode {
                     Err(error) => return fail(error),
                 };
                 let step = || driver.step(dt, peer.borrow().owns_field());
-                scan_loop(
+                let result = scan_loop(
                     || {
                         let mut peer = peer.borrow_mut();
                         if peer.owns_field() {
@@ -2597,7 +2822,21 @@ fn main() -> ExitCode {
                     || peer.borrow_mut().record_scan_overrun(),
                     &options,
                     period,
-                )
+                );
+                // The graceful exit on a monitorless standby: a signal
+                // stopped the loop at its boundary — attest the final
+                // checkpoint where configured and release the held
+                // field claim on the way out. A prior scan failure
+                // keeps its nonzero verdict instead of being masked by
+                // a graceful 0.
+                if shutdown_requested() && !RUN_FAILED.load(Ordering::SeqCst) {
+                    if let Err(error) = flush_monitorless_state(&state_sink, &peer) {
+                        return fail(format!("graceful shutdown: {error}"));
+                    }
+                    let tick = peer.borrow().tick();
+                    return finish_graceful_shutdown(&driver, &options, tick);
+                }
+                result
             }
         }
     } else {
@@ -2664,13 +2903,25 @@ fn main() -> ExitCode {
                 // announced through its pulls.
                 let step = || driver.step(dt, monitor.owns_field());
                 let mut puller = None;
-                run_monitored(
+                let result = run_monitored(
                     &monitor,
                     || tracked_cycle(&monitor, &mut puller, &driver, owner, &options),
                     step,
                     &options,
                     period.unwrap(),
-                )
+                );
+                // The graceful exit: a signal stopped the paced loop at
+                // its boundary — flush the latest checkpoint where
+                // configured and release the held field claim on the
+                // way out. A prior scan failure keeps its nonzero
+                // verdict instead of being masked by a graceful 0.
+                if shutdown_requested() && !RUN_FAILED.load(Ordering::SeqCst) {
+                    if let Err(error) = flush_monitored_state(&monitor, &options) {
+                        return fail(format!("graceful shutdown: {error}"));
+                    }
+                    return finish_graceful_shutdown(&driver, &options, monitor.tick());
+                }
+                result
             }
             None => {
                 // The launched active's startup activation — the same
@@ -2702,7 +2953,7 @@ fn main() -> ExitCode {
                     Ok(sink) => sink,
                     Err(error) => return fail(error),
                 };
-                scan_loop(
+                let result = scan_loop(
                     || {
                         let mut peer = peer.borrow_mut();
                         let scanned = peer.scan();
@@ -2769,7 +3020,21 @@ fn main() -> ExitCode {
                     || peer.borrow_mut().record_scan_overrun(),
                     &options,
                     period,
-                )
+                );
+                // The graceful exit on a monitorless active: a signal
+                // stopped the loop at its boundary — attest the final
+                // checkpoint where configured and release the held
+                // field claim on the way out. A prior scan failure
+                // keeps its nonzero verdict instead of being masked by
+                // a graceful 0.
+                if shutdown_requested() && !RUN_FAILED.load(Ordering::SeqCst) {
+                    if let Err(error) = flush_monitorless_state(&state_sink, &peer) {
+                        return fail(format!("graceful shutdown: {error}"));
+                    }
+                    let tick = peer.borrow().tick();
+                    return finish_graceful_shutdown(&driver, &options, tick);
+                }
+                result
             }
         }
     }
@@ -2921,6 +3186,29 @@ fn run_monitored(
         monitor.shutdown();
         result
     })
+}
+
+/// Serves `monitor` until SIGTERM/SIGINT or the serve loop's own
+/// stand-down — the driven run's graceful-shutdown wait, which owns no
+/// scan loop to poll the flag from. A watcher parks on the shutdown
+/// flag and unblocks the serve loop; the main thread blocks in
+/// `serve` so its internal stand-down (the deferred startup grant's
+/// pairless refusal ending the run) still ends the run on its own.
+/// The `done` flag releases the watcher when the serve loop stands
+/// down by itself, so the scope always joins; a redundant unblock
+/// after that only pads the dead queue.
+fn graceful_serve(monitor: &Monitor<'_>) {
+    let done = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            while !shutdown_requested() && !done.load(Ordering::SeqCst) {
+                std::thread::sleep(SHUTDOWN_POLL);
+            }
+            monitor.shutdown();
+        });
+        monitor.serve();
+        done.store(true, Ordering::SeqCst);
+    });
 }
 
 /// The bound on [`SnapshotSink`]'s handoff queue: at most this many
@@ -3132,6 +3420,13 @@ impl SnapshotSink {
 /// `record_scan_overrun` on whichever wrapper they scan through — so
 /// wall-clock overrun detection stays out here in the shell and only a
 /// count, not a timestamp, enters the tick domain.
+///
+/// A SIGTERM/SIGINT stops the loop at the next scan boundary — the
+/// check at the loop top, with the pacing sleep interruption-sliced so
+/// a long period never delays it. The loop returns `SUCCESS` for both
+/// the `--ticks` completion and the signal stop; the caller tells them
+/// apart through [`shutdown_requested`] and runs the graceful exit's
+/// checkpoint flush and claim release only on the signal path.
 fn scan_loop(
     mut scan: impl FnMut() -> Result<Tick, String>,
     snapshot: impl Fn() -> TelemetrySnapshot,
@@ -3153,6 +3448,14 @@ fn scan_loop(
         .is_none()
         .then(|| SnapshotSink::start(std::io::stdout()));
     loop {
+        // The graceful-shutdown stop: a SIGTERM/SIGINT lands here, at
+        // the scan boundary — the last completed cycle already ran its
+        // scan, plant step, and `--state-file` persist, so the stopped
+        // run's durable state is whole. The caller flushes the sink
+        // and releases the field claim on the way out.
+        if shutdown_requested() {
+            return ExitCode::SUCCESS;
+        }
         let started = Instant::now();
         // A scan cycle can settle a verdict the launch could not have
         // answered — the deferred startup grant's refusal landing
@@ -3192,7 +3495,18 @@ fn scan_loop(
         if let Some(period) = period {
             let elapsed = started.elapsed();
             if elapsed < period {
-                std::thread::sleep(period - elapsed);
+                // The pacing sleep, interruption-sliced: a signal stops
+                // the loop at the next boundary instead of waiting out
+                // a long scan period — the graceful-shutdown bound's
+                // pacing half. An early stop skips the overrun report:
+                // the loop exits at the top rather than closing the
+                // cycle the measurement below would have closed.
+                let mut remaining = period - elapsed;
+                while remaining > Duration::ZERO && !shutdown_requested() {
+                    let slice = remaining.min(SHUTDOWN_POLL);
+                    std::thread::sleep(slice);
+                    remaining = period.saturating_sub(started.elapsed());
+                }
             } else {
                 // The cycle overran its period — there is nothing left
                 // to sleep off, so report it into io_health.scan_overruns.
