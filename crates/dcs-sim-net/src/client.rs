@@ -37,9 +37,12 @@ pub enum RemoteError {
     /// `Disconnected`/`Timeout`.
     Io(IoError),
     /// The server refused the request itself — a [`PlantRequest::Step`]
-    /// with a negative or non-finite `dt`, or a payload JSON cannot
-    /// express (e.g. a non-finite `Value::Float`, which has no JSON
-    /// representation). `detail` is the server's diagnostic text.
+    /// with a negative, non-finite, or over-bound `dt` (a step is one
+    /// scan period; the field refuses anything above
+    /// [`dcs_sim::MAX_STEP_DT`](dcs_sim::MAX_STEP_DT) by name), or a
+    /// payload JSON cannot express (e.g. a non-finite `Value::Float`,
+    /// which has no JSON representation). `detail` is the server's
+    /// diagnostic text.
     InvalidRequest(String),
     /// The request mutates the shared field but another attachment holds
     /// the field's write-ownership claim — the fencing verdict of the
@@ -517,6 +520,13 @@ impl RemoteDriver {
     /// controller paces the plant at its scan boundary exactly as it
     /// paces a local `SimDriver`, and every attached client observes the
     /// same stepped values.
+    ///
+    /// `dt` is bounded: a plant tick is one scan period, and a `dt`
+    /// above [`dcs_sim::MAX_STEP_DT`](dcs_sim::MAX_STEP_DT) — a finite
+    /// value JSON can carry, `1e308` among them — answers
+    /// [`RemoteError::InvalidRequest`] with the bound named and changes
+    /// nothing, rather than winding the field's element state past what
+    /// a served sample can spell.
     ///
     /// Like `write`, the step is a field mutation: it fences
     /// [`RemoteError::Fenced`] while another owner claims the field and

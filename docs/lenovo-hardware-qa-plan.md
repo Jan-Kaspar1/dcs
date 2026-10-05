@@ -1888,6 +1888,7 @@ Implementation order: second, after [daily architecture review](daily-architectu
   identical digests; a rig that is unreachable, that predates the
   served `journal_sink` section, that declares no `--journal-file`, or
   that admits no mount lever reports inconclusive.
+
 ### Landed 2026-10-03 (settled-receipt arbitration leg, #1479)
 
 - The contradictory-settled-receipt arbitration contract — the
@@ -1941,6 +1942,64 @@ Implementation order: second, after [daily architecture review](daily-architectu
   declared pair is driven and therefore stages the contradiction with
   no freeze and no timing race.
 
+### Landed 2026-10-04 (bounded step-dt leg, #1177)
+
+- The bounded plant-step contract's per-revision rig evidence — the
+  lane half of #683's fix, and the ENABLER the leg records: the
+  protocol documents that the server refuses an invalid step rather
+  than panicking and that every response must round-trip the
+  protocol's own types, so a step request must not permanently corrupt
+  shared field state; the bound names the refusal, or element state
+  stays finite. The finding's reproduction is the shape no request
+  boundary could refuse on its own — `claim_writer(X); step(1e308)`
+  on a map with an integrator, where `1e308` is a *finite* f64, so
+  strict JSON carries it and the decoder reads it: applied, it wound
+  the accumulator past the `f64` range or parked an accumulated clock
+  where no legal later step could move it again, and the field then
+  served `{"float":null}` frames this protocol's own `Value` cannot
+  deserialize — every read a `Disconnected`, the point census dead
+  for every attachment, and a write plus a step unable to repair it
+  because the element recomputed from the corrupted state. The fix
+  bounds a tick's advance at `MAX_STEP_DT` (10^6 time units, about
+  11.6 days — four to five orders of magnitude above any scan period a
+  run paces itself at) and refuses the rest by name, which the lane
+  scenario leg `0760_step_bound` exercises through the lane's
+  claim-aware attachment: the shipped `dcs-plant-ctl` or the raw
+  plant-protocol client the claim legs drive, under the settled
+  active's pinned `--owner-token` (`ctx['plant_owner']`).
+- Two probes, in that order deliberately. The ordinary over-bound
+  advance (`dt:1e7`) goes first so a rig predating the bound absorbs a
+  step the field can survive and never sees the finding's `1e308`
+  vector applied; a rig whose first probe answers `stepped` reports
+  inconclusive rather than judging a contract it cannot see. On a rig
+  carrying the contract both answer `invalid_request` with the bound in
+  their detail, change nothing, and the `{"float":null}` signature never
+  appears — the driven undriven point's stored value stands, the
+  shipped client's `read`/`list` decode finite, and a finite step
+  still advances the plant. The leg measures on the lane what pacing
+  cannot move: the field is paced by its standing owner, so a served
+  sample legitimately moves between two reads and only an
+  element-undriven point's stored value is comparable across the
+  probes; the whole-census equality is the consumer leg's assertion,
+  over a pair nothing steps but the harness. The claim and the pair's
+  launch roles are restored, and both peers' scans, served snapshots,
+  io_health, and roles must be undisturbed.
+- Named diagnostics are `step-bound-failed` (a probe applied or
+  answered off-contract rather than the named bound refusal, a refused
+  step that moved the driven point or the census, a `{"float":null}`
+  frame on the driven point or anywhere in the census, a finite step
+  refused after the refusals, a baseline that never restored — or no
+  served image of it at all — a moved role, or a stalled scan) and
+  `step-bound-nondeterministic` (a
+  refusal whose stored value moved, or a finite step whose tick never
+  advanced past the pre-probe canary), with the self-check's
+  `step-bound-unchecked` covering every planted negative — the
+  refused-probe clauses are pure predicates over one observation
+  record, replayed over each named class before the leg trusts itself
+  on the rig. A run with no settled pair, no published plant endpoint,
+  no pinned owner token, a claim refused under that token, a census
+  serving no finite float input, or a rig that applied an over-bound
+  advance reports inconclusive.
 
 ### Landed 2026-10-04 (quality-aware cause-alarm leg, #827/#871/#1134/#1424)
 
@@ -2012,6 +2071,7 @@ Implementation order: second, after [daily architecture review](daily-architectu
   doctored cases require the cause alarm to stay silent over the
   degraded contact and the field command to stand through the trip; both
   must fail naming the annunciation and the stop the honest run saw.
+
 
 ## Outcome
 

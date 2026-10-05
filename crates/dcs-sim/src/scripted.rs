@@ -14,6 +14,7 @@
 //! [`step`](ScriptedDriver::step) is called, so identical write and step
 //! sequences replay identically on every run.
 
+use crate::MAX_STEP_DT;
 use crate::map::{ChannelId, Direction, PointBinding};
 use crate::state::{FaultParticipation, capture_points, restore_points};
 use dcs_core::{
@@ -351,13 +352,22 @@ impl ScriptedDriver {
     /// [`SimDriver::step`](crate::SimDriver::step); playback itself is
     /// indexed by ticks, not `dt`.
     ///
+    /// `dt` carries that sibling's bound —
+    /// [`MAX_STEP_DT`](crate::MAX_STEP_DT) — rather than a rule of its
+    /// own: one step is one scan period on every simulated backend, so
+    /// a caller holds one contract rather than learning which backend it
+    /// reached. Playback is tick-indexed and would survive an over-bound
+    /// `dt` unchanged; refusing it keeps one step surface's answer the
+    /// same whichever backend answers it.
+    ///
     /// # Panics
     ///
-    /// Panics when `dt` is negative or non-finite.
+    /// Panics when `dt` is negative, non-finite, or above
+    /// [`MAX_STEP_DT`](crate::MAX_STEP_DT).
     pub fn step(&self, dt: f64) -> Tick {
         assert!(
-            dt.is_finite() && dt >= 0.0,
-            "step dt must be finite and non-negative, got {dt}"
+            (0.0..=MAX_STEP_DT).contains(&dt),
+            "step dt must be finite, non-negative, and at most {MAX_STEP_DT}, got {dt}"
         );
         let state = &mut *self.state.lock().unwrap();
         state.tick = Tick(state.tick.0 + 1);
@@ -654,6 +664,44 @@ mod tests {
         for point in [PointId(10), PointId(11), PointId(20)] {
             assert_eq!(one.read(point), two.read(point));
         }
+    }
+
+    #[test]
+    fn a_step_above_the_shared_bound_is_refused_and_moves_no_tick() {
+        // One step is one scan period on every simulated backend, so the
+        // scripted playback carries the same `MAX_STEP_DT` bound its
+        // `SimDriver` sibling asserts: a caller's answer does not depend
+        // on which backend it reached.
+        let driver = driver();
+        driver.step(0.1);
+        let before = (driver.tick(), driver.read(PointId(10)).unwrap());
+        for above in [MAX_STEP_DT + 1.0, 1e7, 1e308] {
+            let refused =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| driver.step(above)));
+            assert!(
+                refused.is_err(),
+                "dt {above} is above the bound and must not be applied"
+            );
+            assert_eq!(
+                (driver.tick(), driver.read(PointId(10)).unwrap()),
+                before,
+                "a refused dt must leave playback exactly where it stood"
+            );
+        }
+        // The bound is a usable ceiling, not a formality: a step paced
+        // at it advances the script like any other.
+        assert_eq!(driver.step(MAX_STEP_DT), Tick(2));
+        // Playback is tick-indexed, so the second tick applies no entry
+        // the first did not — the tick-3 sample lands on the next step.
+        assert_eq!(
+            driver.read(PointId(10)).unwrap(),
+            Sample::good(Value::Float(4.0), Tick::ZERO)
+        );
+        assert_eq!(driver.step(MAX_STEP_DT), Tick(3));
+        assert_eq!(
+            driver.read(PointId(10)).unwrap(),
+            Sample::good(Value::Float(12.0), Tick(3))
+        );
     }
 
     #[test]
