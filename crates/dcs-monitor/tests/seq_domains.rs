@@ -171,6 +171,51 @@ fn the_record_names_the_seq_domains_their_scopes_and_the_cursor_rule() {
     }
 }
 
+/// The same vocabulary in the platform's shared domain language: the
+/// `CONTEXT.md` section that names each `seq` domain where crates,
+/// contracts, and docs collide over the one spelling must agree with the
+/// architecture record above — the run-scoped publication and
+/// history-ring axes, the file-scoped journal and durable axes, and the
+/// reset-or-gap rule a run-scoped cursor owes. A later change renaming
+/// a domain's scope in one record and not the other breaks the pin
+/// instead of leaving the two vocabularies disagreeing.
+#[test]
+fn the_shared_language_record_agrees_on_the_seq_domains() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .unwrap()
+        .to_path_buf();
+    let doc = std::fs::read_to_string(root.join("CONTEXT.md")).unwrap();
+    let start = doc
+        .find("### Seq domains")
+        .expect("CONTEXT.md records the seq-domain vocabulary");
+    let section = match doc[start..].find("\n### ") {
+        Some(end) => &doc[start..start + end],
+        None => &doc[start..],
+    };
+    for definition in [
+        "**Publication seq**",
+        "**History-ring seq**",
+        "**Journal seq**",
+        "**durable seq**",
+        "`Publication.seq`",
+        "`HistorySample.seq`",
+        "`JournalEntry.seq`",
+        "`DurableEntry.seq`",
+        "Run-scoped",
+        "file-scoped",
+        "reset-or-gap",
+        "Cursor reset-or-gap",
+    ] {
+        assert!(
+            section.contains(definition),
+            "CONTEXT.md's seq-domain record must carry the definition: \
+             missing {definition}"
+        );
+    }
+}
+
 /// The run-scoped domains: with no durable file configured, the
 /// publication seq, the per-point ring seq, and the in-memory journal
 /// seq each open the process's epoch at seq 1 — and the next

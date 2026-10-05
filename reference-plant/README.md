@@ -103,7 +103,14 @@ ci/legs/               the pair stage's legs — one file per leg, each
                        leg and the shared launch/settle/restore harness
                        the legs run on. Adding a leg is one new file —
                        no edit to the check script, the lint, or this
-                       list
+                       list. The announced-hint authenticity legs share
+                       their hostile endpoint: ci/legs/
+                       announced_source_verify.py owns the loopback
+                       `ForeignEndpoint` staging (a served forged
+                       document, a pull ledger, a `?peer=` announce),
+                       which ci/legs/tracking_source_auth.py and
+                       ci/legs/involuntary_demote_verify.py import
+
 ci/managed_carryover.py  the pair contract's managed run-state
                         carryover leg — the managed alarm kinds'
                         checkpointed run state proven carried across a
@@ -456,6 +463,43 @@ the armed standby's automatic promotion at the miss budget journals
 `origin: "failover"` with no operator actor — reading distinguishably
 from any operator request before the pair's roles are restored.
 
+The announced-hint authenticity legs then pin the tracking-source
+contract's hostile half on that same declared pair. A `?peer=` announce
+is the one seam through which a process outside the deployment can
+record an address on a serving monitor, so each of these legs stages a
+foreign endpoint in the check's own process — a loopback server serving
+one staged checkpoint document and ledgering every pull that reaches it
+— and announces it through the documented mechanism:
+
+- `ci/legs/announced_source_verify.py` opens an *announced-only* window
+  (the declared standby brought up wired at an address nothing serves, so
+  the foreign endpoint's landing announce is the only recorded tracking
+  hint) and asserts `POST /demote` answers the named `409
+  no_tracking_source`, that the refused probe is journaled by name
+  (`tracking_source_refused`) and no `tracking_source_adopted` names the
+  foreign endpoint, that the verify pass spent a bounded number of pulls
+  there, and that once the genuine standby rejoins the bounded set the
+  demote is granted toward the endpoint that *proved* the line alone;
+- `ci/legs/tracking_source_auth.py` sweeps the announce variants the
+  contract must refuse — none at all, a crafted announce naming a dead
+  address on a foreign IP (refused at the serving monitor, silently, so
+  the checkpoint read is unchanged), and the landed one serving a forged
+  document — against the deployment's *unsourced* instance, and then aims
+  a `?peer=` redirect at the tracking standby's already-established
+  `--standby` source, asserting the pair keeps exactly one `active` plus
+  one `tracking` standby and that no adoption journaled names the
+  foreign endpoint;
+- `ci/legs/involuntary_demote_verify.py` covers the path no request
+  boundary guards: a field claim preempted by the documented
+  `POST /promote`, so the owner's demotion is its own fenced write and
+  the recorded hints are consumed only through lazy verification. The
+  keyed declared pair is driven through it, and the inert-hint clause
+  on a second, *unkeyed* pair the leg spawns on its own plant — a bare
+  hint there is no tracking source at all, so the foreign endpoint's
+  ledger must read no pull at all while the demoted peer still reports
+  its own `tracking`/`orphaned` verdict and pins the endpoint the field's
+  arbitration names.
+
 The stage's legs are files, not entries in the check script: every
 `ci/legs/<name>.py` is one leg — a runnable script carrying its
 contract prose in its own docstring and its stage registration in a
@@ -472,10 +516,49 @@ leg's diagnostic stem is its file name with underscores turned to
 dashes: a violated contract fails `<stem>-failed`, two passes
 producing different digests fail `<stem>-nondeterministic`, and a
 doctored case passing silently or missing its named evidence fails
-`<stem>-unchecked`. Adding a leg is exactly one new file under
+`<stem>-unchecked`. Among the continuity legs the stage carries, the
+command-side ones are `command_switch.py` (a declared command's
+settlement crossing a documented switch), `tune_carryover.py` (a
+receipted `set_parameter` tune riding the checkpoint into the
+promoted peer, so an operator's tune survives the switch instead of
+reverting to the emitted default), and the two suspended-receipt legs
+`repromote_suspended_settle.py` (a holder re-promoted after its
+demoted peer reconverged) and `gossip_repromote_settle.py` (the same
+holder re-promoted inside the gossip window, before any peer's
+tracking pull covers the admission) — each proving the suspended
+receipt settles exactly once at the re-taken boundary rather than
+parking `Accepted` on the live active or applying stale behind a
+newer command. Adding a leg is exactly one new file under
 `ci/legs/` — no edit to `ci/check.sh`, the boundary lint, or this
 document; the leg set and each leg's contract prose live in the
 directory and its docstrings.
+
+Two legs stage what the pair loses rather than what it switches.
+`ci/legs/standby_loss.py` stops the tracking standby's process on the
+declared deployment and watches the controller of record: a receipted
+write aimed at the *tracking* standby answers the named `not_active`
+admission refusal with no field effect and no journaled command on the
+field owner; across the whole down window the field owner keeps
+scanning, keeps its `active` role, keeps settling receipted commands,
+and journals no promotion or demotion of its own — peer loss is not an
+event it reacts to. The standby then relaunches onto the manifest's
+declared wiring and persistence, rejoins `standby`/`unsynchronized`,
+reconverges to `tracking` inside the leg's declared window, and a
+`POST /promote` fired at its monitor before that first transfer
+completes is refused with the named `not_converged` verdict.
+`ci/legs/plant_loss.py` stops the spawned `dcs-plant-server` instead:
+the field owner keeps scanning with degraded-but-serving telemetry —
+`io_health` counting the per-direction failures on both sides, the
+driver link reporting `disconnected` with a named `last_error`, and the
+field's own reads re-marked down at that link boundary — while the
+declared standby never promotes on a field outage. The respawned
+plant returns **fail closed**: third-party mutation probes answer the
+named `unclaimed` refusal, never `stepped` and never a silent write,
+until the recorded owner's bounded re-attach re-arms the claim through
+`ensure_writer`; the probes then answer `fenced` naming that same
+token, the field's `Good` reads recover, and the outage's counted
+failures are still counted rather than silently reset — with no
+controller restarted anywhere in the episode.
 
 One leg in particular is about this pair's operator console rather than
 its control behaviour: `ci/legs/responsiveness.py` holds the field

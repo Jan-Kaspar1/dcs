@@ -564,9 +564,10 @@ class LagStagingTests(unittest.TestCase):
         # repromote-suspended-settle legs share the same restored
         # window and still run ahead of the tune case's a->b switch —
         # the quiesced-standby settle leg runs between standby-loss
-        # and demote-settle, and the settled-receipt-arbitration leg
-        # between repromote-suspended-settle and peer-announce, in
-        # that same launch-layout window.
+        # and demote-settle, and the gossip-repromote-settle,
+        # settled-receipt-arbitration, and command-across-promotion
+        # legs run between repromote-suspended-settle and
+        # peer-announce, in that same launch-layout window.
         self.assertEqual(
             order.index(scenarios.scenario_standby_loss) + 1,
             order.index(scenarios.scenario_quiesced_standby_settle))
@@ -584,10 +585,27 @@ class LagStagingTests(unittest.TestCase):
         self.assertEqual(
             order.index(scenarios.scenario_repromote_suspended_settle)
             + 1,
+            order.index(scenarios.scenario_gossip_repromote_settle))
+        self.assertEqual(
+            order.index(scenarios.scenario_gossip_repromote_settle) + 1,
             order.index(scenarios.scenario_settled_receipt_arbitration))
+        # The receipt-audit legs — the settled-arbitration case and the
+        # two receipt-window contracts behind it — run back to back in
+        # the same launch-layout window, and the pair clears onto the
+        # announced-source legs still on its entry roles.
         self.assertEqual(
             order.index(scenarios.scenario_settled_receipt_arbitration)
             + 1,
+            order.index(scenarios.scenario_adopted_receipt_regression))
+        self.assertEqual(
+            order.index(scenarios.scenario_adopted_receipt_regression)
+            + 1,
+            order.index(scenarios.scenario_receipt_index_collision))
+        self.assertEqual(
+            order.index(scenarios.scenario_receipt_index_collision) + 1,
+            order.index(scenarios.scenario_command_across_promotion))
+        self.assertEqual(
+            order.index(scenarios.scenario_command_across_promotion) + 1,
             order.index(scenarios.scenario_peer_announce))
         self.assertEqual(
             order.index(scenarios.scenario_peer_announce) + 1,

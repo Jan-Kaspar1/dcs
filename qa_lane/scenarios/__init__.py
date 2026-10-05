@@ -28,6 +28,26 @@ The link-loss
 scenario drives the runner-owned plant stop/start actions
 ctx['stop_plant']/ctx['start_plant'] carry and probes the run's plant
 server directly on ctx['plant'] — the field's own fencing evidence.
+The superseded-restart scenario triggers ctx['restart_controller'] —
+the lane's own restart machinery — so the demoted launched active
+comes back as a launched active whose cold-start claim preempts the
+promoted peer, and asserts the takeover half the demote-in-place leg
+leaves open: the demoted peer's reconvergence through its announced
+tracking source, the journaled `divergence_resolved` behind a cleared
+verdict, exactly one peer reporting active at every poll, the
+preempted peer's fenced demote and its `not_active` command refusal,
+and the shared `--owner-token` settlement — the field's own fencing
+answers on ctx['plant'] beside the two serving monitors and the
+peer-declared journal files. The dead-active-unconverged-recovery
+scenario drives the stop/start pair ctx['stop_controller'] and
+ctx['start_controller'] carry to stage decision 86's recorded
+recovery: a field owner that dies holding the single-writer claim
+while its standby is unconverged is recoverable only by
+restart-as-active, because promotion needs a converged verdict a dead
+peer can never supply — the quiesced standby's `not_converged`
+refusals, its kept serving, the dead owner's claim still fencing, and
+the resumed owner taking the field back with the standby reconverging
+on the new stream.
 The dead-peer-latency scenario launches the run's driven third
 controller through ctx['start_driven'] — a `--standby` peer whose
 checkpoint pulls happen only inside `POST /scan`, so a batch on its
@@ -59,6 +79,20 @@ calls, and ledgering every pull it answers. The leg reads the served
 refusal audits, and the keyed/unkeyed launch posture exercises both
 the proof gate and the command-record audit the verified document
 owes.
+
+The involuntary-demote-verify scenario drives the same seam on the
+path no request boundary guards: it preempts the field claim through
+the documented POST /promote on the tracking standby, so the owner's
+demotion is its own fenced write and the recorded hints are consumed
+by the lazy verification instead of a demote verify. It writes its own
+settled value first — through the shared command surface the leg needs
+a planted internal sample against — then stands the same forge with a
+standby-shaped document carrying that sample flipped, and reads
+ctx['journal_files'] plus the forge's hits ledger for the lazy pass's
+bounded-pull, refusal-audit, and no-adoption verdicts. The run's
+keyed/unkeyed posture selects the contract's two halves: the bounded
+verify pass and the journaled refusal under keying, the inert hint
+without it.
 
 The keyed announced-source legs' subject is the deployed pair while
 the run config keys it (ctx['pair_token'] set); when the run deploys

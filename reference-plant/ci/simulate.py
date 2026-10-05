@@ -94,7 +94,16 @@ def eprint(*args):
 
 
 class PlantClient:
-    """One line-delimited JSON connection to `dcs-plant-server`."""
+    """One line-delimited JSON connection to `dcs-plant-server`.
+
+    `close` shuts the stream down as well as the socket: a `makefile`
+    object holds its own reference to the connection, so closing only
+    the socket leaves the peer reading a live attachment. A leg that
+    stages a claim on this client and then closes it expects a *dead*
+    owner — the field's never-released rule reaps the closed
+    attachment's hold on the plant's own schedule, which it never does
+    while the handler thread still has an open fd.
+    """
 
     def __init__(self, address):
         host, port = address.rsplit(":", 1)
@@ -107,6 +116,10 @@ class PlantClient:
         return json.loads(self.stream.readline())
 
     def close(self):
+        try:
+            self.stream.close()
+        except OSError:
+            pass
         self.socket.close()
 
 
