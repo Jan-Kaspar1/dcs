@@ -196,12 +196,16 @@ fn sigterm_flushes_state_file_and_hands_the_field_to_the_resumed_run() {
         "the relaunch must report the resume at the persisted tick: {preamble:?}"
     );
     let successor = MonitorClient::new(resumed.addr);
-    assert_eq!(
-        successor.snapshot().unwrap().tick,
-        persisted.tick,
-        "the resumed run continues the persisted tick domain"
+    // The startup report above pins the exact resume position. This
+    // process is paced, so scans may complete before the first HTTP
+    // poll reaches it; those legal scans must not look like a rewind.
+    let observed = successor.snapshot().unwrap().tick;
+    assert!(
+        observed >= persisted.tick,
+        "the resumed run rewound the persisted tick domain: {observed:?} < {:?}",
+        persisted.tick
     );
-    wait_tick(&successor, persisted.tick.0 + 3, "the resumed run");
+    wait_tick(&successor, observed.0 + 3, "the resumed run");
     kill(&mut resumed);
     let _ = std::fs::remove_dir_all(&dir);
 }
