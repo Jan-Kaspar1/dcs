@@ -159,6 +159,7 @@ mod endpoint;
 pub mod ethercat;
 pub mod filter_bank;
 pub mod ijmuiden;
+pub mod library_plant;
 mod spec;
 pub mod specs;
 pub mod station;

@@ -566,6 +566,83 @@ fn checked_in_document_validates_and_documents_its_lint() {
 }
 
 #[test]
+fn the_rate_of_rise_annunciation_is_the_dedicated_kind_the_transition_record_adopted() {
+    // #396 settles decision 75's composed-versus-dedicated question on
+    // the post-M10 transition record's answer: the dedicated
+    // `rate-of-rise` kind (#321) replaces the `deviation-monitor`
+    // composition over a slower trend, because the incident names
+    // one-sided *rising-level* semantics the windowed relative-
+    // divergence monitor cannot express — it flagged a falling level
+    // the same way. The adopted shape is what this asserts:
+    let model = fixture_model();
+    let layout = emit().layout;
+    let detector = model
+        .components
+        .iter()
+        .find(|instance| instance.id == layout.divergence)
+        .expect("the layout names a declared detector instance");
+    assert_eq!(
+        detector.kind, "rate-of-rise",
+        "the adopted annunciation shape is the dedicated kind"
+    );
+    // No composed stand-in survives beside it: the removed trend
+    // `signal-filter` and the removed `deviation-monitor` leave neither
+    // a second level input nor a dimensionless `deviation` carrier in
+    // the document.
+    assert!(
+        !model
+            .components
+            .iter()
+            .any(|instance| instance.kind == "deviation-monitor"),
+        "the composed stand-in must be gone once the dedicated kind is adopted"
+    );
+    let filters = model
+        .components
+        .iter()
+        .filter(|instance| instance.kind == "signal-filter")
+        .count();
+    assert_eq!(
+        filters, 1,
+        "only the alarm-path filter remains; the trend filter left with the composed monitor"
+    );
+    assert!(
+        !model
+            .io_points
+            .iter()
+            .any(|point| point.id == PointId(202) || point.id == PointId(208)),
+        "the trend-input and windowed-deviation carriers left with them"
+    );
+    // The served interface is unchanged from the operator's view: the
+    // flag lands on the same `deviating` carrier, the same `rate`
+    // carrier serves the detector's per-scan difference, and the same
+    // `ror-alarm` latches off the same flag. Only the detector's
+    // internals and the two carriers the composition itself owned
+    // changed shape.
+    let flag = model
+        .io_points
+        .iter()
+        .find(|point| point.id == layout.deviating)
+        .unwrap();
+    assert!(flag.journaled, "the flag keeps its decision-74 record");
+    let signal = model
+        .signals
+        .iter()
+        .find(|signal| signal.source == layout.deviating)
+        .expect("the flag keeps its named signal");
+    assert_eq!(signal.name, "deviating");
+    assert_eq!(
+        detector.parameters.get("rate_limit"),
+        Some(&Value::Float(0.012)),
+        "the dedicated detector declares the per-tick rise bound"
+    );
+    assert_eq!(
+        detector.ports.keys().collect::<Vec<_>>(),
+        vec!["in", "rate", "rising"],
+        "the dedicated kind reads the level and reports its difference and one-sided flag"
+    );
+}
+
+#[test]
 fn document_assembles_through_the_standard_registry() {
     let model = fixture_model();
     let driver = build_driver(&model);

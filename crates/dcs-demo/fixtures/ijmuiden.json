@@ -402,15 +402,6 @@
       "unit": "m"
     },
     {
-      "id": 202,
-      "direction": "in",
-      "value_type": "float",
-      "initial": {
-        "float": 3.0
-      },
-      "unit": "m"
-    },
-    {
       "id": 207,
       "direction": "in",
       "value_type": "float",
@@ -1114,14 +1105,6 @@
       "group": "level"
     },
     {
-      "id": 10202,
-      "name": "level-trend-in",
-      "source": 202,
-      "unit": "m",
-      "description": "Selected level delivered to the trend filter",
-      "group": "level"
-    },
-    {
       "id": 10203,
       "name": "level-filtered",
       "source": 203,
@@ -1150,7 +1133,7 @@
       "name": "level-ror",
       "source": 206,
       "unit": "m",
-      "description": "Filtered level delivered to the divergence detector",
+      "description": "Filtered level delivered to the rate-of-rise detector",
       "group": "level"
     },
     {
@@ -1171,7 +1154,7 @@
     },
     {
       "id": 10210,
-      "name": "rising",
+      "name": "deviating",
       "source": 210,
       "unit": "",
       "description": "The canal level's rise meets the declared bound — the rate-of-rise flag",
@@ -1182,7 +1165,7 @@
       "name": "deviating-in",
       "source": 211,
       "unit": "",
-      "description": "Divergence flag delivered to its alarm",
+      "description": "Rate-of-rise flag delivered to its alarm",
       "group": "level"
     },
     {
@@ -2345,14 +2328,6 @@
     {
       "from": {
         "point": 201
-      },
-      "to": {
-        "point": 200
-      }
-    },
-    {
-      "from": {
-        "point": 202
       },
       "to": {
         "point": 200
