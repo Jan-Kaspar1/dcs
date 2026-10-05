@@ -192,8 +192,10 @@ impl StateSink {
     /// capture durably landed. `Err` names the sink's recorded write
     /// failure, or the bound a stalled writer overran — the caller
     /// that promised durability fails by name rather than answering
-    /// it. The wait never touches the executor lock.
-    pub(crate) fn attest(&self, ordinal: u64, timeout: Duration) -> Result<(), String> {
+    /// it. The wait never touches the executor lock. The controller's
+    /// graceful SIGTERM exit attests its final checkpoint through
+    /// this wait, inside its documented shutdown bound.
+    pub fn attest(&self, ordinal: u64, timeout: Duration) -> Result<(), String> {
         let health = self.drain.shared().wait_through(ordinal, timeout);
         if health.drained >= ordinal {
             return Ok(());
