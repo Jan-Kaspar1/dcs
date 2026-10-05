@@ -501,7 +501,19 @@ leg's diagnostic stem is its file name with underscores turned to
 dashes: a violated contract fails `<stem>-failed`, two passes
 producing different digests fail `<stem>-nondeterministic`, and a
 doctored case passing silently or missing its named evidence fails
-`<stem>-unchecked`. Adding a leg is exactly one new file under
+`<stem>-unchecked`. Among the continuity legs the stage carries, the
+command-side ones are `command_switch.py` (a declared command's
+settlement crossing a documented switch), `tune_carryover.py` (a
+receipted `set_parameter` tune riding the checkpoint into the
+promoted peer, so an operator's tune survives the switch instead of
+reverting to the emitted default), and the two suspended-receipt legs
+`repromote_suspended_settle.py` (a holder re-promoted after its
+demoted peer reconverged) and `gossip_repromote_settle.py` (the same
+holder re-promoted inside the gossip window, before any peer's
+tracking pull covers the admission) — each proving the suspended
+receipt settles exactly once at the re-taken boundary rather than
+parking `Accepted` on the live active or applying stale behind a
+newer command. Adding a leg is exactly one new file under
 `ci/legs/` — no edit to `ci/check.sh`, the boundary lint, or this
 document; the leg set and each leg's contract prose live in the
 directory and its docstrings.

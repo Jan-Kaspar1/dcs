@@ -1942,6 +1942,71 @@ Implementation order: second, after [daily architecture review](daily-architectu
   declared pair is driven and therefore stages the contradiction with
   no freeze and no timing race.
 
+### Landed 2026-10-04 (gossip-window re-promote settle and command-across-promotion legs, #1480)
+
+- Two new scenario legs close the lane gaps the settled case left. They
+  run in the same restored pre-switch window behind
+  `1960_repromote_settled_settle` — ahead of the peer-announce leg,
+  alongside #1479's `1970_settled_receipt_arbitration`, whose raced
+  promotion leaves the same entry roles — as
+  `1965_gossip_repromote_settle` and
+  `1990_command_across_promotion`. The command-across-promotion leg
+  took `1980` rather than a second `1970` slot so every leg in the
+  window keeps the distinct number the discovery order reads. The first
+  is the per-revision lane evidence for the variant #1109's
+  post-reconvergence leg explicitly scopes away — the re-promote inside
+  the *gossip window* QA finding
+  `suspended-command-orphaned-on-holder-repromote` (#708) named: the
+  holder's own demote suspends the still-pending receipt `Accepted`
+  inside one scan window, and the same holder is re-promoted the moment
+  it reports a promotable verdict, before the peer's next tracking pull
+  can carry the admission back covered. The runtime contract it pins is
+  that a suspended still-`Accepted` receipt resolves at the re-taken
+  boundary — re-queued and settled once, never parked against an empty
+  queue on the live active, never resurrected behind a newer command on
+  the same point.
+- The staging is the reproduction's own race on the rig's free-running
+  scans: the receipted write and the demote are issued back to back,
+  and a scan that beats the demote means nothing froze suspended — the
+  leg restores the launch roles and restages with a fresh identity
+  rather than reporting a pass over an admission that applied
+  normally. Whether the peer's pull closed the window first is recorded
+  as evidence, never as a verdict: both paths owe the same exactly-once
+  resolution, and the audit reads that, not the race.
+- The audit spans both serving monitors and both durable journals, then
+  follows the finding's zombie half: a newer write on the same point
+  settles strictly after the re-promoted boundary's own settle, the
+  pair switches to the peer, and the successor serves the newer value
+  with no second settlement for either admission. Named diagnostics are
+  `gossip-repromote-settle-failed`,
+  `gossip-repromote-settle-nondeterministic`, and the self-check's
+  `gossip-repromote-settle-unchecked`; two consecutive passes produce
+  identical digests, and a run predating the contract's receipt
+  attribution or admission counters reports inconclusive.
+- `1990_command_across_promotion` is the lane evidence #381 pinned
+  in-workspace and the lane never exercised: a declared command picked
+  off the served `GET /schema` through the lane's own helpers settles
+  `applied` exactly once on the peer that served it, survives a
+  documented promotion as a receipt on the new active, and is
+  resubmitted there — one settlement per submission across the pair's
+  journals, none lost, none duplicated, none replayed from the old
+  peer. The emitted and adapted records the command produces continue
+  on the promoted peer in tick order with their component attribution
+  unchanged and no pre-promotion entry re-emitted, and the pair
+  returns to its pre-scenario roles for the legs behind it.
+- The consumer-boundary mirrors land beside them:
+  `reference-plant/ci/legs/gossip_repromote_settle.py` proves the same
+  gossip-window contract on the customer-owned pair, where the driven
+  pair makes the ordering deterministic (only the demoted holder is
+  scanned between the demote and the re-promote, so the sibling's
+  window provably never covered the admission — asserted before the
+  promote), carrying two doctored negatives — the parked receipt and
+  the stale zombie — and `ci/legs/tune_carryover.py` completes the
+  receipted parameter-tune carryover #666's acceptance named, its
+  settled receipt identical in both peers' adopted logs with the tuned
+  value standing on the promoted peer. Both are file-discovered legs:
+  one new file each, no `check.sh`, boundary-lint, or harness edit.
+
 ### Landed 2026-10-04 (bounded step-dt leg, #1177)
 
 - The bounded plant-step contract's per-revision rig evidence — the

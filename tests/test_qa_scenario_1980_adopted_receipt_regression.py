@@ -501,6 +501,9 @@ class AdoptedReceiptRegressionTests(unittest.TestCase):
             order.index(scenarios.scenario_receipt_index_collision))
         self.assertEqual(
             order.index(scenarios.scenario_receipt_index_collision) + 1,
+            order.index(scenarios.scenario_command_across_promotion))
+        self.assertEqual(
+            order.index(scenarios.scenario_command_across_promotion) + 1,
             order.index(scenarios.scenario_peer_announce))
         self.assertIs(
             verify.case_function('adopted-receipt-regression'),

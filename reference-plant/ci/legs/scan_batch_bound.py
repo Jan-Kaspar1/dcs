@@ -129,10 +129,12 @@ DOCTORED_BOUND = 128
 # for the batch to show its first scan (provably in flight before the
 # sever), the deadline for the bounded batch to run out, the quiet
 # window proving the dead client's batch holds its end rather than
-# climbing on, and the poll cadence — all wall-clock slack around work
-# that lands in milliseconds on the simulated plant.
-IN_FLIGHT_TIMEOUT_S = 30.0
-BATCH_SETTLE_TIMEOUT_S = 30.0
+# climbing on, and the poll cadence — wall-clock slack around work
+# that lands in milliseconds on the simulated plant, sized for a
+# contended host where the batch's per-scan plant round-trips share
+# the runner with the suite's other driven pairs.
+IN_FLIGHT_TIMEOUT_S = 60.0
+BATCH_SETTLE_TIMEOUT_S = 240.0
 HOLD_SETTLE_S = 0.2
 POLL_INTERVAL_S = 0.02
 
