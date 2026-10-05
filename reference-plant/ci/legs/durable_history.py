@@ -425,6 +425,25 @@ def spawn_or_abort(name, binary, args, rig, files, standby=None):
     )
 
 
+def resilient_http(url, body=None):
+    """`simulate.http` resubmitted across a dropped request — the
+    empty-body `500` a shed or dispatcher-teardown drop answers with,
+    or the refused/reset connection of the listener's rebind window.
+    Both signatures mean the request never ran, so the resubmit
+    replays nothing; a handler-answered failure re-raises at once."""
+    for attempt in range(pair.SCAN_DROP_ATTEMPTS):
+        try:
+            return simulate.http(url, body)
+        except Exception as error:
+            if (
+                simulate.dropped_request(error)
+                and attempt + 1 < pair.SCAN_DROP_ATTEMPTS
+            ):
+                time.sleep(pair.SCAN_DROP_WAIT)
+                continue
+            raise
+
+
 def durable_page(url, since, failures, point=None, doctor=None):
     """One `GET /history/durable?since=<since>` read — the durable
     store's served window, `seq`-cursor read like the journal's with
@@ -438,7 +457,7 @@ def durable_page(url, since, failures, point=None, doctor=None):
     if point is not None:
         query += f"&point={point}"
     try:
-        body = simulate.http(query)
+        body = resilient_http(query)
     except urllib.error.HTTPError as error:
         if error.code == 404:
             raise Inconclusive(
@@ -492,17 +511,44 @@ def tracking(report):
 
 def role(url, failures):
     """The peer's served RoleReport."""
-    return pair.get(f"{url}/role", "GET /role", failures)
+    try:
+        return resilient_http(f"{url}/role")
+    except Exception as error:
+        failures.append(f"GET /role answered {error}")
+        raise Abort
 
 
 def scan_n(url, scans, failures):
     """Drive `scans` scans through one `POST /scan` — the served
-    batch bound paces the request; returns the served snapshot."""
-    try:
-        return simulate.http(f"{url}/scan", {"scans": scans})
-    except Exception as error:
-        failures.append(f"POST /scan on {url} answered {error}")
-        raise Abort
+    batch bound paces the request; returns the served snapshot. A
+    dropped request — the empty-body `500` a shed or dispatcher
+    teardown answers with, or the refused connection of the
+    listener's rebind window — never ran, so it resubmits inside the
+    bounded window the monitor's rebind keeps; a handler-answered
+    failure carries its named body and fails the leg on it."""
+    for attempt in range(pair.SCAN_DROP_ATTEMPTS):
+        try:
+            return simulate.http(f"{url}/scan", {"scans": scans})
+        except urllib.error.HTTPError as error:
+            detail = error.read().decode(errors="replace").strip()
+            if (
+                error.code == 500
+                and not detail
+                and attempt + 1 < pair.SCAN_DROP_ATTEMPTS
+            ):
+                time.sleep(pair.SCAN_DROP_WAIT)
+                continue
+            failures.append(
+                f"POST /scan on {url} answered {error.code}: {detail}"
+            )
+            raise Abort
+        except Exception as error:
+            dropped = simulate.dropped_request(error)
+            if dropped and attempt + 1 < pair.SCAN_DROP_ATTEMPTS:
+                time.sleep(pair.SCAN_DROP_WAIT)
+                continue
+            failures.append(f"POST /scan on {url} answered {error}")
+            raise Abort
 
 
 def reconverge(rig, failures):
@@ -537,9 +583,11 @@ def stop_and_checkpoint(rig, failures):
     state file it leaves — the persisted tick equal to the tracking
     run's last served tick, under the manifest's fingerprint. Returns
     the persisted tick."""
-    stopped = pair.get(
-        f"{rig.standby_url}/snapshot", "GET /snapshot", failures
-    )["tick"]
+    try:
+        stopped = resilient_http(f"{rig.standby_url}/snapshot")["tick"]
+    except Exception as error:
+        failures.append(f"GET /snapshot answered {error}")
+        raise Abort
     pair.stop(rig.standby)
     try:
         with open(rig.standby_files["state_file"]) as handle:
