@@ -415,14 +415,21 @@ fn dispatch(
             }
         }
         BusRequest::Step { dt } => {
-            // `RegisterBank::step` panics on a non-finite or negative
-            // dt; the protocol turns that contract violation into a
-            // named refusal — the same rule the plant protocol's step
-            // applies.
-            if !dt.is_finite() || dt < 0.0 {
+            // `RegisterBank::step` panics on a non-finite, negative, or
+            // over-bound dt; the protocol turns that contract violation
+            // into a named refusal — the same rule the plant
+            // protocol's step applies, bound included: the bank is a
+            // `SimDriver` keyed by register, so it carries the same
+            // bounded step contract, and a `dt` past the bound would
+            // wind a declared element's accumulator out of the range
+            // from one request.
+            if !dt.is_finite() || dt < 0.0 || dt > dcs_sim::MAX_STEP_DT {
                 return BusResponse::Error {
                     error: BusError::InvalidRequest {
-                        detail: format!("step dt must be finite and non-negative, got {dt}"),
+                        detail: format!(
+                            "step dt must be finite, non-negative, and at most {}, got {dt}",
+                            dcs_sim::MAX_STEP_DT
+                        ),
                     },
                 };
             }
