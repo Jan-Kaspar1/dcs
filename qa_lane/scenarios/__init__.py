@@ -28,6 +28,26 @@ The link-loss
 scenario drives the runner-owned plant stop/start actions
 ctx['stop_plant']/ctx['start_plant'] carry and probes the run's plant
 server directly on ctx['plant'] — the field's own fencing evidence.
+The superseded-restart scenario triggers ctx['restart_controller'] —
+the lane's own restart machinery — so the demoted launched active
+comes back as a launched active whose cold-start claim preempts the
+promoted peer, and asserts the takeover half the demote-in-place leg
+leaves open: the demoted peer's reconvergence through its announced
+tracking source, the journaled `divergence_resolved` behind a cleared
+verdict, exactly one peer reporting active at every poll, the
+preempted peer's fenced demote and its `not_active` command refusal,
+and the shared `--owner-token` settlement — the field's own fencing
+answers on ctx['plant'] beside the two serving monitors and the
+peer-declared journal files. The dead-active-unconverged-recovery
+scenario drives the stop/start pair ctx['stop_controller'] and
+ctx['start_controller'] carry to stage decision 86's recorded
+recovery: a field owner that dies holding the single-writer claim
+while its standby is unconverged is recoverable only by
+restart-as-active, because promotion needs a converged verdict a dead
+peer can never supply — the quiesced standby's `not_converged`
+refusals, its kept serving, the dead owner's claim still fencing, and
+the resumed owner taking the field back with the standby reconverging
+on the new stream.
 The dead-peer-latency scenario launches the run's driven third
 controller through ctx['start_driven'] — a `--standby` peer whose
 checkpoint pulls happen only inside `POST /scan`, so a batch on its
