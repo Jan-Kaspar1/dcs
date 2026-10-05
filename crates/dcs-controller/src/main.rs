@@ -3448,6 +3448,59 @@ mod tests {
         }
     }
 
+    /// Decision 110's declared-magnitude seam: a plant whose own cold
+    /// start journals more records than the default bound carries names
+    /// its own bound through `--journal-capacity`, and the run refuses
+    /// only the incoherent value. A zero bound would silently drop every
+    /// record — the loss decision 110 exists to keep impossible — so it
+    /// is refused at parse beside every other numeric option's rule, and
+    /// a non-numeric spelling names the flag rather than defaulting.
+    #[test]
+    fn the_journal_capacity_is_parsed_declared_and_refuses_zero() {
+        let base = [
+            "model.json".to_string(),
+            "--scan-ms".to_string(),
+            "100".to_string(),
+            "--listen".to_string(),
+            "127.0.0.1:0".to_string(),
+        ];
+        let parse = |value: &str| {
+            Options::parse(
+                base.iter()
+                    .cloned()
+                    .chain(["--journal-capacity".to_string(), value.to_string()]),
+            )
+        };
+
+        // A declared bound is carried through as written.
+        for value in ["1", "1840", "65536"] {
+            let options = match parse(value) {
+                Ok(options) => options,
+                Err(error) => panic!("--journal-capacity {value} must parse: {error}"),
+            };
+            assert_eq!(options.journal_capacity, Some(value.parse().unwrap()));
+        }
+
+        // The flag's own spelling: it is what an operator reads, so the
+        // refusal names it rather than a generic parse failure.
+        for value in ["0", "nope", "-1", ""] {
+            let error = match parse(value) {
+                Ok(_) => panic!("--journal-capacity {value:?} must fail parsing"),
+                Err(error) => error,
+            };
+            assert!(
+                error.contains("--journal-capacity"),
+                "--journal-capacity {value:?}: {error}"
+            );
+        }
+
+        // Absent, the option names no bound at all — the run takes both
+        // capacities from `MonitorConfig::default()`, which is the
+        // platform default no plant has to declare.
+        let options = Options::parse(base.iter().cloned()).unwrap();
+        assert_eq!(options.journal_capacity, None);
+    }
+
     #[test]
     fn a_stalled_consumer_drops_under_the_named_counter_without_blocking() {
         let (report, collected) = collector();

@@ -61,10 +61,21 @@
 //! Every named behavior is asserted through monitor-client,
 //! plant-protocol, and journal payloads — never printed output; the
 //! digest the run returns proves repeated scripted runs identical.
+//! One command runs the whole scenario, and its two tests are the run
+//! itself and the repeat-digest comparison:
+//!
+//! ```text
+//! cargo test -p dcs-controller --test library_plant
+//! ```
 //!
 //! The builder-side half of #423 — the composition, the merged
 //! document's validate/lint/assembly, and the merged dynamics
-//! declaration's load — lives in `crates/dcs-build/tests/library_plant.rs`.
+//! declaration's load — lives in `crates/dcs-build/tests/library_plant.rs`
+//! and runs as:
+//!
+//! ```text
+//! cargo test -p dcs-build --test library_plant
+//! ```
 
 use dcs_build::library_plant::{LibraryPlantConfig, LibraryPlantLayout, library_plant};
 use dcs_build::station::{AlarmLayout, ManagedAlarmLayout};
