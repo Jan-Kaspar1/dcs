@@ -1723,18 +1723,32 @@ fn two_identical_scripted_runs_produce_identical_sample_sequences() {
 fn a_step_with_an_invalid_dt_is_a_named_refusal_not_a_link_failure() {
     with_server(&fixture_decls(), |_, addr| {
         let bus = BusDriver::connect(addr, &fixture_points()).unwrap();
-        // The server refuses a negative or non-finite dt rather than
-        // letting the bank's contract panic.
+        // The server refuses a negative, non-finite, or over-bound dt
+        // rather than letting the bank's contract panic — the bound is
+        // the bank's own `SimDriver` bound, which the bank would assert
+        // on.
         assert!(matches!(bus.step(-0.5), Err(LinkError::InvalidRequest(_))));
         assert!(matches!(
             bus.step(f64::NAN),
             Err(LinkError::InvalidRequest(_))
         ));
+        let Err(LinkError::InvalidRequest(detail)) = bus.step(1e308) else {
+            panic!("a finite dt past the bound is refused by name");
+        };
+        assert!(
+            detail.contains(&dcs_sim::MAX_STEP_DT.to_string()),
+            "the refusal names the bound: {detail}"
+        );
         // The refusal is a protocol answer, not a transport failure:
-        // the link stays live and a well-formed step still lands.
+        // the link stays live and the bank moved no tick for it.
         assert!(bus.connected());
         assert_eq!(bus.last_failure(), None);
-        assert_eq!(bus.step(0.1), Ok(Tick(1)));
+        let refused_at = bus.step(0.0).unwrap();
+        assert_eq!(refused_at, Tick(1));
+        // The bound is a usable ceiling, not a wedge: the device steps
+        // on through it, and an ordinary step lands beside it.
+        assert_eq!(bus.step(dcs_sim::MAX_STEP_DT), Ok(Tick(2)));
+        assert_eq!(bus.step(0.1), Ok(Tick(3)));
     });
 }
 

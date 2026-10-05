@@ -1888,6 +1888,7 @@ Implementation order: second, after [daily architecture review](daily-architectu
   identical digests; a rig that is unreachable, that predates the
   served `journal_sink` section, that declares no `--journal-file`, or
   that admits no mount lever reports inconclusive.
+
 ### Landed 2026-10-03 (settled-receipt arbitration leg, #1479)
 
 - The contradictory-settled-receipt arbitration contract — the
@@ -1941,6 +1942,64 @@ Implementation order: second, after [daily architecture review](daily-architectu
   declared pair is driven and therefore stages the contradiction with
   no freeze and no timing race.
 
+### Landed 2026-10-04 (bounded step-dt leg, #1177)
+
+- The bounded plant-step contract's per-revision rig evidence — the
+  lane half of #683's fix, and the ENABLER the leg records: the
+  protocol documents that the server refuses an invalid step rather
+  than panicking and that every response must round-trip the
+  protocol's own types, so a step request must not permanently corrupt
+  shared field state; the bound names the refusal, or element state
+  stays finite. The finding's reproduction is the shape no request
+  boundary could refuse on its own — `claim_writer(X); step(1e308)`
+  on a map with an integrator, where `1e308` is a *finite* f64, so
+  strict JSON carries it and the decoder reads it: applied, it wound
+  the accumulator past the `f64` range or parked an accumulated clock
+  where no legal later step could move it again, and the field then
+  served `{"float":null}` frames this protocol's own `Value` cannot
+  deserialize — every read a `Disconnected`, the point census dead
+  for every attachment, and a write plus a step unable to repair it
+  because the element recomputed from the corrupted state. The fix
+  bounds a tick's advance at `MAX_STEP_DT` (10^6 time units, about
+  11.6 days — four to five orders of magnitude above any scan period a
+  run paces itself at) and refuses the rest by name, which the lane
+  scenario leg `0760_step_bound` exercises through the lane's
+  claim-aware attachment: the shipped `dcs-plant-ctl` or the raw
+  plant-protocol client the claim legs drive, under the settled
+  active's pinned `--owner-token` (`ctx['plant_owner']`).
+- Two probes, in that order deliberately. The ordinary over-bound
+  advance (`dt:1e7`) goes first so a rig predating the bound absorbs a
+  step the field can survive and never sees the finding's `1e308`
+  vector applied; a rig whose first probe answers `stepped` reports
+  inconclusive rather than judging a contract it cannot see. On a rig
+  carrying the contract both answer `invalid_request` with the bound in
+  their detail, change nothing, and the `{"float":null}` signature never
+  appears — the driven undriven point's stored value stands, the
+  shipped client's `read`/`list` decode finite, and a finite step
+  still advances the plant. The leg measures on the lane what pacing
+  cannot move: the field is paced by its standing owner, so a served
+  sample legitimately moves between two reads and only an
+  element-undriven point's stored value is comparable across the
+  probes; the whole-census equality is the consumer leg's assertion,
+  over a pair nothing steps but the harness. The claim and the pair's
+  launch roles are restored, and both peers' scans, served snapshots,
+  io_health, and roles must be undisturbed.
+- Named diagnostics are `step-bound-failed` (a probe applied or
+  answered off-contract rather than the named bound refusal, a refused
+  step that moved the driven point or the census, a `{"float":null}`
+  frame on the driven point or anywhere in the census, a finite step
+  refused after the refusals, a baseline that never restored — or no
+  served image of it at all — a moved role, or a stalled scan) and
+  `step-bound-nondeterministic` (a
+  refusal whose stored value moved, or a finite step whose tick never
+  advanced past the pre-probe canary), with the self-check's
+  `step-bound-unchecked` covering every planted negative — the
+  refused-probe clauses are pure predicates over one observation
+  record, replayed over each named class before the leg trusts itself
+  on the rig. A run with no settled pair, no published plant endpoint,
+  no pinned owner token, a claim refused under that token, a census
+  serving no finite float input, or a rig that applied an over-bound
+  advance reports inconclusive.
 
 ### Landed 2026-10-04 (quality-aware cause-alarm leg, #827/#871/#1134/#1424)
 
@@ -2012,6 +2071,98 @@ Implementation order: second, after [daily architecture review](daily-architectu
   doctored cases require the cause alarm to stay silent over the
   degraded contact and the field command to stand through the trip; both
   must fail naming the annunciation and the stop the honest run saw.
+
+
+### Landed 2026-10-04 (phantom source-restart leg, #694/#1132/#1133)
+
+- The same-generation `source_restarted` suppression contract is now
+  exercised per revision by scenario leg
+  `2195_phantom_source_restart`, filed in the launch-layout window
+  behind `2190_tracker_realign_tick_order` and ahead of the schedule's
+  `2200_failover` case. The defect it reproduces is the QA finding
+  `demote-track-journals-phantom-source-restart`: the regression
+  detector treated any checkpoint below the run's last alignment (or
+  below the run tick where none stood) as a source restart, so a
+  demoted peer's first tracking pull — the demotion having cleared
+  the alignment, leaving the served checkpoint one tick behind the
+  demoted run's own — and a same-generation peer merely lagging one
+  scan both tripped it and filled the durable journal with restarts
+  that never happened (seq 638 phantom with `was_aligned: null`,
+  seq 639 the one-tick regression). The fix reads the checkpoint's
+  `generation` stamp: the uninterrupted successor still stamps the
+  generation the demoted run's own captures carried, so the reset was
+  the peer's tracking state and nothing journals, while a source that
+  genuinely cold-restarts mints a new generation and the boundary is
+  preserved. The contract is WW-FND-004's named-evidence journal
+  clause and WW-LCM-001's continuity, consolidated from #694's fix,
+  its #731/#777 evidence, and the two filed exercise tickets.
+- Each pass stages both halves on the deployed pair. With the pair
+  settled and tracking, the field owner is demoted and the launched
+  standby promotes — the rig's armed standby claims the released
+  field on its next scan — and the demoted owner then follows its
+  successor across repeated tracking applies, each pull trailing the
+  served stream by a scan. Through the demoted peer's serving monitor
+  and its per-controller `--journal-file` the pass audits that no
+  `source_restarted` appeared: not on the first apply, whose
+  checkpoint regresses against the cleared alignment, and not on the
+  mid-tracking one-tick regressions the repeated applies open. The
+  tracked source's container is then cold-restarted through the
+  runner's `cold_restart_controller` seam (`docker stop`, its
+  host-side state.json dropped, `docker start`), so the resumed
+  process mints a fresh generation and serves a regressed stream —
+  and the tracking peer must journal exactly one `source_restarted`
+  carrying its named evidence, the prior alignment as `was_aligned`
+  and the resumed stream tick below it as `resumed_at`. The pass then
+  walks the documented order back so the pair rests on its launch
+  roles for the cases behind it.
+- Named diagnostics are `source-restart-evidence-failed` (a phantom
+  on the same-generation stream, the genuine cold restart journaling
+  none or more than one, an entry missing its `was_aligned`/
+  `resumed_at` evidence or claiming a resumed tick that never
+  regressed, the demoted peer never reconverging, the launch roles
+  unrestored) and `source-restart-evidence-nondeterministic` (a
+  refused demotion, promote or restart, a starved watch, an
+  unconverged baseline posture, the restart producing no regressed
+  stream, a duplicated boundary record, an armed failover firing
+  inside the held window, diverging pass digests), with the
+  self-check's `phantom-source-restart-unchecked` covering the planted
+  phantom, the silent and duplicated genuine restart, the entries
+  stripped of their named evidence, the malformed axis, the
+  unconverged reset and the unrestored roles. Two consecutive passes
+  produce identical digests. A run context carrying only one
+  endpoint, no cold-restart seam or no per-controller journal files,
+  an unreachable, unconverged or off-layout pair, and a staged run
+  whose served checkpoints predate the `generation` stamp the
+  suppression reads all report inconclusive.
+- The consumer-boundary mirror is
+  `reference-plant/ci/legs/phantom_source_restart.py` — one new file
+  under `ci/legs/`, discovered by the file-named convention, needing
+  no `check.sh`, boundary-lint or harness edit. It converges the
+  manifest-declared pair, gates the contract surface (each served
+  checkpoint carrying the integer `tick` and `generation`, each
+  declared `journal_file` readable), runs the demote/promote cycle
+  and its fail-back with the roles exchanged — auditing each
+  demoted peer's serving and durable journal for the phantom and the
+  served stream position's monotonicity — then cold-restarts the
+  field owner (its process stopped, its declared state file dropped, a
+  fresh process respawned on its declared listen address with nothing
+  to resume) and requires its tracking peer to journal exactly one
+  `source_restarted` in both records, carrying the named evidence. Its
+  two doctored cases — a phantom planted into the same-generation
+  audit, and the cold restart withheld while the leg still asserts its
+  one entry — must each fail carrying the leg's evidence. A pinned
+  release predating the `generation` stamp reports the leg's named
+  `phantom-source-restart-digest inconclusive` verdict rather than a
+  product failure.
+- The workspace half is a driven-pair regression in
+  `crates/dcs-controller/tests/hot_swap.rs` spanning the whole clause
+  rather than one transition: an orderly demote/promote cycle plus a
+  fail-back, each peer's demotion clearing its own alignment and
+  pulling its own successor repeatedly, neither peer's journal
+  carrying a `source_restarted`, the served `stream_tick` monotone
+  across both cycles, and the retained detection half — the tracked
+  source cold-restarted, its tracking peer journaling exactly one
+  boundary entry naming the alignment it broke.
 
 ### Landed 2026-10-05 (standby-loss, dead-active, superseded-restart, and plant-loss acceptance, #1475 consolidating #565/#581/#655/#670)
 
@@ -2098,8 +2249,9 @@ Implementation order: second, after [daily architecture review](daily-architectu
   the per-direction failures on both sides, the boundary streak counting,
   the backend link `disconnected` with a named `last_error`, and the
   probed field input's own reads re-marked down at that link boundary)
-  while the declared standby never promotes on a field outage. The respawned plant
-  returns **fail closed**: a dedicated plant-socket attachment's mutation
+  while the declared standby never promotes on a field outage. The
+  respawned plant returns **fail closed**: a dedicated plant-socket
+  attachment's mutation
   probes answer the named `unclaimed` refusal — never `stepped`, never a
   silent write — until the recorded owner's bounded re-attach re-arms the
   claim through `ensure_writer`, after which the probes answer `fenced`

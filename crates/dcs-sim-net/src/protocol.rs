@@ -54,8 +54,15 @@ pub enum PlantRequest {
     /// `SimDriver::step`. Stepping is an explicit protocol operation so a
     /// controller scan can advance the shared plant deterministically and
     /// a second client observes the same stepped values. `dt` must be
-    /// finite and non-negative; the server refuses otherwise rather than
-    /// panic.
+    /// finite, non-negative, and at most
+    /// [`dcs_sim::MAX_STEP_DT`](dcs_sim::MAX_STEP_DT) — one tick is one
+    /// scan period; the server refuses any other `dt` by name as
+    /// [`PlantError::InvalidRequest`] rather than panic. The bound is
+    /// what keeps a single accepted request from corrupting shared field
+    /// state: a *finite* huge `dt` is protocol-legal JSON, and applying
+    /// it would wind an element's accumulator past the `f64` range — or
+    /// park an accumulated clock where no legal later step can move it —
+    /// for every attachment until the plant restarts.
     Step {
         /// The simulated time this step advances by.
         dt: f64,
@@ -404,8 +411,9 @@ pub enum PlantError {
     },
     /// The request itself could not be served: a line that does not parse
     /// as a [`PlantRequest`], or a [`PlantRequest::Step`] whose `dt` is
-    /// negative or non-finite. `detail` is human-readable diagnostics,
-    /// not a machine contract.
+    /// negative, non-finite, or above
+    /// [`dcs_sim::MAX_STEP_DT`](dcs_sim::MAX_STEP_DT). `detail` is
+    /// human-readable diagnostics, not a machine contract.
     InvalidRequest {
         /// Why the request was refused.
         detail: String,

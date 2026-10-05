@@ -356,12 +356,20 @@ fn dispatch(
             applied(shared.driver.write(point, value))
         }
         PlantRequest::Step { dt } => {
-            // `SimDriver::step` panics on a non-finite or negative dt; the
-            // protocol turns that contract violation into a named refusal.
-            if !dt.is_finite() || dt < 0.0 {
+            // `SimDriver::step` panics on a non-finite, negative, or
+            // over-bound dt; the protocol turns that contract violation
+            // into a named refusal. The bound is the load-bearing half:
+            // a *finite* huge dt is protocol-legal JSON, and accepting
+            // it would wind an element's accumulator past the f64 range
+            // — or park an accumulated clock where no legal later step
+            // can move it — from one request, permanently.
+            if !dt.is_finite() || dt < 0.0 || dt > dcs_sim::MAX_STEP_DT {
                 return PlantResponse::Error {
                     error: PlantError::InvalidRequest {
-                        detail: format!("step dt must be finite and non-negative, got {dt}"),
+                        detail: format!(
+                            "step dt must be finite, non-negative, and at most {}, got {dt}",
+                            dcs_sim::MAX_STEP_DT
+                        ),
                     },
                 };
             }
