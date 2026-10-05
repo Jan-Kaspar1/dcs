@@ -349,15 +349,33 @@ fn server_reported_errors_exit_nonzero() {
         assert!(!output.status.success());
         assert!(stderr(&output).contains("expects"), "{output:?}");
 
-        // A step the protocol refuses — negative dt is a well-formed
+        // A step the protocol refuses — a negative dt is a well-formed
         // request the server rejects, not a usage error.
         let output = ctl(addr, &["step", "-0.5"]);
         assert!(!output.status.success());
         assert!(
-            stderr(&output).contains("finite and non-negative"),
+            stderr(&output).contains("finite, non-negative, and at most"),
             "{output:?}"
         );
     });
+}
+
+#[test]
+fn an_over_bound_step_never_reaches_the_wire_through_the_tool() {
+    // The documented step bound at the shipped tool's own argument
+    // boundary: a huge finite dt — `1e308` is protocol-legal JSON, so
+    // only the bound can refuse it — exits nonzero naming the bound
+    // without asking the field anything. The field's dispatched refusal
+    // is the wire half, asserted in `tests/remote.rs`.
+    for huge in ["1e7", "1e308"] {
+        let output = ctl_args(&["127.0.0.1:9", "step", huge]);
+        assert!(!output.status.success(), "{huge} must be refused");
+        let stderr = stderr(&output);
+        assert!(
+            stderr.contains("invalid step") && stderr.contains("1000000"),
+            "the tool's own boundary names the bound: {stderr}"
+        );
+    }
 }
 
 #[test]
@@ -384,6 +402,9 @@ fn malformed_arguments_fail_with_usage_never_a_panic() {
         vec![dead, "step"],
         vec![dead, "step", "abc"],
         vec![dead, "step", "nan"],
+        // An over-bound dt is an argument-boundary refusal too: the
+        // bound the field enforces is named before anything is sent.
+        vec![dead, "step", "1e308"],
         vec![dead, "ping", "extra"],
     ];
     for args in &cases {

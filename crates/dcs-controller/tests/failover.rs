@@ -35,16 +35,14 @@ use dcs_model::PlantModel;
 use dcs_monitor::MonitorClient;
 use dcs_runtime::{Checkpoint, Executor, WriteGate};
 use dcs_sim_net::{RemoteDriver, RemoteError};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::{self, JoinHandle};
+use std::thread;
 
 mod support;
 
 use support::{
-    CONTROLLER, SimTcp, audit, controller_model, image_value, kill, pump, settled_receipts,
+    CONTROLLER, Relay, SimTcp, audit, controller_model, image_value, kill, settled_receipts,
     sim_tcp_document, spawn_controller, spawn_controller_logged, spawn_plant, write_model,
 };
 
@@ -93,86 +91,6 @@ const ALARM_ACK: PointId = PointId(30);
 /// The stale-restart test's pump out-of-service exclusion stand-in —
 /// the second protection command the QA reproduction reverted.
 const PUMP_OOS: PointId = PointId(31);
-
-/// A controllable network path for the checkpoint-pull heartbeat: while
-/// `partitioned` is clear the relay forwards each connection to the
-/// upstream the standby's `--standby` is pointed at; while set it
-/// accepts and immediately drops them — the refused/EOF failure a
-/// partitioned or dead peer produces. The flag is only ever flipped
-/// between scripted ticks, so a pull's verdict is never racy. The
-/// upstream itself is retargetable — a restarted process binds a new
-/// ephemeral port, and the configured `--standby` address must keep
-/// reaching it.
-struct Relay {
-    addr: SocketAddr,
-    upstream: Arc<std::sync::Mutex<SocketAddr>>,
-    partitioned: Arc<AtomicBool>,
-    stop: Arc<AtomicBool>,
-    accept: Option<JoinHandle<()>>,
-}
-
-impl Relay {
-    /// A relay forwarding to `upstream` — the active's monitor address
-    /// the standby's `--standby` is pointed at.
-    fn forwarding(upstream: SocketAddr) -> Self {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let addr = listener.local_addr().unwrap();
-        let upstream = Arc::new(std::sync::Mutex::new(upstream));
-        let partitioned = Arc::new(AtomicBool::new(false));
-        let stop = Arc::new(AtomicBool::new(false));
-        let accept = {
-            let upstream = Arc::clone(&upstream);
-            let partitioned = Arc::clone(&partitioned);
-            let stop = Arc::clone(&stop);
-            thread::spawn(move || {
-                for stream in listener.incoming() {
-                    if stop.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    let Ok(stream) = stream else { continue };
-                    if partitioned.load(Ordering::Relaxed) {
-                        // Dropped on the floor: the pull sees a refused
-                        // or immediately closed connection — fast, never
-                        // a hang.
-                        drop(stream);
-                    } else {
-                        let upstream = *upstream.lock().unwrap();
-                        thread::spawn(move || pump(stream, upstream));
-                    }
-                }
-            })
-        };
-        Self {
-            addr,
-            upstream,
-            partitioned,
-            stop,
-            accept: Some(accept),
-        }
-    }
-
-    /// Drops or restores the heartbeat path mid-run.
-    fn partition(&self, cut: bool) {
-        self.partitioned.store(cut, Ordering::Relaxed);
-    }
-
-    /// Repoints the forwarding at a restarted process's new address —
-    /// each later connection follows it.
-    fn retarget(&self, upstream: SocketAddr) {
-        *self.upstream.lock().unwrap() = upstream;
-    }
-}
-
-impl Drop for Relay {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        // Wake the blocking accept so the loop observes the flag.
-        let _ = TcpStream::connect(self.addr);
-        if let Some(accept) = self.accept.take() {
-            let _ = accept.join();
-        }
-    }
-}
 
 /// The in-process reference run: the same model on a `RemoteDriver` over
 /// its own plant server, behind a `WriteGate` the script closes and

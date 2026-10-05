@@ -1525,3 +1525,227 @@ impl Recorder {
 fn settled_key(receipt: &CommandReceipt) -> Vec<u8> {
     serde_json::to_vec(receipt).expect("a CommandReceipt serializes")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dcs_core::{Command, Direction, IoDriver, IoError, Sample, Value, ValueKind};
+    use dcs_runtime::{Executor, PointMap};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    /// The in-memory driver the monitor's other fixtures use — one
+    /// writable image-carried `In` point whose value the command path
+    /// writes and the scan echoes.
+    struct StubDriver {
+        points: Mutex<HashMap<PointId, Sample>>,
+    }
+
+    impl StubDriver {
+        fn new(points: &[(PointId, Value)]) -> Self {
+            Self {
+                points: Mutex::new(
+                    points
+                        .iter()
+                        .map(|&(point, value)| (point, Sample::good(value, Tick::ZERO)))
+                        .collect(),
+                ),
+            }
+        }
+    }
+
+    impl IoDriver for StubDriver {
+        fn read(&self, point: PointId) -> Result<Sample, IoError> {
+            self.points
+                .lock()
+                .unwrap()
+                .get(&point)
+                .copied()
+                .ok_or(IoError::UnknownPoint(point))
+        }
+
+        fn write(&self, point: PointId, value: Value) -> Result<(), IoError> {
+            let mut points = self.points.lock().unwrap();
+            let sample = points.get_mut(&point).ok_or(IoError::UnknownPoint(point))?;
+            *sample = Sample::good(value, Tick::ZERO);
+            Ok(())
+        }
+    }
+
+    const HELD: PointId = PointId(40);
+
+    fn held_map() -> PointMap {
+        PointMap::new().with_writable_internal(
+            HELD,
+            Direction::In,
+            ValueKind::Bool,
+            Value::Bool(false),
+        )
+    }
+
+    fn held_rig<'d>(driver: &'d StubDriver) -> Executor<'d> {
+        Executor::new(driver, held_map(), Vec::new()).unwrap()
+    }
+
+    /// The write the recorder tests admit — one admission whose whole
+    /// record (`command`, `actor`) rides every receipt unchanged, so
+    /// the merge correlates the adopted view against the local verdict
+    /// by submission and not by luck.
+    fn held_write(value: bool) -> Command {
+        Command::WriteValue {
+            point: HELD,
+            kind: ValueKind::Bool,
+            value: Value::Bool(value),
+        }
+    }
+
+    /// Every `command_settled` receipt the recorder's served journal
+    /// carries — the pair's command audit for this run.
+    fn settled(recorder: &Recorder) -> Vec<CommandReceipt> {
+        recorder
+            .journal(0)
+            .iter()
+            .filter_map(|entry| match &entry.event {
+                JournalEvent::CommandSettled { receipt } => Some(receipt.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// One submission plus its settling scan, recorded the way the
+    /// monitor's `POST /command` and scan lanes record it: the admission
+    /// is noted at its own index, then the scan's window diff journals
+    /// the settle the transition observed.
+    fn admit_and_settle(
+        recorder: &mut Recorder,
+        executor: &mut Executor<'_>,
+        value: bool,
+    ) -> CommandReceipt {
+        let receipt =
+            executor.submit_command_as(held_write(value), Some("recorder-probe".to_string()));
+        let index = executor.receipt_base() + executor.receipts().len() as u64 - 1;
+        recorder.note_command(index, receipt, Tick(1));
+        let tick = executor.scan();
+        recorder.record_scan(executor, tick);
+        let settled = executor.receipts()[0].clone();
+        assert_eq!(settled.outcome, CommandOutcome::Applied { tick });
+        settled
+    }
+
+    /// The finding's own chain at the recorder's boundary: a settled
+    /// receipt, then an adopted checkpoint whose window at that same
+    /// absolute index still reads `Accepted` — the peer's capture landed
+    /// before the applying boundary — then the covering checkpoint that
+    /// shows the settled verdict again. The merge must refuse the
+    /// regression, so the recorder never observes the stale view and
+    /// exactly one `command_settled` stands for the admission.
+    #[test]
+    fn an_adopted_stale_view_journals_one_settle_for_the_admission() {
+        let driver = StubDriver::new(&[]);
+        let mut recorder = Recorder::new(MonitorConfig::default(), Tick::ZERO, None).unwrap();
+        let mut executor = held_rig(&driver);
+        let verdict = admit_and_settle(&mut recorder, &mut executor, true);
+        assert_eq!(
+            settled(&recorder).len(),
+            1,
+            "the settling scan journals the admission once: {:?}",
+            settled(&recorder)
+        );
+
+        // The peer's staler window: the same submission at the same
+        // absolute index, still pending on its own capture.
+        let mut staler = executor.checkpoint();
+        staler.receipts[0].outcome = CommandOutcome::Accepted {
+            apply_tick: Tick(3),
+        };
+        executor.apply(&staler).unwrap();
+        recorder.record_scan(&executor, executor.tick());
+        assert_eq!(
+            executor.receipts()[0].outcome,
+            verdict.outcome,
+            "an adopted stale view may never regress a settled receipt: \
+             {:?}",
+            executor.receipts()
+        );
+        assert_eq!(
+            settled(&recorder).len(),
+            1,
+            "the regression journals nothing and the observation keeps \
+             the settled verdict: {:?}",
+            settled(&recorder)
+        );
+
+        // The covering adoption: the peer's next capture, showing the
+        // settled verdict. Confirming a verdict this run already
+        // journaled is not a second observable transition.
+        let mut covering = staler.clone();
+        covering.receipts[0].outcome = verdict.outcome.clone();
+        executor.apply(&covering).unwrap();
+        recorder.record_scan(&executor, executor.tick());
+        assert_eq!(
+            executor.receipts()[0].outcome,
+            verdict.outcome,
+            "the covering view confirms the verdict: {:?}",
+            executor.receipts()
+        );
+        assert_eq!(
+            settled(&recorder).len(),
+            1,
+            "one admission carries exactly one command_settled: {:?}",
+            settled(&recorder)
+        );
+    }
+
+    /// The recorder's half of the same contract, staged where the merge
+    /// cannot cover for it: a run whose served window really did regress
+    /// to `Accepted` and is then restored — a regressed checkpoint
+    /// lineage a restored run adopts, the shape the adoption can
+    /// produce — records the restored verdict as an observable
+    /// transition, and the index-keyed settle dedup still keeps the
+    /// admission at one `command_settled`.
+    #[test]
+    fn a_regressed_then_restored_receipt_journals_one_settle() {
+        let driver = StubDriver::new(&[]);
+        let mut recorder = Recorder::new(MonitorConfig::default(), Tick::ZERO, None).unwrap();
+        let mut run = held_rig(&driver);
+        let verdict = admit_and_settle(&mut recorder, &mut run, true);
+        let lineage = run.checkpoint();
+
+        // The regressed lineage: the same admission's window, captured
+        // before the boundary that settled it.
+        let mut regressed = lineage.clone();
+        regressed.receipts[0].outcome = CommandOutcome::Accepted {
+            apply_tick: Tick(3),
+        };
+        let regressed_driver = StubDriver::new(&[]);
+        let served =
+            Executor::restore(&regressed_driver, held_map(), Vec::new(), &regressed, None).unwrap();
+        assert_eq!(
+            served.receipts()[0].outcome,
+            regressed.receipts[0].outcome,
+            "the restored run serves the regressed window verbatim"
+        );
+        recorder.record_scan(&served, Tick(2));
+        assert_eq!(
+            recorder.receipt_outcomes.get(&0),
+            Some(&regressed.receipts[0]),
+            "the observation followed the regressed window"
+        );
+
+        // The covering view lands on a run of its own: the restored
+        // verdict is an observable transition this record sees, and the
+        // settle it names was already journaled at this index.
+        let covering_driver = StubDriver::new(&[]);
+        let covering =
+            Executor::restore(&covering_driver, held_map(), Vec::new(), &lineage, None).unwrap();
+        assert_eq!(covering.receipts()[0].outcome, verdict.outcome);
+        recorder.record_scan(&covering, Tick(3));
+        assert_eq!(
+            settled(&recorder).len(),
+            1,
+            "a re-settle the index-keyed dedup already recorded cannot \
+             become a second journal line: {:?}",
+            settled(&recorder)
+        );
+    }
+}

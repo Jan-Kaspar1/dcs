@@ -281,7 +281,10 @@ impl std::error::Error for DeviceError {}
 /// Why [`FanoutDriver::step`] or a backend's [`StepHook`] failed.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StepError {
-    /// `dt` was negative or non-finite.
+    /// `dt` was negative, non-finite, or above
+    /// [`dcs_sim::MAX_STEP_DT`](dcs_sim::MAX_STEP_DT) — the simulated
+    /// backend's own step bound, which a fan-out carrying one such
+    /// backend carries for every backend.
     InvalidDt(f64),
     /// A backend's step hook failed; `backend` names the model device or
     /// the shared local simulated backend.
@@ -300,7 +303,11 @@ impl fmt::Display for StepError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidDt(dt) => {
-                write!(f, "step dt must be finite and non-negative, got {dt}")
+                write!(
+                    f,
+                    "step dt must be finite, non-negative, and at most {}, got {dt}",
+                    dcs_sim::MAX_STEP_DT
+                )
             }
             Self::Backend { backend, detail } => {
                 write!(f, "backend {backend} failed to step: {detail}")
@@ -2248,9 +2255,10 @@ impl FanoutDriver {
     /// input — then runs each backend's step hook.
     ///
     /// A route carries the value only: quality does not propagate across
-    /// backends. `dt` must be finite and non-negative; unlike
-    /// [`SimDriver::step`] an invalid `dt` is [`StepError::InvalidDt`],
-    /// never a panic.
+    /// backends. `dt` must be finite, non-negative, and at most
+    /// [`dcs_sim::MAX_STEP_DT`](dcs_sim::MAX_STEP_DT) — the bound the
+    /// simulated backends themselves carry; unlike [`SimDriver::step`]
+    /// an invalid `dt` is [`StepError::InvalidDt`], never a panic.
     pub fn step(&self, dt: f64) -> Result<(), StepError> {
         self.step_impl(dt, true)
     }
@@ -2266,7 +2274,10 @@ impl FanoutDriver {
     }
 
     fn step_impl(&self, dt: f64, include_field: bool) -> Result<(), StepError> {
-        if !dt.is_finite() || dt < 0.0 {
+        // The simulated backends assert this bound themselves, so the
+        // fan-out refuses it first and names it as a step error rather
+        // than letting one backend's contract panic the run.
+        if !dt.is_finite() || dt < 0.0 || dt > dcs_sim::MAX_STEP_DT {
             return Err(StepError::InvalidDt(dt));
         }
         for route in &self.routes {

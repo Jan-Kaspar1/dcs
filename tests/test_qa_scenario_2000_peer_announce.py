@@ -273,7 +273,8 @@ class PeerAnnounceTests(unittest.TestCase):
     def test_registered(self):
         order = list(scenarios.SCENARIOS)
         # The restored pre-switch window behind the demote-carry,
-        # repromote-suspended-settle, and settled-receipt-arbitration
+        # repromote-suspended-settle, gossip-repromote-settle,
+        # settled-receipt-arbitration, and command-across-promotion
         # cases — the settled tracking pair ahead of the tune case's
         # a->b switch.
         self.assertLess(
@@ -282,9 +283,26 @@ class PeerAnnounceTests(unittest.TestCase):
         self.assertEqual(
             order.index(scenarios.scenario_demote_carry_settle) + 1,
             order.index(scenarios.scenario_repromote_suspended_settle))
+        # The two receipt-window contracts behind it — the adopted
+        # stale-view regression and the collided submission index —
+        # run in the same launch-layout window and clear onto the
+        # peer-announce case with the entry roles restored.
+        self.assertEqual(
+            order.index(scenarios.scenario_repromote_suspended_settle)
+            + 1,
+            order.index(scenarios.scenario_gossip_repromote_settle))
+        self.assertEqual(
+            order.index(scenarios.scenario_gossip_repromote_settle) + 1,
+            order.index(scenarios.scenario_settled_receipt_arbitration))
         self.assertEqual(
             order.index(scenarios.scenario_settled_receipt_arbitration)
             + 1,
+            order.index(scenarios.scenario_adopted_receipt_regression))
+        self.assertEqual(
+            order.index(scenarios.scenario_receipt_index_collision) + 1,
+            order.index(scenarios.scenario_command_across_promotion))
+        self.assertEqual(
+            order.index(scenarios.scenario_command_across_promotion) + 1,
             order.index(scenarios.scenario_peer_announce))
         # The forged-standby, announced-source-verify, stale-island,
         # journal-boundary, and suspended-alias legs share the same

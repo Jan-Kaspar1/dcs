@@ -302,17 +302,27 @@ class RepromoteSuspendedSettleTests(unittest.TestCase):
     def test_registered(self):
         order = list(scenarios.SCENARIOS)
         # The same restored window as the demote-carry leg — the
-        # settled-receipt-arbitration leg runs in it too — ahead
-        # of the peer-announce case and the tune case's a->b
-        # switch.
+        # gossip-window, settled-receipt-arbitration, and
+        # command-across-promotion legs follow it, ahead of the
+        # peer-announce case and the tune case's a->b switch.
         self.assertEqual(
             order.index(scenarios.scenario_demote_carry_settle) + 1,
             order.index(scenarios.scenario_repromote_suspended_settle))
         self.assertEqual(
             order.index(
                 scenarios.scenario_repromote_suspended_settle) + 1,
+            order.index(scenarios.scenario_gossip_repromote_settle))
+        self.assertEqual(
+            order.index(scenarios.scenario_gossip_repromote_settle) + 1,
+            order.index(scenarios.scenario_settled_receipt_arbitration))
+        self.assertEqual(
+            order.index(scenarios.scenario_settled_receipt_arbitration)
+            + 1,
+            order.index(scenarios.scenario_adopted_receipt_regression))
+        self.assertEqual(
             order.index(
-                scenarios.scenario_settled_receipt_arbitration))
+                scenarios.scenario_command_across_promotion) + 1,
+            order.index(scenarios.scenario_peer_announce))
         self.assertIs(
             verify.case_function('repromote-suspended-settle'),
             scenarios.scenario_repromote_suspended_settle)

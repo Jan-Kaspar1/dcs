@@ -7129,6 +7129,98 @@ mod tests {
         assert_eq!(restored.receipts(), active.receipts());
     }
 
+    /// The adopted staler receipt view #709 records — a checkpoint whose
+    /// window at an index this run already settled still reads
+    /// `Accepted`, because the peer's capture landed before the applying
+    /// boundary. Rule (a)'s absorption refuses the regression: the run's
+    /// own terminal verdict stands, the covering adoption that confirms
+    /// it lands no second transition for the recorder to journal, and the
+    /// admission is never re-queued onto the field.
+    ///
+    /// The pre-fix shape is the verbatim `clone_from` of the adopted
+    /// window: the local outcome moves backward silently, the covering
+    /// adoption restores it, and the recorder reads that restoration as a
+    /// fresh observable transition and journals `command_settled` a
+    /// second time for one admission.
+    #[test]
+    fn an_adopted_stale_view_never_regresses_a_settled_receipt() {
+        let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut holder = setpoint_rig(&driver);
+        holder.submit_command_as(
+            write_value(10, ValueKind::Float, Value::Float(5.0)),
+            Some("operator-7".to_string()),
+        );
+        holder.scan();
+        let settled = holder.receipts()[0].clone();
+        assert_eq!(settled.outcome, CommandOutcome::Applied { tick: Tick(1) });
+        assert_eq!(driver_value(&driver, 20), Value::Float(10.0));
+
+        // The peer's staler window: the same submission at the same
+        // absolute index, still pending on the source's own capture.
+        let mut staler = holder.checkpoint();
+        staler.receipts[0].outcome = CommandOutcome::Accepted {
+            apply_tick: Tick(2),
+        };
+
+        // The adoption the finding staged: a settled receipt the adopted
+        // window still shows `Accepted` is a staler record of this run's
+        // own verdict, not a license to un-settle it.
+        holder.apply(&staler).unwrap();
+        assert_eq!(
+            holder.receipts()[0].outcome,
+            CommandOutcome::Applied { tick: Tick(1) },
+            "an adopted stale view must never regress a settled receipt: \
+             {:?}",
+            holder.receipts()
+        );
+        assert_eq!(
+            holder.snapshot().command_queue.depth,
+            0,
+            "the restored verdict must not re-queue the admission: {:?}",
+            holder.snapshot().command_queue
+        );
+        // And nothing re-applies on the field: a regressed entry lands
+        // the command a second time at this run's next boundary.
+        holder.scan();
+        assert_eq!(
+            driver_value(&driver, 20),
+            Value::Float(10.0),
+            "the regression must not re-execute the command"
+        );
+        assert_eq!(holder.receipts()[0], settled);
+
+        // The covering adoption — the peer's next capture, showing the
+        // settled verdict — confirms rather than re-settles: whatever the
+        // peer captured, the index still carries this run's one
+        // settlement, and alternating between the two views at the
+        // ping-pong's cadence never trades the verdict back.
+        let covering = holder.checkpoint();
+        for round in 0..4 {
+            holder.apply(&staler).unwrap();
+            holder.apply(&covering).unwrap();
+            assert_eq!(
+                holder.receipts()[0],
+                settled,
+                "round {round}: the pair must not trade the verdict back"
+            );
+        }
+
+        // The refusal is per submission, not per index: a different
+        // admission at the same index is the split mint rule (c) names,
+        // so the adopted entry lands as the line's own record there
+        // rather than being read as a staler view of this run's.
+        let mut foreign = holder.checkpoint();
+        foreign.receipts[0].actor = Some("operator-9".to_string());
+        holder.apply(&foreign).unwrap();
+        assert_eq!(
+            holder.receipts()[0].actor.as_deref(),
+            Some("operator-9"),
+            "a different submission at the index is not this run's \
+             settled verdict to hold: {:?}",
+            holder.receipts()
+        );
+    }
+
     /// The settled-verdict order both lines compute from a contradictory
     /// pair alone: an effect that reached the field outranks a peer's
     /// differing rejection, the earlier application is the pair's first
