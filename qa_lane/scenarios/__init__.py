@@ -80,6 +80,20 @@ refusal audits, and the keyed/unkeyed launch posture exercises both
 the proof gate and the command-record audit the verified document
 owes.
 
+The involuntary-demote-verify scenario drives the same seam on the
+path no request boundary guards: it preempts the field claim through
+the documented POST /promote on the tracking standby, so the owner's
+demotion is its own fenced write and the recorded hints are consumed
+by the lazy verification instead of a demote verify. It writes its own
+settled value first — through the shared command surface the leg needs
+a planted internal sample against — then stands the same forge with a
+standby-shaped document carrying that sample flipped, and reads
+ctx['journal_files'] plus the forge's hits ledger for the lazy pass's
+bounded-pull, refusal-audit, and no-adoption verdicts. The run's
+keyed/unkeyed posture selects the contract's two halves: the bounded
+verify pass and the journaled refusal under keying, the inert hint
+without it.
+
 The keyed announced-source legs' subject is the deployed pair while
 the run config keys it (ctx['pair_token'] set); when the run deploys
 an unkeyed primary pair, the lane stages a second always-keyed probe
