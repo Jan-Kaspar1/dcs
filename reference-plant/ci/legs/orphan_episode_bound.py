@@ -116,7 +116,7 @@ import stranded_rejoin
 LEG = {
     # The next free slot in the stage's recorded order (870 is the
     # cause-alarm-quality leg); no two legs may share one.
-    "order": 880,
+    "order": 881,
     "title": "the orphan-episode-bound leg",
     "passes": "orphan-episode-bound-leg",
     "tampers": [
