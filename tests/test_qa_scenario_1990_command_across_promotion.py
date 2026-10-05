@@ -305,7 +305,7 @@ class CommandAcrossPromotionTests(unittest.TestCase):
             order.index(scenarios.scenario_receipt_index_collision)
             + 1,
             order.index(
-                scenarios.scenario_adopted_receipt_regression))
+                scenarios.scenario_command_across_promotion))
         self.assertEqual(
             order.index(
                 scenarios.scenario_command_across_promotion) + 1,
