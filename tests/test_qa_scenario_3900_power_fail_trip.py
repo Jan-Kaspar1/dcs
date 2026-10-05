@@ -688,6 +688,9 @@ class PowerTripTests(unittest.TestCase):
             order.index(scenarios.scenario_ack_edge_lifecycle))
         self.assertEqual(
             order.index(scenarios.scenario_ack_edge_lifecycle) + 1,
+            order.index(scenarios.scenario_cause_alarm_quality))
+        self.assertEqual(
+            order.index(scenarios.scenario_cause_alarm_quality) + 1,
             order.index(scenarios.scenario_dcs_ctl))
         self.assertIs(verify.case_function('power-fail-trip'),
                       scenarios.scenario_power_fail_trip)
