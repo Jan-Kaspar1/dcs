@@ -129,12 +129,35 @@ DOCTORED_BOUND = 128
 # for the batch to show its first scan (provably in flight before the
 # sever), the deadline for the bounded batch to run out, the quiet
 # window proving the dead client's batch holds its end rather than
-# climbing on, and the poll cadence — all wall-clock slack around work
-# that lands in milliseconds on the simulated plant.
+# climbing on, and the poll cadence — all wall-clock slack around the
+# batch's work, none of it a contract assertion. Every check below is
+# an exactness claim (the tick lands exactly on the batch's bound, the
+# plant exactly on it, the follow-up exactly one past); the timings
+# only decide how long the run *waits* for that exactness to arrive.
+#
+# The settle deadline therefore scales with the declared bound rather
+# than naming one figure: a 256-scan batch that runs its scans in
+# milliseconds on an idle machine takes far longer on a CI runner
+# already carrying the rest of the workspace's test binaries, and a
+# fixed budget read that contention as a contract violation — the leg
+# reported "the batch never terminated" for a batch that was
+# terminating perfectly, just slower than the budget (main runs
+# 37236005898 and this branch's 37273526223; the tick stood at 188 and
+# 225 of 256 rather than having overrun). The budget is now generous
+# per scan, so the wall clock cannot decide a contract the tick
+# counter decides exactly.
+SETTLE_S_PER_SCAN_S = 1.0
+SETTLE_MIN_S = 30.0
 IN_FLIGHT_TIMEOUT_S = 30.0
-BATCH_SETTLE_TIMEOUT_S = 30.0
 HOLD_SETTLE_S = 0.2
 POLL_INTERVAL_S = 0.02
+
+
+def batch_settle_timeout(bound):
+    """The severed batch's wait budget: the floor, or a generous
+    per-scan allowance for the bound the leg asks the monitor to run."""
+    return max(SETTLE_MIN_S, bound * SETTLE_S_PER_SCAN_S)
+
 
 # The tracking-first pair ticks the restore phase drives — the pair
 # leg's convergence count, past the adopted image's one-pull lag.
@@ -325,7 +348,7 @@ def scan_batch_pass(args, tamper):
             evidence["severed_at"] = tick
         finally:
             client.close()
-        deadline = time.monotonic() + BATCH_SETTLE_TIMEOUT_S
+        deadline = time.monotonic() + batch_settle_timeout(bound)
         while tick < target and time.monotonic() < deadline:
             time.sleep(POLL_INTERVAL_S)
             tick = served_tick(duty_url, failures)
