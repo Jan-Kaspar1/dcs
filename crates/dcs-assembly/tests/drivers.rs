@@ -6,11 +6,11 @@
 //! named [`AssemblyError`] variants before any scan.
 
 use dcs_assembly::{
-    AssemblyError, BuildError, ComponentRegistry, DriverRegistry, assemble, resolve_drivers,
-    sim_driver,
+    AssemblyError, BuildError, ComponentRegistry, DriverRegistry, StepError, assemble,
+    resolve_drivers, sim_driver,
 };
 use dcs_blocks::{AnalogInput, Pid};
-use dcs_core::{Direction, IoDriver, LinkState, PointId, TelemetrySnapshot, Value};
+use dcs_core::{Direction, IoDriver, LinkState, PointId, TelemetrySnapshot, Tick, Value};
 use dcs_model::{DeviceId, PlantModel};
 use dcs_runtime::Component;
 use dcs_sim::{ChannelId, ChannelMap, PointBinding, SimDriver};
@@ -348,6 +348,34 @@ fn sim_only_model_still_builds_through_the_registry() {
         panic!("level raw must be Float")
     };
     assert!((level - 12.0).abs() < 0.5, "level={level}");
+}
+
+#[test]
+fn an_over_bound_step_is_a_named_fan_out_refusal() {
+    // QA finding `huge-step-dt-poisons-plant-state`: the fan-out
+    // carries the simulated backends' bounded step contract, so a
+    // *finite* huge `dt` — a shape the request boundary cannot refuse
+    // as unspellable — is `StepError::InvalidDt` naming the bound
+    // rather than one backend's assert panicking the run. The refused
+    // step moves no backend: the local simulated bank holds its tick,
+    // and a legal step at the bound advances it as any other.
+    let model = model(TANK_LOOP);
+    let driver = resolve_drivers(&model, &DriverRegistry::standard())
+        .unwrap()
+        .build()
+        .unwrap();
+    driver.step(0.1).unwrap();
+    let before = driver.sim().unwrap().tick();
+    for over in [dcs_sim::MAX_STEP_DT + 1.0, 1e7, 1e308] {
+        assert_eq!(driver.step(over), Err(StepError::InvalidDt(over)));
+        assert_eq!(driver.sim().unwrap().tick(), before);
+    }
+    assert_eq!(
+        driver.step(dcs_sim::MAX_STEP_DT),
+        Ok(()),
+        "the bound itself is a usable ceiling"
+    );
+    assert_eq!(driver.sim().unwrap().tick(), Tick(before.0 + 1));
 }
 
 #[test]

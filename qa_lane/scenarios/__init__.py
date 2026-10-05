@@ -60,6 +60,20 @@ refusal audits, and the keyed/unkeyed launch posture exercises both
 the proof gate and the command-record audit the verified document
 owes.
 
+The involuntary-demote-verify scenario drives the same seam on the
+path no request boundary guards: it preempts the field claim through
+the documented POST /promote on the tracking standby, so the owner's
+demotion is its own fenced write and the recorded hints are consumed
+by the lazy verification instead of a demote verify. It writes its own
+settled value first — through the shared command surface the leg needs
+a planted internal sample against — then stands the same forge with a
+standby-shaped document carrying that sample flipped, and reads
+ctx['journal_files'] plus the forge's hits ledger for the lazy pass's
+bounded-pull, refusal-audit, and no-adoption verdicts. The run's
+keyed/unkeyed posture selects the contract's two halves: the bounded
+verify pass and the journaled refusal under keying, the inert hint
+without it.
+
 The keyed announced-source legs' subject is the deployed pair while
 the run config keys it (ctx['pair_token'] set); when the run deploys
 an unkeyed primary pair, the lane stages a second always-keyed probe
@@ -104,7 +118,25 @@ published endpoint — fenced step/write probes, the conditional and
 shared grants under foreign and owner tokens (ctx['plant_owner']
 names the standing owner's pin), the release legs, and a rogue
 preemption are all ops the tool does not expose — while its field
-census rides the tool's `list`. Every plant-probe attachment above
+census rides the tool's `list`. The three staged-versus-field legs —
+`2330_standby_divergence`, `2335_divergence_resolution`, and
+`2340_diverged_field_recovery` — ride the same split and the same
+`ctx['plant_owner']` pins: each induces its skew through a raw-client
+write under the *shared* claim the settled active's pinned
+`--owner-token` grants, because the unconditional preempt that
+`claim_writer` performs lands the owner's next write fenced, demotes
+it in place, and stamps `source_owns_field: false` on every later
+checkpoint — which supersedes a `Diverged` verdict outright rather
+than convicting one. The lifecycle legs read the converged-and-clear
+halves on the same attachment (its fault injection and clearing ride
+the shipped tool's `fault`/`clear-fault` subcommands, the ops the tool
+does expose), while the wedge-recovery leg stages the preempting
+interposer itself and drives the runner's controller stop/start
+actions (`ctx['stop_controller']`/`ctx['start_controller']`) for
+decision 94's recorded remedy — a relaunch of the wedged field owner
+as a fresh active — reading the wedge's duration and the field's
+stored values as evidence beside the served verdicts. Every
+plant-probe attachment above
 stays host-side on the published loopback port — the placement the
 run config's recorded `endpoint_placement` gives the shared-claim
 legs; an attachment that must sit inside the rig network instead

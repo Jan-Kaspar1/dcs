@@ -36,7 +36,13 @@ ci/lockfile.py         the committed-lockfile leg — the manifest's
                        declared pin read through `cargo metadata
                        --no-deps`, the lockfile parsed as TOML, the
                        release crates' recorded sources held to the
-                       pin before any fetch can rewrite the artifact
+                       pin before any fetch can rewrite the artifact,
+                       and the revision held to the one that pin names
+                       for every spelling Cargo accepts in `rev =` —
+                       a `tag`'s target and every ref a `rev` names
+                       read back off the remote, a full sha compared
+                       literally, a short sha held to abbreviate the
+                       recorded revision
 ci/alarm_validation.py the alarm-validation leg — the emitted model's
                        managed-alarm record audited, doctored copies
                        refused by the released `dcs-controller
@@ -97,7 +103,14 @@ ci/legs/               the pair stage's legs — one file per leg, each
                        leg and the shared launch/settle/restore harness
                        the legs run on. Adding a leg is one new file —
                        no edit to the check script, the lint, or this
-                       list
+                       list. The announced-hint authenticity legs share
+                       their hostile endpoint: ci/legs/
+                       announced_source_verify.py owns the loopback
+                       `ForeignEndpoint` staging (a served forged
+                       document, a pull ledger, a `?peer=` announce),
+                       which ci/legs/tracking_source_auth.py and
+                       ci/legs/involuntary_demote_verify.py import
+
 ci/managed_carryover.py  the pair contract's managed run-state
                         carryover leg — the managed alarm kinds'
                         checkpointed run state proven carried across a
@@ -181,8 +194,17 @@ declare must name the identical tag or `rev`.
 
 `rev = "<commit>"` names the identical immutable commit — the recorded
 commit `docs/releases/v0.10.0/record.md` carries — and is always
-supported. `Cargo.lock` is committed so every build resolves the same
-sources; a tag pin resolves the tag once and the committed lockfile
+supported. Cargo accepts any git rev in `rev =`, and a pin it resolves
+afresh on every resolve — a branch name, a tag name, an abbreviated sha
+— is checked the same way a `tag` is: the `lockfile` stage reads what
+the remote serves under that name and requires the lockfile to record
+exactly that, so a lockfile recording a commit the branch has moved
+past is `lockfile-stale` rather than a silent pass. Such a pin is
+checked, but it still resolves to whatever the branch names at the
+moment anyone runs `cargo update`, so prefer an immutable spelling —
+`tag = "<release>"` or a full-sha `rev =` — for anything a fresh clone
+has to reproduce. `Cargo.lock` is committed so every build resolves the
+same sources; a tag pin resolves the tag once and the committed lockfile
 records the commit it landed on. The two are one artifact, not two
 declarations that drift: the committed lockfile records this
 manifest's pin — the same remote, the same `tag`/`rev`, resolved to the
@@ -425,6 +447,43 @@ checkpoint-adopted journal showing the same attributed record, while
 the armed standby's automatic promotion at the miss budget journals
 `origin: "failover"` with no operator actor — reading distinguishably
 from any operator request before the pair's roles are restored.
+
+The announced-hint authenticity legs then pin the tracking-source
+contract's hostile half on that same declared pair. A `?peer=` announce
+is the one seam through which a process outside the deployment can
+record an address on a serving monitor, so each of these legs stages a
+foreign endpoint in the check's own process — a loopback server serving
+one staged checkpoint document and ledgering every pull that reaches it
+— and announces it through the documented mechanism:
+
+- `ci/legs/announced_source_verify.py` opens an *announced-only* window
+  (the declared standby brought up wired at an address nothing serves, so
+  the foreign endpoint's landing announce is the only recorded tracking
+  hint) and asserts `POST /demote` answers the named `409
+  no_tracking_source`, that the refused probe is journaled by name
+  (`tracking_source_refused`) and no `tracking_source_adopted` names the
+  foreign endpoint, that the verify pass spent a bounded number of pulls
+  there, and that once the genuine standby rejoins the bounded set the
+  demote is granted toward the endpoint that *proved* the line alone;
+- `ci/legs/tracking_source_auth.py` sweeps the announce variants the
+  contract must refuse — none at all, a crafted announce naming a dead
+  address on a foreign IP (refused at the serving monitor, silently, so
+  the checkpoint read is unchanged), and the landed one serving a forged
+  document — against the deployment's *unsourced* instance, and then aims
+  a `?peer=` redirect at the tracking standby's already-established
+  `--standby` source, asserting the pair keeps exactly one `active` plus
+  one `tracking` standby and that no adoption journaled names the
+  foreign endpoint;
+- `ci/legs/involuntary_demote_verify.py` covers the path no request
+  boundary guards: a field claim preempted by the documented
+  `POST /promote`, so the owner's demotion is its own fenced write and
+  the recorded hints are consumed only through lazy verification. The
+  keyed declared pair is driven through it, and the inert-hint clause
+  on a second, *unkeyed* pair the leg spawns on its own plant — a bare
+  hint there is no tracking source at all, so the foreign endpoint's
+  ledger must read no pull at all while the demoted peer still reports
+  its own `tracking`/`orphaned` verdict and pins the endpoint the field's
+  arbitration names.
 
 The stage's legs are files, not entries in the check script: every
 `ci/legs/<name>.py` is one leg — a runnable script carrying its
@@ -721,8 +780,8 @@ repin".
 
 An **incompatible** crossing fails with named diagnostics, never
 silently: a pin that resolves no release crates — or a remote the
-`lockfile` stage cannot query for the declared tag's target, which is
-unverifiable rather than absent — is `pin-unresolvable`;
+`lockfile` stage cannot query for the revision the declared pin names,
+which is unverifiable rather than absent — is `pin-unresolvable`;
 a committed `Cargo.lock` that records another remote, another
 `rev`/`tag`, or another revision than the manifest declares is
 `lockfile-stale`; a release crate recorded from a `path` into a
@@ -800,6 +859,19 @@ perturbed output, the promote not answering `not_converged` or handing
 the field off, the active disturbed, or the write-free control window
 not reconverging and promoting — is `divergence-missed`; two
 divergence-leg passes diverging is `divergence-nondeterministic`;
+a diverged-field wedge failing to recover — the interposer's
+preempting `claim_writer`, one field `Out` write off the staged value
+and `release_writer` not fencing the field owner in place with its
+`field_claim_lost` journaled, the survivor not serving the staged-
+versus-field verdict naming the skewed point with both sides' values,
+a promote answering anything other than the named `not_converged`, the
+released field not reporting `unclaimed` with the pair view naming the
+unclaimed-field fault, the standing un-commanded value healing behind
+the leg's back, the relaunched field owner not taking the free field
+through its conditional startup grant, its declared image not
+overwriting the un-commanded values, or the survivor not reconverging
+to `tracking` in place — is `wedge-recovery-failed`; two
+wedge-recovery passes diverging is `wedge-recovery-nondeterministic`;
 a tracking standby failing its declared-files restart — the resume
 unreported or at the wrong tick, the rejoin claiming the field, the
 reconvergence out of window, the durable boundary unordered, the

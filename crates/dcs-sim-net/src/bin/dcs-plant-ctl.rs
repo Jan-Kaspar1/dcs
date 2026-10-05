@@ -36,7 +36,9 @@ commands:
   fault <point> <fault>     inject a fault: disconnected, timeout,
                             uncertain[:<reason>], or bad[:<reason>]
   clear-fault <point>       remove an injected fault
-  step <dt>                 advance the plant one tick of <dt> time units
+  step <dt>                 advance the plant one tick of <dt> time
+                            units; at most 1000000 (dcs_sim::MAX_STEP_DT)
+                            — a step is one scan period
   ping                      the liveness probe — the server answers its
                             plant tick; the container health check's
                             request
@@ -205,10 +207,19 @@ fn parse_value(arg: &str) -> Result<Value, String> {
     })
 }
 
+/// Parses a step's `<dt>` argument against the field's own bound: the
+/// tool refuses a `dt` the server would refuse — a non-finite value, or
+/// one above [`dcs_sim::MAX_STEP_DT`] — at its argument boundary, naming
+/// the bound, so the shipped binary reports the same contract the wire
+/// enforces without a round trip.
 fn parse_dt(arg: &str) -> Result<f64, String> {
     match arg.parse::<f64>() {
-        Ok(dt) if dt.is_finite() => Ok(dt),
-        _ => Err(format!("invalid step {arg:?}: expected a finite number")),
+        Ok(dt) if dt.is_finite() && dt <= dcs_sim::MAX_STEP_DT => Ok(dt),
+        _ => Err(format!(
+            "invalid step {arg:?}: expected a finite number no greater \
+             than {}",
+            dcs_sim::MAX_STEP_DT
+        )),
     }
 }
 
