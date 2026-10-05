@@ -116,6 +116,7 @@ LEG = {
     "order": 615,
     "title": "the receipt-index-collision leg",
     "passes": "receipt-index-collision",
+    "failed": "receipt-collision-failed",
     "tampers": [
         {
             "name": "expect-displaced",
@@ -309,6 +310,24 @@ def collision_fault(observed, tamper):
                     f"{name}'s durable journal records the {key} "
                     f"admission "
                     f"{len(admission['durable'][name])} times",
+                )
+            # The durable half must be the served audit: the file is
+            # the served journal's sink, so one peer's two views of one
+            # settle carry the same verdict. Divergence names the
+            # contract's failure — a re-minted or regressed outcome
+            # replayed into one file and not the other is the shape the
+            # finding recorded — while a verdict differing *across* the
+            # pair's surfaces stays the nondeterministic read below.
+            served_rows = admission["journaled"].get(name, [])
+            durable_rows = admission["durable"].get(name, [])
+            if len(served_rows) == 1 and len(durable_rows) == 1 \
+                    and served_rows[0][2] != durable_rows[0][2]:
+                return (
+                    "receipt-collision-failed",
+                    "the durable audit is not the served audit for "
+                    f"{name}'s {key} admission — its durable journal "
+                    f"carries {durable_rows} where its served journal "
+                    f"carries {served_rows}",
                 )
         verdicts = set(terminal) | set(journaled) | set(durable)
         if len(verdicts) > 1:

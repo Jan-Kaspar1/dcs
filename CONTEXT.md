@@ -42,3 +42,44 @@ one — a promotion's declared **claim basis**, this run's tick against the
 tracked line's last stamp — the measurement bounds what the decision may
 do and is refused by name once it leaves the recorded window, rather than
 deciding anything on its own.
+
+### Seq domains
+
+`seq` is minted by three distinct counters on the served surface, and the
+spelling alone never says which epoch a number belongs to — a consumer
+cannot tell from it whether its cursor survives a restart. Contracts and
+comments name the stream a seq belongs to with the terms below (decision
+104); the epoch scope each carries is the invariant every cursor site holds.
+
+**Publication seq**:
+`Publication.seq` — served as the snapshot's `publication.published`
+identity — and the routed emissions' `EventRecord.seq` beside it. Run-scoped:
+each process lifetime's store bind opens a new epoch at seq 1, and nothing
+persists the axis.
+_Avoid_: "journal seq" for either; "seq" unqualified
+
+**History-ring seq**:
+`HistorySample.seq` on each point's volatile ring. Run-scoped: each
+lifetime's ring begins empty and rides the serving run's tick domain, and
+the retained samples never cross a restart. The `PointHistory.run` envelope
+mark stamps the serving epoch on every answer, an emptied page included.
+_Avoid_: "journal seq"; "seq" unqualified
+
+**Journal seq** / **durable seq**:
+`JournalEntry.seq` over a configured journal file and `DurableEntry.seq` over
+a configured history file are the durable streams, file-scoped: startup
+replay continues the file's numbering across restarts, `run_boundary` markers
+segment its lifetimes, and a seq is never reused within a file. The file, not
+the process, owns the epoch. A served journal tail with no journal file
+configured is one more run-scoped axis — file scope comes from the configured
+file, not the spelling.
+_Avoid_: "run seq" for either
+
+**Cursor reset-or-gap**:
+A `since` cursor over a run-scoped domain held across a restart must
+reset-or-gap, never silently starve: the new epoch's numbering can never
+pass a dead cursor. The reset signals are already served — a regressed
+publication identity, a newly served `run_boundary`, a changed `run` envelope
+mark — and observing any one abandons the cursor for a whole re-read. A
+file-scoped cursor needs no reset: the file's continued numbering is the
+continuity guarantee.

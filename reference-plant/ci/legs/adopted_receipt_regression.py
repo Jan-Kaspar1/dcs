@@ -689,6 +689,21 @@ def regression_pass(args, tamper):
                     f"{name}'s durable journal never settled the "
                     "admission the adoption window audited"
                 )
+            # The durable half must be the served audit: the file is
+            # the served journal's sink, so the two views of one settle
+            # carry the same verdict. Divergence names the contract's
+            # failure rather than a poll artifact — a regressed
+            # outcome replayed into one file and not the other is the
+            # shape the finding recorded.
+            if len(durable[name]) == 1 and len(rows) == 1 \
+                    and durable[name][0][2] != rows[0][2]:
+                failures.append(
+                    "receipt-regression-failed: "
+                    "the durable audit is not the served audit for "
+                    f"{name} — its durable journal carries "
+                    f"{durable[name]} where its served journal carries "
+                    f"{rows}"
+                )
         if failures:
             raise Abort
         evidence["journaled"] = journaled

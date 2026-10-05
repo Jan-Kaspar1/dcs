@@ -144,6 +144,17 @@ class Registration(unittest.TestCase):
             for field in ("passed", "missed"):
                 self.assertIsInstance(record[field], str)
 
+    def test_the_durable_audit_must_be_the_served_audit(self):
+        # The recorded contract's clause — the durable half disagreeing
+        # with the served audit on the same admission — rides the run's
+        # own journal phase rather than a separately extracted judge,
+        # so the pair stage exercises it end to end; pin the clause and
+        # its named diagnostic here so it cannot silently disappear.
+        source = _LEG_PATH.read_text()
+        self.assertIn("the durable audit is not the served audit", source)
+        self.assertIn(
+            "receipt-regression-failed: ", source)
+
 
 class Projections(unittest.TestCase):
     """The receipt and journal projections the audit reads — the

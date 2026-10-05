@@ -153,10 +153,12 @@ class Registration(unittest.TestCase):
 
     def test_the_named_diagnostics_follow_the_stem_convention(self):
         # The issue names receipt-collision-failed and
-        # receipt-collision-nondeterministic — the driver's defaults
-        # off the file stem, neither spelled in the literal.
+        # receipt-collision-nondeterministic. The nondeterministic name
+        # is the driver's own `<stem>-nondeterministic` default off the
+        # file stem; the failed name is not, so the literal declares it
+        # — the leg's own collision vocabulary, not its file name's.
         self.assertEqual(leg.LEG["passes"], "receipt-index-collision")
-        self.assertNotIn("failed", leg.LEG)
+        self.assertEqual(leg.LEG["failed"], "receipt-collision-failed")
 
     def test_the_doctored_case_carries_named_evidence(self):
         tampers = {entry["name"]: entry for entry in leg.LEG["tampers"]}
@@ -288,9 +290,14 @@ class CollisionAudit(unittest.TestCase):
         self.assertIn("records the raced admission 2 times", fault[1])
 
     def test_two_verdicts_for_one_admission_is_nondeterministic(self):
+        # One peer's served receipt and both peers' journals read two
+        # different verdicts for the same admission — a cross-surface
+        # instability, not the one peer's two views of one settle.
         record = observed(("superseded", "applied@61481"),
                           ("applied@61481", "applied@61481"))
-        record["raced"]["durable"]["duty"] = [(1, 1, "applied@61481")]
+        record["raced"]["journaled"]["standby"] = [
+            (7, 7, "applied@61481")]
+        record["raced"]["durable"]["standby"] = [(7, 7, "applied@61481")]
         fault = leg.collision_fault(record, None)
         self.assertEqual(fault[0], "receipt-collision-nondeterministic")
         self.assertIn("not one verdict", fault[1])
@@ -315,6 +322,20 @@ class CollisionAudit(unittest.TestCase):
         )
         self.assertEqual(fault[0], "receipt-collision-failed")
         self.assertIn("accepted the displaced admission", fault[1])
+
+    def test_a_durable_view_disagreeing_with_its_own_served_journal_is_failed(
+        self,
+    ):
+        # The file is the served journal's sink, so one peer's two views
+        # of one settle carry the same verdict. The recorded contract
+        # names this clause receipt-collision-failed rather than the
+        # cross-surface nondeterministic read below.
+        record = observed(("superseded", "superseded"),
+                          ("applied@61481", "applied@61481"))
+        record["raced"]["durable"]["duty"] = [(9, 6, "applied@61481")]
+        fault = leg.collision_fault(record, None)
+        self.assertEqual(fault[0], "receipt-collision-failed")
+        self.assertIn("the durable audit is not the served audit", fault[1])
 
 
 class ContractSurface(unittest.TestCase):
