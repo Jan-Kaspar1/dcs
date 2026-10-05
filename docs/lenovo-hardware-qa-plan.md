@@ -2096,8 +2096,9 @@ Implementation order: second, after [daily architecture review](daily-architectu
   field owner scanning with degraded-but-serving telemetry (the served
   tick never rewinding, `io_health.failed_reads`/`failed_writes` counting
   the per-direction failures on both sides, the boundary streak counting,
-  the backend link `disconnected` with a named `last_error`) while the
-  declared standby never promotes on a field outage. The respawned plant
+  the backend link `disconnected` with a named `last_error`, and the
+  probed field input's own reads re-marked down at that link boundary)
+  while the declared standby never promotes on a field outage. The respawned plant
   returns **fail closed**: a dedicated plant-socket attachment's mutation
   probes answer the named `unclaimed` refusal — never `stepped`, never a
   silent write — until the recorded owner's bounded re-attach re-arms the

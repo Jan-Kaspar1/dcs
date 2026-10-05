@@ -170,6 +170,20 @@ def degraded(health, driver):
     return driver_recovery.degraded(health, driver)
 
 
+def marked_down(qualities):
+    """The read half of the degraded serve over the outage's served
+    quality samples — `(still_good, named_bad)`: the samples still
+    reading `good` behind an interrupted link, and whether the field's
+    own reads reached a named `bad:<reason>` verdict. The link boundary
+    marks the field down; a read still serving Good, or one that only
+    ever went uncertain, is not the contract the rig's
+    `3500_plant_link_loss` grades."""
+    return (
+        [sample for sample in qualities if sample == "good"],
+        any(str(sample).startswith("bad:") for sample in qualities),
+    )
+
+
 def tracking(report):
     """Whether a served RoleReport reads `standby` under `tracking`
     sync."""
@@ -184,8 +198,8 @@ def role(url, failures):
     return pair.get(f"{url}/role", "GET /role", failures)
 
 
-def outage_leg(rig, duty_url, standby_url, owner_token, model_path,
-               tamper, failures, evidence):
+def outage_leg(rig, duty_url, standby_url, model_path, tamper, failures,
+               evidence):
     """The degraded window: the plant server stops, the field owner is
     driven throughout, and its served account — cadence, read quality,
     `io_health` counters, backend diagnostics — plus the declared
@@ -220,7 +234,6 @@ def outage_leg(rig, duty_url, standby_url, owner_token, model_path,
     window = {"stopped": stopped, "scans": [], "syncs": [],
               "qualities": [], "health": None, "driver": None,
               "promotions": []}
-    point = _probe_point(model_path)
     degraded_at = None
     for _ in range(OUTAGE_SCANS):
         peer_role = role(standby_url, failures)
@@ -258,13 +271,19 @@ def outage_leg(rig, duty_url, standby_url, owner_token, model_path,
             raise Abort
         if isinstance(tick, int):
             evidence["peak"] = max(evidence.get("peak", tick), tick)
-        if point is not None:
-            window["qualities"].append(
-                served_quality(owner, point))
-        if degraded(health, driver):
+        quality = None if point is None else served_quality(owner, point)
+        if quality is not None:
+            window["qualities"].append(quality)
+        # The degraded serve is two-sided: the backend reports the
+        # interrupted link, and the field's own reads are marked down
+        # at that same boundary. The window closes on both — the
+        # outage's evidence then carries the read quality the
+        # recovery leg restores to Good.
+        if degraded(health, driver) and quality != "good":
             degraded_at = (owner, dict(health), dict(driver))
             window["health"] = dict(health)
             window["driver"] = dict(driver)
+            window["quality"] = quality
             break
     if not stopped:
         failures.append(
@@ -288,7 +307,7 @@ def outage_leg(rig, duty_url, standby_url, owner_token, model_path,
         "link": outage_driver.get("link"),
         "named": bool(outage_driver.get("last_error")),
     }
-    evidence["quarantities"] = outage_health
+    evidence["outage_health"] = outage_health
     if (outage_health.get("failed_reads") or 0) <= (
         health0.get("failed_reads") or 0
     ):
@@ -313,6 +332,25 @@ def outage_leg(rig, duty_url, standby_url, owner_token, model_path,
             "the disconnected backend recorded no last_error: "
             f"{json.dumps(outage_driver)[:300]}"
         )
+    # The link boundary marks the field's own reads down: the probed
+    # field input reads a named bad verdict through the outage and
+    # never keeps serving Good behind a disconnected link — the same
+    # two-sided degraded contract the rig's `3500_plant_link_loss`
+    # grades.
+    if point is not None:
+        still_good, named_bad = marked_down(window["qualities"])
+        if still_good:
+            failures.append(
+                f"the field owner's served reads of point {point} kept "
+                f"reading good through the outage: {still_good} — the "
+                "link boundary must mark the field's reads down"
+            )
+        if not named_bad:
+            failures.append(
+                f"the field owner's served reads of point {point} never "
+                f"reached a named bad verdict through the outage: "
+                f"{window['qualities']}"
+            )
     if failures:
         raise Abort
     if tamper == "expect-owner-exit":
@@ -327,6 +365,7 @@ def outage_leg(rig, duty_url, standby_url, owner_token, model_path,
         "peer_sync": sorted(set(window["syncs"])),
         "link": outage_driver.get("link"),
         "named": True,
+        "quality": window.get("quality"),
         "failed_reads": outage_health.get("failed_reads"),
         "failed_writes": outage_health.get("failed_writes"),
         "streak": outage_health.get("consecutive_failures"),
@@ -633,8 +672,8 @@ def plant_loss_pass(args, tamper):
 
         # Phase 2 — the degraded window.
         outage = outage_leg(
-            rig, duty_url, standby_url, owner_token, args.model,
-            tamper, failures, evidence,
+            rig, duty_url, standby_url, args.model, tamper, failures,
+            evidence,
         )
         evidence["outage_at"] = outage["failed_reads"]
         digest_entries.append({"phase": "outage", **outage})
@@ -655,7 +694,7 @@ def plant_loss_pass(args, tamper):
         # with the outage's failures still counted and no controller
         # restarted.
         recovered = recovery_leg(
-            rig, duty_url, standby_url, evidence["quarantities"],
+            rig, duty_url, standby_url, evidence["outage_health"],
             _probe_point(args.model), tamper, failures, evidence,
         )
         digest_entries.append({"phase": "recovered", **recovered})

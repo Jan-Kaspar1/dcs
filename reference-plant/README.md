@@ -478,8 +478,9 @@ completes is refused with the named `not_converged` verdict.
 `ci/legs/plant_loss.py` stops the spawned `dcs-plant-server` instead:
 the field owner keeps scanning with degraded-but-serving telemetry —
 `io_health` counting the per-direction failures on both sides, the
-driver link reporting `disconnected` with a named `last_error` — while
-the declared standby never promotes on a field outage. The respawned
+driver link reporting `disconnected` with a named `last_error`, and the
+field's own reads re-marked down at that link boundary — while the
+declared standby never promotes on a field outage. The respawned
 plant returns **fail closed**: third-party mutation probes answer the
 named `unclaimed` refusal, never `stepped` and never a silent write,
 until the recorded owner's bounded re-attach re-arms the claim through

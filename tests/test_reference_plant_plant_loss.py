@@ -173,6 +173,23 @@ class Classifications(unittest.TestCase):
         self.assertIn(point, declared)
         self.assertTrue(declared[point].get("channel"))
 
+    def test_the_read_half_of_the_degraded_serve_is_projected(self):
+        # The outage marks the field's own reads down at the link
+        # boundary: a sample still serving good, or a window that never
+        # reached a named bad verdict, is the contract the leg refuses.
+        self.assertEqual(
+            leg.marked_down(["bad:communication_fault"]),
+            ([], True),
+        )
+        self.assertEqual(
+            leg.marked_down(["good", "bad:communication_fault"]),
+            (["good"], True),
+        )
+        self.assertEqual(
+            leg.marked_down(["uncertain:stale"]), ([], False)
+        )
+        self.assertEqual(leg.marked_down([]), ([], False))
+
 
 class Staging(unittest.TestCase):
     """The seams the leg drives rather than reimplements — the pair

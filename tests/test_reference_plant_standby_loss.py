@@ -318,7 +318,7 @@ class Classification(unittest.TestCase):
     def test_a_clean_pass_renders_the_digest_line(self):
         evidence = {
             "converged": 4,
-            "refused_at": 240,
+            "refused_on": 240,
             "down_ticks": 9,
             "reconverged": 12,
             "final_tick": 20,
@@ -329,7 +329,9 @@ class Classification(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertRegex(out, r"^standby-loss-digest [0-9a-f]{64} — ")
         self.assertIn("tracking by tick 4", out)
-        self.assertIn("refused not_active at tick 240", out)
+        self.assertIn(
+            "the standby's write on point 240 refused not_active", out
+        )
         self.assertIn("run continued to tick 20", out)
         self.assertEqual(err, "")
 

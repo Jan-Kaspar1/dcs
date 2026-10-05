@@ -492,7 +492,7 @@ def standby_loss_pass(args, tamper):
         audit = refusal_leg(
             duty_url, standby_url, point, plant_io, tamper, failures
         )
-        evidence["refused_at"] = audit["point"]
+        evidence["refused_on"] = audit["point"]
         digest_entries.append({"phase": "refusal", **audit})
 
         # Phase 3 — the down window: the tracking standby's process
@@ -893,8 +893,8 @@ def main():
     digest = simulate.stable_digest(digest_entries)
     print(
         f"standby-loss-digest {digest} — tracking by tick "
-        f"{evidence['converged']}, the standby's write refused "
-        f"not_active at tick {evidence['refused_at']}, its loss "
+        f"{evidence['converged']}, the standby's write on point "
+        f"{evidence['refused_on']} refused not_active, its loss "
         f"unnoticed through tick {evidence['down_ticks']}, tracking "
         f"again by tick {evidence['reconverged']}, run continued to "
         f"tick {evidence['final_tick']}"
