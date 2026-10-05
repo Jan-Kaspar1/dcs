@@ -585,9 +585,20 @@ class LagStagingTests(unittest.TestCase):
             order.index(scenarios.scenario_repromote_suspended_settle)
             + 1,
             order.index(scenarios.scenario_settled_receipt_arbitration))
+        # The receipt-audit legs — the settled-arbitration case and the
+        # two receipt-window contracts behind it — run back to back in
+        # the same launch-layout window, and the pair clears onto the
+        # announced-source legs still on its entry roles.
         self.assertEqual(
             order.index(scenarios.scenario_settled_receipt_arbitration)
             + 1,
+            order.index(scenarios.scenario_adopted_receipt_regression))
+        self.assertEqual(
+            order.index(scenarios.scenario_adopted_receipt_regression)
+            + 1,
+            order.index(scenarios.scenario_receipt_index_collision))
+        self.assertEqual(
+            order.index(scenarios.scenario_receipt_index_collision) + 1,
             order.index(scenarios.scenario_peer_announce))
         self.assertEqual(
             order.index(scenarios.scenario_peer_announce) + 1,
