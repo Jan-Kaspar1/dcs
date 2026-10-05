@@ -684,7 +684,11 @@ impl fmt::Display for CheckReport {
 /// model — so a load or validation failure reports before this runs,
 /// exactly as it does in a run.
 pub fn check(model: &PlantModel) -> Result<CheckReport, AssemblyError> {
-    let driver = resolve_drivers(model, &DriverRegistry::standard())?.build()?;
+    // The compile-check registry: hardware-bound kinds resolve through
+    // their declaration-only factory, so a hardware document is
+    // checkable before the deployment binds a segment — which is the
+    // only order a hardware model can be validated in at all.
+    let driver = resolve_drivers(model, &DriverRegistry::for_check())?.build()?;
     let executor = assemble(model, &registry(), &driver)?;
     let served_points = executor.snapshot().points.len();
     Ok(CheckReport {

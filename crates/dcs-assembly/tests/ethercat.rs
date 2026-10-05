@@ -1,12 +1,15 @@
 //! The `ethercat` device kind's assembly contract: a hardware-bound
 //! field-bus declaration is validated by the kind's factory — the
 //! `hardware` marker, the `dcs-ethercat` parameter grammar — and then
-//! fails startup because no EtherCAT master exists in this build.
+//! fails startup in the bus-less registry, the one no deployment run
+//! resolves a hardware device through. The same declaration assembles in
+//! the compile-check registry, which validates it and opens no segment.
 //! Malformed declarations surface as named [`AssemblyError`] variants
 //! before any scan, and a hardware-bound kind is never silently
 //! substituted by simulation.
 
 use dcs_assembly::{AssemblyError, DriverRegistry, resolve_drivers};
+use dcs_core::IoDriver;
 use dcs_model::{DeviceId, PlantModel};
 
 /// The reference declaration: a coupler carrying 2×DI + 1×AI + 2×DO
@@ -57,9 +60,9 @@ fn assert_invalid_parameters(fixture: &str, needle: &str) {
 
 #[test]
 fn valid_declaration_fails_at_the_backend_not_the_grammar() {
-    // The declaration parses; startup then fails because no EtherCAT
-    // master can initialize the bus — the hard failure the startup
-    // policy requires, never a silent simulated stand-in.
+    // The declaration parses; startup then fails in the registry that
+    // carries no deployment binding for the bus — the hard failure the
+    // startup policy requires, never a silent simulated stand-in.
     match resolve(ETHERCAT) {
         Err(AssemblyError::DeviceBackend {
             device,
@@ -69,10 +72,59 @@ fn valid_declaration_fails_at_the_backend_not_the_grammar() {
             assert_eq!(device, DeviceId(1));
             assert_eq!(kind, "ethercat");
             assert!(detail.contains("\"ecat0\""), "{detail}");
+            assert!(detail.contains("no deployment binding"), "{detail}");
             assert!(detail.contains("never silently substituted"), "{detail}");
         }
         Err(other) => panic!("expected DeviceBackend, got {other:?}"),
         Ok(_) => panic!("expected DeviceBackend, got a resolved driver plan"),
+    }
+}
+
+#[test]
+fn the_compile_check_registry_assembles_the_same_declaration() {
+    // `--check`'s registry: the declaration is validated in full and the
+    // bus is left unopened, so a hardware document is checkable on a
+    // host with no NIC and no deployment binding — the only order a
+    // hardware model can be validated in. The malformed declarations
+    // above are still refused here, so a check cannot pass a document a
+    // run would reject.
+    let model = PlantModel::load(ETHERCAT).unwrap();
+    let plan = resolve_drivers(&model, &DriverRegistry::for_check())
+        .expect("the compile-check registry assembles a hardware declaration");
+    let driver = plan.build().expect("the plan builds");
+    // Every declared point is routed to the hardware device, and the
+    // placeholder opens nothing: the reads a check-mode run can never
+    // perform answer as unknown points.
+    for point in model
+        .io_points
+        .iter()
+        .filter(|point| point.channel.is_some())
+    {
+        assert_eq!(
+            driver.read(point.id),
+            Err(dcs_core::IoError::UnknownPoint(point.id)),
+            "the unopened bus answers no point {:?}",
+            point.id
+        );
+    }
+    assert!(
+        driver.cyclic().is_none(),
+        "an unopened segment offers no cyclic surface"
+    );
+
+    for fixture in [
+        include_str!("../fixtures/invalid/ethercat_missing_bus.json"),
+        include_str!("../fixtures/invalid/ethercat_wrong_image.json"),
+        include_str!("../fixtures/invalid/ethercat_bad_startup.json"),
+    ] {
+        let model = PlantModel::load(fixture).unwrap();
+        assert!(
+            matches!(
+                resolve_drivers(&model, &DriverRegistry::for_check()),
+                Err(AssemblyError::InvalidDeviceParameters { .. })
+            ),
+            "a malformed declaration must stay malformed in check mode"
+        );
     }
 }
 

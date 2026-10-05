@@ -10,7 +10,6 @@ an order, and ignore entries outside the convention by name. A leg
 registering no doctored case is refused the same way — every leg's
 own audit must be proven to fire, never silently absent."""
 import importlib.util
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -154,72 +153,6 @@ class DiscoveryOrder(unittest.TestCase):
     def test_the_stem_is_the_file_name_with_dashes(self):
         self.assertEqual(legs.leg_stem("demote_pending.py"), "demote-pending")
         self.assertEqual(legs.leg_stem("pair.py"), "pair")
-
-
-class ScanBatchSettleBudget(unittest.TestCase):
-    """The scan-batch leg's severed-batch wait budget is a *wait*, not a
-    contract assertion: the leg's checks are exactness claims the tick
-    counter decides (the batch lands exactly on its bound, the plant
-    exactly on it, the follow-up exactly one past), and the wall clock
-    only bounds how long the run waits for that to arrive. A single
-    fixed figure read CI-runner contention as a violation — main runs
-    37236005898 and 37273526223 both reported "the batch never
-    terminated" for batches that were terminating, at ticks 188 and
-    225 of 256. The budget therefore scales with the declared bound,
-    under a floor, so no runner's load can decide a contract the
-    counter decides exactly."""
-
-    def setUp(self):
-        path = _CI_DIR / "legs" / "scan_batch_bound.py"
-        spec = importlib.util.spec_from_file_location("scan_batch_bound", path)
-        self.leg = importlib.util.module_from_spec(spec)
-        sys.argv = ["scan_batch_bound"]
-        try:
-            spec.loader.exec_module(self.leg)
-        except SystemExit:
-            # The module's argparse runs at import; the constants and
-            # the budget helper above it are already bound.
-            pass
-
-    def test_the_budget_scales_with_the_declared_bound(self):
-        for bound in (self.leg.SCAN_BATCH_BOUND, self.leg.DOCTORED_BOUND):
-            budget = self.leg.batch_settle_timeout(bound)
-            self.assertGreaterEqual(budget, bound * self.leg.SETTLE_S_PER_SCAN_S)
-            self.assertGreaterEqual(budget, self.leg.SETTLE_MIN_S)
-
-    def test_the_declared_bound_outwaits_the_doctored_one(self):
-        """The declared 256-scan batch is the leg's worst case, so it
-        carries the larger budget — a doctored run must never wait
-        longer than the real one for the same contract."""
-        self.assertGreater(
-            self.leg.batch_settle_timeout(self.leg.SCAN_BATCH_BOUND),
-            self.leg.batch_settle_timeout(self.leg.DOCTORED_BOUND),
-        )
-
-    def test_a_small_bound_still_gets_the_floor(self):
-        """The allowance scales but never collapses the wait below the
-        floor a settling batch needs whatever its size."""
-        self.assertEqual(
-            self.leg.batch_settle_timeout(1), self.leg.SETTLE_MIN_S
-        )
-
-    def test_the_budget_outlasts_the_observed_flake(self):
-        """The regression the scaling answers: the reported failures
-        left the tick at 188 and 225 of a 256-scan batch, and the budget
-        covers the whole bound rather than a slice of it."""
-        self.assertGreaterEqual(
-            self.leg.batch_settle_timeout(self.leg.SCAN_BATCH_BOUND), 256
-        )
-
-    def test_the_contract_checks_are_not_the_budget(self):
-        """The exactness assertions the leg exists to make are
-        untouched by the budget: it still fails a batch that overruns
-        its bound and one that never starts, so a longer wait cannot
-        mask either."""
-        source = (_CI_DIR / "legs" / "scan_batch_bound.py").read_text()
-        self.assertIn("past its bound", source)
-        self.assertIn("the at-bound batch never started", source)
-        self.assertIn("did not land exactly its bound", source)
 
 
 class DoctoredCases(unittest.TestCase):

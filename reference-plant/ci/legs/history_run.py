@@ -12,7 +12,18 @@ The restart legs (`ci/restart.py`, `ci/legs/standby_restart.py`) prove
 the resumed run continues at the persisted tick and the durable
 journal carries the run-boundary marker; the journal-boundary leg
 (`ci/legs/journal_boundary.py`) proves the marker reaches a
-`GET /journal` consumer past the retained bound. This leg pins the
+`GET /journal` consumer past the retained bound. The seq vocabulary
+this leg's cursors read is decision 104's, and the two domains share
+one spelling: the `PointHistory.run` mark and this leg's `seq` axis
+are the run-scoped history-ring domain — the serving process
+lifetime's epoch, opening at 1 on a fresh tick domain and continuing
+only where a resume or a checkpoint adoption continues that domain —
+while the `seq` on a `GET /journal` answer is the file-scoped durable
+stream, continuing across the restart through replay, which is why the
+same file's `run_boundary` markers are what attribute the seam a
+run-scoped cursor resets or gaps on. A cursor held across this leg's
+restart therefore never waits on numbers the new epoch cannot pass.
+This leg pins the
 `GET /history` half of the same contract on the deployed pair: every
 served `PointHistory` envelope stamps the producing process
 lifetime's `run` ordinal — the same counter the journal file's

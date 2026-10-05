@@ -124,6 +124,21 @@ ci/staging.py          the pair contract's staging leg — the emitted
                        rise through the declared crossings, the
                        high-level annunciation, the bounded staging
                        response, and the declared de-stage order
+ci/stale_freshness.py  the declared-freshness stage — this
+                       composition's own `stale_after_ticks` budget on
+                       the primary wet-well level, exercised on the
+                       deployed pair: the writer-holding peer frozen so
+                       the field stops stepping while the surviving
+                       peer's reads keep answering, the budgeted point
+                       walking Good → Uncertain(Stale) at the declared
+                       lag while its unbudgeted neighbour keeps serving
+                       its last sample Good, the stale presentation
+                       degraded rather than a healthy last-known value,
+                       the declared `failover-select` annunciating
+                       instead of holding the reading, and the resumed
+                       writer returning the point to Good with the
+                       stale interval retained in the served history
+                       and the pair's launch roles restored
 ci/oos.py              the pair contract's out-of-service leg — a
                        receipted maintenance inhibit on the duty
                        pump's declared `oos` point excluding it from
@@ -496,15 +511,63 @@ unique across the directory — runs each leg twice requiring identical
 digests, then exercises its declared tampers. The legs share the
 launch/settle/restore harness consolidated under #647 —
 `ci/legs/pair.py`'s `launch_pair`/`PairRig`, itself the stage's first
-leg — and each leg restores the pair's launch roles for the next. A
-leg's diagnostic stem is its file name with underscores turned to
+leg — and each leg restores the pair's launch roles for the next. The
+injected field-fault leg (`ci/legs/field_fault.py`) is the
+consumer-pair mirror of the QA rig's field-fault leg: it drives a
+declared field input through a quality fault the active's monitor must
+serve as substituted rather than silently `Good`, and through a
+disconnected-class fault whose boundary failure must surface on
+`io_health`'s counters with its tick and direction while the scan
+continues and no role moves — then clears both and reads the recovery
+on both peers' durable records, so the honest-degradation contract
+WW-OPS-003 asks of is proven on this pair rather than only on the rig.
+A leg's diagnostic stem is its file name with underscores turned to
 dashes: a violated contract fails `<stem>-failed`, two passes
 producing different digests fail `<stem>-nondeterministic`, and a
 doctored case passing silently or missing its named evidence fails
-`<stem>-unchecked`. Adding a leg is exactly one new file under
+`<stem>-unchecked`. Among the continuity legs the stage carries, the
+command-side ones are `command_switch.py` (a declared command's
+settlement crossing a documented switch), `tune_carryover.py` (a
+receipted `set_parameter` tune riding the checkpoint into the
+promoted peer, so an operator's tune survives the switch instead of
+reverting to the emitted default), and the two suspended-receipt legs
+`repromote_suspended_settle.py` (a holder re-promoted after its
+demoted peer reconverged) and `gossip_repromote_settle.py` (the same
+holder re-promoted inside the gossip window, before any peer's
+tracking pull covers the admission) — each proving the suspended
+receipt settles exactly once at the re-taken boundary rather than
+parking `Accepted` on the live active or applying stale behind a
+newer command. Adding a leg is exactly one new file under
 `ci/legs/` — no edit to `ci/check.sh`, the boundary lint, or this
 document; the leg set and each leg's contract prose live in the
 directory and its docstrings.
+
+Two legs stage what the pair loses rather than what it switches.
+`ci/legs/standby_loss.py` stops the tracking standby's process on the
+declared deployment and watches the controller of record: a receipted
+write aimed at the *tracking* standby answers the named `not_active`
+admission refusal with no field effect and no journaled command on the
+field owner; across the whole down window the field owner keeps
+scanning, keeps its `active` role, keeps settling receipted commands,
+and journals no promotion or demotion of its own — peer loss is not an
+event it reacts to. The standby then relaunches onto the manifest's
+declared wiring and persistence, rejoins `standby`/`unsynchronized`,
+reconverges to `tracking` inside the leg's declared window, and a
+`POST /promote` fired at its monitor before that first transfer
+completes is refused with the named `not_converged` verdict.
+`ci/legs/plant_loss.py` stops the spawned `dcs-plant-server` instead:
+the field owner keeps scanning with degraded-but-serving telemetry —
+`io_health` counting the per-direction failures on both sides, the
+driver link reporting `disconnected` with a named `last_error`, and the
+field's own reads re-marked down at that link boundary — while the
+declared standby never promotes on a field outage. The respawned
+plant returns **fail closed**: third-party mutation probes answer the
+named `unclaimed` refusal, never `stepped` and never a silent write,
+until the recorded owner's bounded re-attach re-arms the claim through
+`ensure_writer`; the probes then answer `fenced` naming that same
+token, the field's `Good` reads recover, and the outage's counted
+failures are still counted rather than silently reset — with no
+controller restarted anywhere in the episode.
 
 One leg in particular is about this pair's operator console rather than
 its control behaviour: `ci/legs/responsiveness.py` holds the field

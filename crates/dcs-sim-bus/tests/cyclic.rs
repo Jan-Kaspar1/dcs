@@ -251,6 +251,7 @@ fn a_missed_exchange_holds_the_image_and_escalates_at_the_threshold() {
                 working_counter_mismatches: 0,
                 last_exchange_tick: Some(Tick(1)),
                 missed_deadlines: 0,
+                buses: Vec::new(),
             }
         );
 

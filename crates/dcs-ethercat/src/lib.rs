@@ -42,6 +42,7 @@ pub use master::{AttachError, BusMaster, BusPoint, EthercatDevice};
 pub use params::{
     ChannelDecl, DEVICE_KIND, DeviceParameters, ImageOffset, StartupPolicy, StationIdentity,
 };
+pub use replay::{Capture, CaptureError, CycleRecord, ReplayTransport};
 pub use transport::{
     BusTransport, CycleOutcome, DiscoveredStation, OpenRequest, Opener, TransportError,
 };
@@ -49,6 +50,7 @@ pub use transport::{
 mod ethercrab_transport;
 mod master;
 pub mod params;
+pub mod replay;
 pub mod testing;
 pub mod transport;
 
@@ -89,10 +91,7 @@ impl EthercatBuses {
     pub fn new(bindings: BTreeMap<String, String>) -> Self {
         Self {
             bindings: Arc::new(bindings),
-            opener: Arc::new(|request| {
-                EthercrabTransport::open(request)
-                    .map(|transport| Box::new(transport) as Box<dyn BusTransport>)
-            }),
+            opener: Arc::new(deployment_opener),
             claimed: Arc::new(Mutex::new(BTreeMap::new())),
             masters: Arc::new(Mutex::new(BTreeMap::new())),
         }
@@ -146,7 +145,7 @@ impl EthercatBuses {
                     AttachError::backend(format!("bus {:?} failed to open: {error}", params.bus))
                 })?;
                 claimed.insert(interface.clone(), params.bus.clone());
-                let master = Arc::new(BusMaster::new(&params.bus, transport));
+                let master = Arc::new(BusMaster::new(&params.bus, interface, transport));
                 masters.insert(params.bus.clone(), Arc::clone(&master));
                 (master, true)
             }
@@ -182,6 +181,38 @@ impl EthercatBuses {
         }
         Ok(attachment.device)
     }
+}
+
+/// The prefix a deployment binding carries when it names a *recorded
+/// run* rather than a host interface — the `@` of `@capture.json`.
+pub const RECORDED_BINDING_PREFIX: char = '@';
+
+/// The deployment transport constructor: what one logical bus's
+/// binding resolves to.
+///
+/// A binding naming a host interface — `ecat0=enx00e04c751f7c` — opens
+/// the real EtherCrab master on that NIC. A binding carrying
+/// [`RECORDED_BINDING_PREFIX`] names a recorded run instead —
+/// `ecat0=@captures/rig-session.json` — and replays it through
+/// [`replay::Capture`], which is how the hardware path is exercised
+/// with no rig and no privileges.
+///
+/// The choice is the deployment's and is never inferred: an interface
+/// binding never falls back to a recording, and a recorded binding
+/// never opens a socket. Either resolution failing is a startup failure
+/// naming the bus, never a degraded run.
+fn deployment_opener(request: &OpenRequest<'_>) -> Result<Box<dyn BusTransport>, TransportError> {
+    let Some(path) = request.interface.strip_prefix(RECORDED_BINDING_PREFIX) else {
+        return EthercrabTransport::open(request)
+            .map(|transport| Box::new(transport) as Box<dyn BusTransport>);
+    };
+    replay::Capture::load(std::path::Path::new(path))
+        .map(|capture| Box::new(capture.transport()) as Box<dyn BusTransport>)
+        .map_err(|error| {
+            TransportError::internal(format!(
+                "recorded run {path:?} could not be replayed: {error}"
+            ))
+        })
 }
 
 impl std::fmt::Debug for EthercatBuses {

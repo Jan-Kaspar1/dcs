@@ -1843,6 +1843,131 @@ Implementation order: second, after [daily architecture review](daily-architectu
   run carrying no born staging lever, no per-seat journal file, or no
   settled pair reports inconclusive.
 
+### Landed 2026-10-04 (cyclic-exchange failure-legs scenario, #1473 consolidating #408)
+
+- The four failure legs decision 78's exchange contract names above the
+  register protocol, on the rig's own cyclic device, through the
+  documented monitor endpoints and the shipped `dcs-sim-bus-ctl` the
+  revision under test carries. Every scripted outcome is queued at the
+  device server and read off the served snapshot, so the leg is
+  per-revision evidence for the contract the hardware leg will rely on
+  and no hardware dependency exists: an **aged, not aborted** miss (the
+  scan's output image does not move, the held input image still answers
+  at its own acquisition stamp, and both counter halves advance — a
+  driver that dropped the scan or published a zeroed image fails here),
+  **threshold escalation** at the fixture's declared
+  `exchange_miss_threshold` (reads escalate to Bad with the
+  communication-fault reason past it, still serving the held image
+  before it), **per-station attribution** of a `short-station` to the
+  named station's points alone, and **recovery re-entry** on the
+  exchange boundary with the counters accounting for exactly the queued
+  misses and the one shortfall.
+- Counters are read as *differences* across each window rather than as
+  absolutes, so a busy rig cannot pass the leg by accident and a driver
+  that double-counts a boundary shows up as drift; the leg also reads
+  the per-bus rows `ExchangeDiagnostics.buses` added, so a counter stays
+  attributable to the bus that moved it.
+- The attribution leg needs two stations, because one station cannot
+  express the distinction — every point would belong to it. The second
+  station arrives as a lane-owned per-run variant
+  (`qa_lane/rig_model.py`'s `two_station_cyclic`) rather than a fixture
+  edit: the rig fixtures are byte-pinned emitted artifacts, and the
+  variant is re-checked against the revision recipe's structural rules
+  before it is staged. A device declaring fewer stations reports
+  inconclusive.
+- Named diagnostics are `cyclic-exchange-legs-failed` (a missed
+  exchange that moved the outputs or was not counted, a threshold that
+  escalated early, partially, or not at all, a shortfall that degraded
+  the wrong points or never counted, a recovery that did not re-enter, a
+  stuck failure streak, counter drift, an accumulated mismatch, or
+  recovery leaving points degraded), `cyclic-exchange-legs-nondeterministic`
+  (a refused staging, launch, or control-tool call, a seat that never
+  settled, a starved or unread monitor, a device server that stopped
+  answering, a moved or wedged deployed pair, a rig the sweep did not
+  restore, and two passes whose digests diverge), and the self-check's
+  `cyclic-exchange-legs-unchecked` covering every planted negative.
+  Two consecutive passes produce identical digests; a run with no device
+  server, no derivable document, or an unsettled seat reports
+  inconclusive.
+
+### Landed 2026-10-04 (cyclic-failover settle scenario, #1473 consolidating #413)
+
+- Demote/promote over the rig's cyclic device — the transition the
+  hardware leg's evidence rests on, read across a role change rather
+  than across a fault. A born pair on the rig's `sim-cyclic` document,
+  driven through the documented `POST /demote` and `POST /promote`:
+  the promoted peer's exchange counters advance once per boundary from
+  its promotion on, its field claim reads held, and the field's own
+  register census advances over the same window, so what the field holds
+  is being republished by the new active rather than ageing at the frame
+  the ex-owner left behind. `attempted - succeeded` and
+  `failed_exchanges` are unchanged across the window — the switchover
+  costs no exchange and invents none — every field input the promoted
+  peer serves keeps a Good quality and an advancing acquisition stamp
+  across the transition, and the demoted peer's role walks to standby,
+  its claim releases, and its exchanges keep advancing census-only.
+- What the rig cannot observe is recorded rather than glossed: whether
+  the *first* post-promotion exchange carries the first active scan's
+  staged image rather than a stale pre-promotion seed is a question
+  about bytes on the wire, downstream of the field census. That half is
+  pinned deterministically at the driver seam in
+  `crates/dcs-controller/tests/cyclic_lifecycle.rs`, where a scripted
+  cyclic backend records every published image against the peer that
+  published it. This leg is the field-observable continuation of the
+  same contract.
+- Named diagnostics are `cyclic-failover-settle-failed` (a promotion
+  that took no field or no claim, a promoted peer that published
+  nothing, left the link, skipped or double-counted a boundary, or
+  stopped latching inputs, a demotion that never landed or kept its
+  claim, a demoted peer that stopped latching or wrote behind a fence, an
+  unstamped latched sample, a frozen field, and an unjournaled or
+  unattributed switch), `cyclic-failover-settle-nondeterministic` (a
+  refused switch or staging call, a starved window, an unreadable field
+  or journal, an unrestored pair, and divergent digests), and the
+  self-check's `cyclic-failover-settle-unchecked`. Two consecutive passes
+  produce identical digests; a point-wise field, an output-less field, an
+  absent device server, or an unsettled pair reports inconclusive.
+
+### Landed 2026-10-04 (writable field-point settle scenario, #1473 consolidating #699)
+
+- The command-writable **field** point the QA capability finding records
+  as unexercisable on this plant: every command-writable point the
+  mounted fixture declares is internal and channel-less, so a receipted
+  `write_value` on one lands in the image and never reaches a driver
+  write — leaving the applied-mint path and the `DriverRejected` verdict
+  path, which every later leg asserting how a receipted command's driver
+  write behaves under field contention must read, unreachable on the rig.
+- The point lands as a lane-owned per-run variant rather than a fixture
+  edit: `qa_lane/rig_model.py`'s `writable_field_point` derives one from
+  the document the run mounted — a channel of its own on a device the
+  pair already scans, one writable `In` point bound to it, one signal for
+  it — and the leg stages that *same* document on both ends, the scratch
+  field serving it and the born seat mounting it, so the remote driver's
+  correspondence probe reads one declaration. The derivation is additive,
+  keeps the point `In`-only (a writable `Out` point has no field side to
+  observe a driver write on), is re-checked against the revision recipe's
+  structural rules, and never writes the pinned fixtures.
+- Three legs over the served receipted command path, each verdict read at
+  the submission index taken *before* the post so the receipt is provably
+  its own command's: **applied, field-side** (a receipted `write_value`
+  settles `applied` at a scan boundary and the field's own served read
+  carries the written value — a settlement into the image alone leaves
+  the field reading what it held, which is the defect this leg exists to
+  exclude), **rejected, named** (with the field side denying the write
+  through the shipped tool's own fault injection, the receipt settles
+  `rejected:driver_rejected` naming the driver's refusal — `applied`
+  would be a phantom settlement, a receipt stuck at `accepted` a silent
+  one), and **re-entry** (clearing the injected fault returns the point
+  to a writable field input whose next write settles applied again, so
+  the rejection was the contention rather than a point that can never be
+  written).
+- No product crate's contract or wire vocabulary changes for this: the
+  lane owns the derivation, the staging, and the judge. Named diagnostics
+  are `writable-field-point-failed`, `writable-field-point-nondeterministic`,
+  and the self-check's `writable-field-point-unchecked`. Two consecutive
+  passes produce identical digests; a run that cannot derive the
+  document, cannot stage it, or never settles reports inconclusive.
+
 ### Landed 2026-10-03 (journal-sink scan-isolation leg, #1005)
 
 - The `--journal-file` sink-isolation contract (#942's journal-append
@@ -1939,8 +2064,73 @@ Implementation order: second, after [daily architecture review](daily-architectu
   inside a pending window reports inconclusive; the pair leaves on its
   launch roles. The consumer-boundary mirror of the same contract is
   `reference-plant/ci/legs/settled_receipt_arbitration.py`, whose
-  declared pair is driven and therefore stages the contradiction with
-  no freeze and no timing race.
+declared pair is driven and therefore stages the contradiction with
+no freeze and no timing race.
+
+### Landed 2026-10-04 (gossip-window re-promote settle and command-across-promotion legs, #1480)
+
+- Two new scenario legs close the lane gaps the settled case left. They
+  run in the same restored pre-switch window behind
+  `1960_repromote_settled_settle` — ahead of the peer-announce leg,
+  alongside #1479's `1970_settled_receipt_arbitration`, whose raced
+  promotion leaves the same entry roles — as
+  `1965_gossip_repromote_settle` and
+  `1990_command_across_promotion`. The command-across-promotion leg
+  took `1980` rather than a second `1970` slot so every leg in the
+  window keeps the distinct number the discovery order reads. The first
+  is the per-revision lane evidence for the variant #1109's
+  post-reconvergence leg explicitly scopes away — the re-promote inside
+  the *gossip window* QA finding
+  `suspended-command-orphaned-on-holder-repromote` (#708) named: the
+  holder's own demote suspends the still-pending receipt `Accepted`
+  inside one scan window, and the same holder is re-promoted the moment
+  it reports a promotable verdict, before the peer's next tracking pull
+  can carry the admission back covered. The runtime contract it pins is
+  that a suspended still-`Accepted` receipt resolves at the re-taken
+  boundary — re-queued and settled once, never parked against an empty
+  queue on the live active, never resurrected behind a newer command on
+  the same point.
+- The staging is the reproduction's own race on the rig's free-running
+  scans: the receipted write and the demote are issued back to back,
+  and a scan that beats the demote means nothing froze suspended — the
+  leg restores the launch roles and restages with a fresh identity
+  rather than reporting a pass over an admission that applied
+  normally. Whether the peer's pull closed the window first is recorded
+  as evidence, never as a verdict: both paths owe the same exactly-once
+  resolution, and the audit reads that, not the race.
+- The audit spans both serving monitors and both durable journals, then
+  follows the finding's zombie half: a newer write on the same point
+  settles strictly after the re-promoted boundary's own settle, the
+  pair switches to the peer, and the successor serves the newer value
+  with no second settlement for either admission. Named diagnostics are
+  `gossip-repromote-settle-failed`,
+  `gossip-repromote-settle-nondeterministic`, and the self-check's
+  `gossip-repromote-settle-unchecked`; two consecutive passes produce
+  identical digests, and a run predating the contract's receipt
+  attribution or admission counters reports inconclusive.
+- `1990_command_across_promotion` is the lane evidence #381 pinned
+  in-workspace and the lane never exercised: a declared command picked
+  off the served `GET /schema` through the lane's own helpers settles
+  `applied` exactly once on the peer that served it, survives a
+  documented promotion as a receipt on the new active, and is
+  resubmitted there — one settlement per submission across the pair's
+  journals, none lost, none duplicated, none replayed from the old
+  peer. The emitted and adapted records the command produces continue
+  on the promoted peer in tick order with their component attribution
+  unchanged and no pre-promotion entry re-emitted, and the pair
+  returns to its pre-scenario roles for the legs behind it.
+- The consumer-boundary mirrors land beside them:
+  `reference-plant/ci/legs/gossip_repromote_settle.py` proves the same
+  gossip-window contract on the customer-owned pair, where the driven
+  pair makes the ordering deterministic (only the demoted holder is
+  scanned between the demote and the re-promote, so the sibling's
+  window provably never covered the admission — asserted before the
+  promote), carrying two doctored negatives — the parked receipt and
+  the stale zombie — and `ci/legs/tune_carryover.py` completes the
+  receipted parameter-tune carryover #666's acceptance named, its
+  settled receipt identical in both peers' adopted logs with the tuned
+  value standing on the promoted peer. Both are file-discovered legs:
+  one new file each, no `check.sh`, boundary-lint, or harness edit.
 
 ### Landed 2026-10-04 (bounded step-dt leg, #1177)
 
@@ -2207,6 +2397,78 @@ Implementation order: second, after [daily architecture review](daily-architectu
   degraded contact and the field command to stand through the trip; both
   must fail naming the annunciation and the stop the honest run saw.
 
+### Landed 2026-10-05 (dead-owner fencing-claim leg, #638/#672/#843)
+
+- The never-released rule — the plant write claim is cleared only by
+  the last holder's explicit release, never by disconnect — is the
+  clause WW-OPS-003's redundancy requirement rests on: a dead owner's
+  silence is exactly the failure the claim exists to fence, so a closed
+  owner connection must leave the claim fencing every other
+  attachment's mutations until a preempting `claim_writer` lands or the
+  recorded owner re-arms. #638's fix settles the server half (a
+  `release_writer` that removed no hold can no longer empty the holder
+  set, so an empty set is never mistaken for the last holder's
+  hand-back); `crates/dcs-sim-net/tests/remote.rs` proves both halves
+  of the no-op — across the server-side reap of a dropped owner's hold,
+  an attachment holding nothing repeats `release_writer` while the
+  foreign token stays fenced, and on a field no attachment ever claimed
+  the same release answers `Done` and raises no claim. The QA legs
+  around it each pin a neighbouring door — 2350's claim-reclaim the
+  *live* holder's hand-back, 2390's holderless-claim-recovery the
+  fenced peer's bound reclaim, 0700's field-claim the partial release —
+  and none pinned this shape, which is why the finding survived to
+  #638.
+- The rig leg is `qa_lane/scenarios/2487_dead_owner_fencing.py`, filed
+  between the reclaim-convergence and claim-skew legs. It stages the
+  finding on the deployed rig through the claim-aware attachment seam
+  (#426) — the raw plant client, `claim_writer` being an op
+  `dcs-plant-ctl` does not expose — while the field census and the
+  watched-value reads ride the shipped tool (#667). One pass: the
+  launch owner's claim as the baseline; a dedicated attachment taking
+  it with an unconditional `claim_writer` under a fresh tool token and
+  landing a write, so the claim that dies is a used ownership epoch;
+  that attachment's connection closed *without* a release, the
+  finding's own reproduction.
+- The empty holder set is unobservable from the outside — a same-token
+  probe would join it — so the leg reads the reap window the only
+  honest way available, by repeating the non-holder sequence itself
+  across it. On every round an attachment holding nothing sends
+  `release_writer` and reads the field back: the release must answer
+  `done`, `probe_writer` must keep naming the dead owner's token, and a
+  bare `step` must stay `fenced`. A round answering `unclaimed`, or
+  naming another token, is the defect. Then the two documented doors
+  out of a dead owner's claim are exercised — the recorded owner's
+  token re-arms and writes while a foreign token stays fenced, and a
+  preempting `claim_writer` takes the field naming its own token — and
+  the restore hands the claim back to the launch owner inside the pass,
+  so the second pass's baseline is the launch state rather than the
+  first pass's leftovers.
+- Named diagnostics are `dead-owner-fencing-failed` (a non-holder's
+  release dissolving the standing claim, a round's mutation probe not
+  fenced, a foreign grant inside the window, a refused re-arm or a
+  fenced re-armed write, a foreign grant after the re-arm, a refused
+  preempt or one the standing verdict does not follow, a restore that
+  leaves the field under another token or moves the pair's roles) and
+  `dead-owner-fencing-nondeterministic` (a refused staging lever, a
+  dropped monitor or claim-surface read, two passes' digests
+  diverging). The unchecked-diagnostic self-check replays the judge
+  over planted negatives; a rig without a `probe_writer` surface, an
+  unattributed fencing verdict, a `plant_ctl` seam, or a reachable
+  plant endpoint reports inconclusive rather than passing vacuously.
+- The consumer-boundary mirror is `reference-plant/ci/legs/
+  dead_owner_fencing.py` — one new file under `ci/legs/`, discovered by
+  the file-named convention at order 382, between the claim-reclaim and
+  claim-observed legs, needing no `check.sh`, boundary-lint or harness
+  edit. It resolves the same seam out of the consumer's own emitted
+  artifact, probes the pinned release for the lifecycle surface — no
+  owner-token claim line, an `invalid_request` claim verb, an
+  unattributed fencing verdict, or a model declaring no writable field
+  output reports inconclusive, never a product failure — and runs the
+  same window, re-arm, and preempt against the manifest-declared pair.
+  Its `--tamper expect-dissolved` case wants the dead owner's claim
+  dissolved inside the window and must fail naming the standing fence
+  the honest run saw.
+
 
 ### Landed 2026-10-04 (phantom source-restart leg, #694/#1132/#1133)
 
@@ -2298,6 +2560,226 @@ Implementation order: second, after [daily architecture review](daily-architectu
   across both cycles, and the retained detection half — the tracked
   source cold-restarted, its tracking peer journaling exactly one
   boundary entry naming the alignment it broke.
+
+### Landed 2026-10-05 (adopted-stale-receipt regression leg, #1130/#1131)
+
+- The contract #709's fix establishes (WW-LCM-001's receipt-as-truth
+  clause): an adopted checkpoint's staler receipt view must not
+  regress a locally terminal outcome, so a later covering adoption
+  cannot re-settle an admission and journal a second identical
+  `command_settled` for it, and the pair's command audit carries
+  exactly one terminal settle per admission. The finding
+  `adopted-stale-receipt-view-regresses-settle-and-rejournals`
+  (defect; severity low; confidence medium), reported by run
+  `qax-20260919-006` against revision `cb10f21a` on rig `lenovo`,
+  module `dcs-monitor`, recorded both peers' durable journals
+  carrying the same receipt's `command_settled applied{61481}` twice
+  (a at seq 284 and 287, b at seq 284 and 292, b's second entry
+  landing inside its re-promote boundary while still attributed to the
+  original settle tick) — a replay of the already-recorded verdict the
+  recorder read as a fresh transition, not a new settle; a later plain
+  demote+promote cycle added no third entry, so the trigger is the
+  stale-view regression and not the role boundary. The recorder's
+  `record_scan` diffs receipt outcomes by absolute index, and
+  `adopt_receipts`' durable-truth-forward merge keeps the run's own
+  terminal verdict where the adopted window carries the same submission
+  still `accepted`, so a regressed entry never re-queues onto the
+  field either.
+- Scenario leg `1980_adopted_receipt_regression` stages the surviving
+  trigger on the deployed pair with the field held at a settled,
+  tracking state: a receipted command is submitted and the holder
+  demoted inside the receipt's suspension window so the receipt
+  persists `accepted` at the owner's index, the sibling promotes so its
+  boundary carry lifts the pending admission and its first
+  field-owning scan applies it and journals the settle, and the
+  successor is then demoted again so it tracks back and adopts the
+  predecessor's staler window — the predecessor's pull having been
+  paced behind that settle. The audit reads both peers' serving
+  monitors across the adoption window and both declared durable
+  journals: no peer's served receipt moves back to the pending view,
+  the two served receipts never disagree, and each peer carries at
+  most one `command_settled` for the admission.
+- Named diagnostics are `receipt-regression-failed` and
+  `receipt-regression-nondeterministic`, with the self-check's
+  `receipt-regression-unchecked` covering the planted negative — a leg
+  accepting a served `accepted` for an admission whose settle already
+  journaled, the defect the contract closed; two consecutive passes
+  produce identical digests; a run whose served surfaces predate the
+  receipt-attribution and checkpoint-window contract, whose ctx
+  declares no durable journal for one peer, whose pair never settles
+  tracking, or whose staging never lands the suspend/apply/adopt
+  sequence reports inconclusive; the pair leaves on its launch roles.
+  The consumer-boundary mirror is `reference-plant/ci/legs/
+  adopted_receipt_regression.py` — one new file under `ci/legs/`,
+  discovered by the file-named convention, needing no `check.sh`,
+  boundary-lint or harness edit. Its declared pair is driven, so the
+  staler view is staged by which peer is scanned when, with no freeze
+  and no timing race; it issues the documented switch first so the
+  admission lands on the member carrying the manifest's declared
+  `--peer` wiring, because the ex-owner holds no configured source and
+  a staler window legitimately fails the announced-source proof a
+  demotion without one must pass. Its stage position is order 612, not
+  the 605 the leg was first drafted against: main's
+  phantom-source-restart leg landed at 605 and records
+  tracker-realign and foreign-claim-release as its neighbours, so no
+  leg may sort between that pair, and the pair stage refuses two legs
+  at one order rather than dropping either. The slot sits beside its
+  sibling collision leg at 615, above foreign-claim-release.
+
+### Landed 2026-10-05 (receipt-index collision audit-preservation leg, #1175/#1176)
+
+- The contract #775's fix establishes (WW-LCM-001's receipt-as-truth
+  clause): admission indices derive from a per-peer `attempts`
+  counter that converges only through checkpoint adoption, so inside
+  the promote/fence window both lines can mint receipts at the same
+  absolute index for different commands, and the served `/receipts`
+  must keep a servable record of every admitted command rather than
+  replacing a settled submission at a reused index. The re-home the fix
+  names as the displaced admission's preserved audit: the merge
+  re-mints the displaced receipt past the adopted window's high-water
+  with its command, actor, and terminal `superseded` verdict intact,
+  and the recorder's re-home re-keys the already-journaled settle's
+  new index instead of settling it a second time.
+- Scenario leg `1985_receipt_index_collision` stages the split mint on
+  the deployed pair: `POST /promote` on the standby first, so its
+  promotion-boundary fetch meets only the pre-admission document and
+  its window can never cover the admission the run lands next, then a
+  receipted `write_value` on the still-field-owning peer inside that
+  window — it accepts and is superseded by the fence — and then a
+  second receipted `write_value` on the new active, minting the same
+  absolute index. After convergence the audit reads both peers'
+  serving monitors and both declared durable journals: the displaced
+  admission's terminal verdict stays retrievable (the demoted holder
+  serves it re-minted past the contested index with its `superseded`
+  verdict, while the successor's own applied record stands at the
+  contested index), the two submissions never collapse onto one
+  record, and each peer records exactly one `command_settled` per
+  admission.
+- Named diagnostics are `receipt-collision-failed` and
+  `receipt-collision-nondeterministic`, with the self-check's
+  `receipt-collision-unchecked` covering the planted negative — a leg
+  accepting the displaced admission as served while only the
+  successor's receipt stands at the contested index, the silent
+  displacement the contract closed; two consecutive passes produce
+  identical digests; a run whose served surfaces predate the
+  receipt-attribution and checkpoint-window contract, whose ctx
+  declares no durable journal for one peer, whose pair never settles
+  tracking, or whose staging never lands the split mint reports
+  inconclusive; the pair leaves on its launch roles. The
+  consumer-boundary mirror is `reference-plant/ci/legs/
+  receipt_index_collision.py` — one new file under `ci/legs/`,
+  discovered by the file-named convention, needing no `check.sh`,
+  boundary-lint or harness edit, driving the declared pair so the
+  promote/fence window is staged by scan order alone.
+
+### Landed 2026-10-05 (standby-loss, dead-active, superseded-restart, and plant-loss acceptance, #1475 consolidating #565/#581/#655/#670)
+
+- Four acceptance gaps on the peer-lifecycle side are now closed by four
+  legs — two on the simulated rig, two on the customer-owned pair — with
+  no product change: the contracts they exercise all landed earlier, and
+  what was missing was the per-revision lane and consumer evidence.
+- The rig side adds scenario leg `0850_superseded_restart` (case key
+  `superseded-restart`, diagnostics `superseded-restart-failed` /
+  `-nondeterministic`) beside the demote-in-place case it completes. It
+  stages the takeover half of the #512/#515 cluster that
+  `0800_fenced_writer_degrade` leaves open: the documented
+  demote/promote switchover, the demoted peer's walk back to a converged
+  verdict off the tracking source it resolves per scan cycle — the
+  configured `--peer` or the address `GET /checkpoint?peer=` announced —
+  with the journaled `divergence_resolved` behind a cleared verdict
+  naming every compared point with both sides' values equal where the
+  demoted peer transited diverged (the #541/#542 contract violation),
+  then the hand-back switch proving a reconverged peer takes the field
+  back on the documented order with no restart. The demoted *launched
+  active's* own container is then restarted through the lane's
+  `restart_controller`, so it returns as a launched active whose
+  cold-start claim preempts the promoted peer, and everything the
+  takeover owes is read through the two serving monitors and the field's
+  own claim answers: exactly one peer reporting `active` at every poll
+  (the page's `pairHealth` rule naming the dual-active fault wherever a
+  window does catch two), the preempted peer demoting *in place* with one
+  journaled `field_claim_lost` and no second process lifetime, its writes
+  refused at the field under its own pinned `--owner-token`, a receipted
+  command on it answering the named `not_active` rejection rather than
+  applying, the plant stepping under the surviving owner throughout, and
+  the shared-owner-token settlement — one owner's several attachments
+  `claimed_shared` under its own token while the superseded owner's token
+  stays fenced out, so two processes can never share a token and both
+  write.
+- The rig side also adds scenario leg
+  `0950_dead_active_unconverged_recovery` (case key
+  `dead-active-unconverged-recovery`, diagnostics
+  `dead-active-recovery-failed` / `-nondeterministic`): decision 86's
+  recorded recovery, staged through the lane's existing `stop_controller`
+  / `start_controller` seam. With the pair settled and tracking, stopping
+  the field owner's container leaves its single-writer claim standing
+  under a dead holder, and across the whole dead-peer window the quiesced
+  peer's served sync walks to an unconverged verdict it never promotes
+  out of — every `POST /promote` answering the named `not_converged`
+  refusal carrying that verdict, `/role`, `/snapshot` and `/journal` all
+  still answering, and the dead owner's claim still fencing third-party
+  mutation probes and naming its own token. Relaunching the container as
+  its configured active preempts the dead hold, the resumed owner takes
+  the field with exactly one peer active at every poll, and the standby
+  reconverges on the new checkpoint stream with the `source_restarted`
+  record journaled where the stream's generation regressed. No other lane
+  leg staged this wedge: the superseded-restart legs assume a converged
+  tracking standby, the standby-loss case keeps the active alive, and the
+  divergence cases keep the active serving.
+- The consumer side adds two files under `reference-plant/ci/legs/`, each
+  discovered by the file-named convention and needing no `check.sh`,
+  boundary-lint or harness edit. `standby_loss.py` (order 880,
+  diagnostics `standby-loss-failed` / `-nondeterministic` /
+  `-unchecked`) mirrors the rig's `1700_standby_loss` onto the
+  manifest-declared pair: a receipted write aimed at the *tracking*
+  standby answers the named `not_active` admission refusal with the point
+  unchanged in the field owner's served snapshot and in the simulated
+  plant's own stored sample, no adopted receipt-log entry, and no
+  `command_settled` record on the field owner at all; the standby's
+  process then stops while the field owner keeps scanning, keeps its
+  `active` role, keeps settling a second receipted command `applied`, and
+  journals neither a role transition nor a run boundary across the window
+  — peer loss is not an event the controller of record reacts to. The
+  standby relaunches onto the manifest's wiring and declared persistence,
+  rejoins `standby`/`unsynchronized`, reconverges to `tracking` inside
+  the leg's declared window, and a `POST /promote` fired at its monitor
+  before that first transfer completes is refused with the named
+  `not_converged` verdict. Its five doctored cases want the write settled
+  `applied`, the field owner to leave `active` across the down window, the
+  premature promote admitted, the return skipped, and the down window
+  skipped.
+- `plant_loss.py` (order 890, diagnostics `plant-loss-failed` /
+  `-nondeterministic` / `-unchecked`) mirrors the rig's
+  `3500_plant_link_loss` — the #507/#531 field-loss contract — onto the
+  same declared pair: stopping the spawned `dcs-plant-server` leaves the
+  field owner scanning with degraded-but-serving telemetry (the served
+  tick never rewinding, `io_health.failed_reads`/`failed_writes` counting
+  the per-direction failures on both sides, the boundary streak counting,
+  the backend link `disconnected` with a named `last_error`, and the
+  probed field input's own reads re-marked down at that link boundary)
+  while the declared standby never promotes on a field outage. The
+  respawned plant returns **fail closed**: a dedicated plant-socket
+  attachment's mutation
+  probes answer the named `unclaimed` refusal — never `stepped`, never a
+  silent write — until the recorded owner's bounded re-attach re-arms the
+  claim through `ensure_writer`, after which the probes answer `fenced`
+  naming that same token, the field's `Good` reads recover, and the
+  outage's counted failures are still counted rather than silently reset,
+  with no controller restarted anywhere in the episode. Its five doctored
+  cases want the field owner's process to have exited on the link loss,
+  the standby to have promoted itself, a mutation admitted before the
+  re-arm, the outage's counters cleared, and the outage skipped.
+- Both consumer legs report `inconclusive` — never a product failure —
+  where the pinned release predates the contract they read (no
+  owner-token claim line, no declared `journal_file`, no `io_health`
+  section or backend driver diagnostics, no served sync vocabulary), and
+  both join the release contract's named-diagnostics table and the
+  consumer README's pair paragraph. Four new pool-test modules carry the
+  stubbed-pair coverage: the two rig legs against a feed whose transitions
+  are lever-call keyed (so two passes emit identical evidence) beside the
+  shared claim-enforcing plant fake, and the two consumer legs against
+  their registration records, verdict classifications, staging seams, and
+  `main`'s inconclusive and doctored-case exits.
 
 ## Outcome
 
@@ -2502,6 +2984,46 @@ Persist `finding -> issue -> merged fix SHA -> verification case -> result`.
 Merged does not mean hardware-verified. For failed fixes, create a linked follow-up
 or explicitly support redispatch: the current dispatcher skips already recorded
 issue jobs, so merely reopening an issue is insufficient.
+
+### Hardware-lane routing
+
+`docs/agent-operations.md`'s "Hardware-lane routing rules" is the normative
+statement of these rules; this section records the same lane split for this plan
+so the two documents cannot drift. The metadata decides, not the prose: a ticket
+is hardware-bound when its `dcs-task` body metadata's `group` is `qa-hardware`
+or `wago-rig`, the two group values this lane owns.
+
+| Step | Owning lane |
+|---|---|
+| Software slices of a hardware ticket — driver contracts, run-mode gating, bus binding, diagnostics surface, simulated cyclic scenarios, controller tests against a fake kind | Simulation-only worker, dispatched under an ordinary software group (`crates/dcs-controller`, `crates/dcs-ethercat`, `crates/dcs-assembly`, `qa_lane`) |
+| Physical commissioning — wiring, module identity, loopback observation, interface binding on the dedicated NIC, first output write, watchdog response | The dedicated QA lane under supervised commissioning; never an autonomous worker |
+| Re-verification of a reproduced hardware finding | The QA findings route: the worker reproduces in simulation where possible, hardware re-verification rides a `qav-*` run |
+
+The dispatcher needs no code change: its `agent:ready` gate plus the existing
+policy language exclude hardware-lane groups, the planner prompt is bound to
+software and simulated I/O, and an operator-filed `agent:ready` issue naming a
+hardware-lane group is an operator correction — remove the label or re-group the
+body metadata — rather than a dispatcher change.
+
+**The #327/#328 split, unchanged.** #327 is the software-only slice of HQ-4: the
+controller's logical-bus→interface binding, the paced-only run-mode gate for
+hardware-bound models, the diagnostics surface, and the fake-kind controller
+tests. It runs through the ordinary worker path. #328 holds the rig's hardware
+acceptance — supervised commissioning of the Wago segment — and stays held with
+no `agent:ready` until a human is present. Completing #327's software scope does
+not move #328, and #328's physical evidence does not substitute for #327's
+simulated verification.
+
+`docs/wago-ethercat-rig-manifest.md` is the blocking evidence list for the
+`WW-LCM-002` and `WW-SEC-001` candidates. Its `unverified` and `unknown` fields —
+segment topology beyond one station, terminal order, interface binding, and
+supervisor-driven first write — are what deployment-topology and role-tier
+answers must resolve before those requirements may promote, and only supervised
+commissioning may move a field's status. This lane's role in the roadmap is the
+pre-pilot gate for `WW-FND-002` hardware evidence: supervised commissioning (#328)
+precedes any claim that the EtherCAT field path is proven on hardware, and the
+replay regression pattern adopted for `dcs-ethercat` turns each live-rig incident
+into a hardware-free regression test rather than a one-off finding.
 
 ## Implementation tickets, in order
 

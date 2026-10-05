@@ -1,0 +1,32 @@
+{
+  "name": "wago-750-354-link-flap",
+  "description": [
+    "The same coupler under a USB-NIC link flap: three complete exchanges,",
+    "then the dedicated NIC dropping the segment, then three exchanges that",
+    "never complete, then the coupler answering again. The recording's tail",
+    "completes, so the replayed link recovers — a capture that ended",
+    "mid-outage would repeat its failure instead, and the replay test",
+    "proves that shape separately."
+  ],
+  "stations": [
+    {
+      "position": 0,
+      "name": "WAGO 750-354",
+      "vendor_id": 6,
+      "product_id": 354,
+      "revision": 3,
+      "input_bytes": 2,
+      "output_bytes": 2
+    }
+  ],
+  "cycles": [
+    { "outcome": "complete", "inputs": "0100" },
+    { "outcome": "complete", "inputs": "0100" },
+    { "outcome": "complete", "inputs": "0100" },
+    { "outcome": "failed", "error": "link down: no frame returned within 10ms" },
+    { "outcome": "failed", "error": "link down: no frame returned within 10ms" },
+    { "outcome": "failed", "error": "link down: no frame returned within 10ms" },
+    { "outcome": "complete", "inputs": "0011" },
+    { "outcome": "complete", "inputs": "0011" }
+  ]
+}

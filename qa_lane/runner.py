@@ -3057,7 +3057,10 @@ def start_sim_bus_device(cfg, record, run_dir, timeline, fixture=None,
     `fixture` overrides the staged document — a src-relative model
     path the run config names beside `model_fixture` (the
     `cyclic_model` key holds the `sim-cyclic` document the
-    fencing-loss demotion leg stages). The server serves either
+    fencing-loss demotion leg stages), or an absolute host path for the
+    lane's own derived documents (`qa_lane/rig_model.py`), which the
+    revision's tree cannot carry because they are derived per run from
+    fixtures it does carry. The server serves either
     register-protocol kind, so one block carries a fixture per model
     the lane's legs need; a path the revision's tree does not carry
     fails before a container exists, naming the missing fixture.
@@ -3111,7 +3114,13 @@ def start_sim_bus_device(cfg, record, run_dir, timeline, fixture=None,
         raise RuntimeError('the sim-bus device server was asked to '
                            'stage a non-integer timeout_ms: '
                            + repr(timeout_ms))
-    model = Path(cfg['src_dir']) / sha / rel
+    # A src-relative fixture comes from the revision under test's own
+    # extracted tree; an absolute one is the lane's own derived
+    # document, which the tree cannot carry because it is derived from
+    # a fixture the tree does carry.
+    candidate = Path(rel)
+    model = candidate if candidate.is_absolute() \
+        else Path(cfg['src_dir']) / sha / rel
     if not model.is_file():
         raise RuntimeError('sim-bus model fixture missing: ' + str(model))
     container = 'dcs-hw-' + run_id + '-bus'
@@ -3396,7 +3405,7 @@ def _born_seat_role(cfg, seat):
 
 
 def start_born_field(cfg, record, run_dir, model, dynamics, timeline,
-                     mode):
+                     mode, document=None):
     """The scenario-callable born-active staging field: the leg's own
     scratch sim-serve container on the rig bridge, mode-selected to
     reproduce each field-side startup condition decision 103 records:
@@ -3416,19 +3425,38 @@ def start_born_field(cfg, record, run_dir, model, dynamics, timeline,
       and kinds differ from the rig model's, so a --remote born-active
       declaring the run model must meet the #1302 startup refusal.
 
+    `document` replaces the served model with a staged one — the
+    lane-owned derived documents of `qa_lane/rig_model.py` the
+    writable-field-point leg mounts. Like the sim-bus device server's
+    `fixture` arm it takes an absolute host path, which the revision's
+    extracted tree cannot carry because the document is derived per run
+    from a fixture the tree does carry; the controller mounting the
+    same document is what makes the correspondence probe's two ends
+    read one declaration. A `src_dir`-relative model and a `document`
+    are the same argument, so a leg that staged a document and a leg
+    that did not differ in one name only.
+
     The container carries the run's managed and run labels so teardown
     reconciles it; a previous born field — either mode — is removed
     first. The launch is recorded on the run's action timeline; a docker
     failure raises so the calling scenario reports the staging never
-    completed. Returns {'container', 'remote', 'mode'} — `remote` is
-    the container-name sim-serve address a born controller's --remote
-    dials.
+    completed. Returns {'container', 'remote', 'mode', 'model'} —
+    `remote` is the container-name sim-serve address a born
+    controller's --remote dials and `model` the document the field
+    actually serves.
     """
     run_id, sha = record['run_id'], record['attempted_sha']
     if mode not in ('serving', 'silent', 'foreign'):
         raise RuntimeError('start_born_field modes are '
                            "'serving'/'silent'/'foreign', got "
                            + repr(mode))
+    if mode == 'silent' and document is not None:
+        raise RuntimeError('the silent born field serves no document — '
+                           'its class is the address resolving with '
+                           'nothing listening')
+    served = Path(document) if document is not None else Path(model)
+    if not served.is_file():
+        raise RuntimeError('born field model missing: ' + str(served))
     container = 'dcs-hw-' + run_id + '-born-plant'
     docker('rm', '-f', container, check=False, timeout=60)
     timeline('born-field-start', 'launch ' + container + ' (' + mode
@@ -3441,7 +3469,7 @@ def start_born_field(cfg, record, run_dir, model, dynamics, timeline,
     else:
         docker(*_docker_run_args(cfg, run_id, container),
                '--network', 'dcs-hwtest-' + run_id,
-               '-v', str(model) + ':/model/plant.json:ro',
+               '-v', str(served) + ':/model/plant.json:ro',
                '-v', str(dynamics) + ':/model/dynamics.json:ro',
                IMAGE_PREFIX + 'plant:' + sha,
                '/model/plant.json', '--dynamics', '/model/dynamics.json',
@@ -3464,7 +3492,8 @@ def start_born_field(cfg, record, run_dir, model, dynamics, timeline,
     timeline('born-field-up', container + ' ' + mode)
     return {'container': container,
             'remote': container + ':' + str(BORN_FIELD_PORT),
-            'mode': mode}
+            'mode': mode,
+            'model': str(served)}
 
 
 def pause_born_field(run_id, timeline):
@@ -3746,10 +3775,14 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
     stop/start/pause and the read-only container-state probe, plant
     stop/start,
     model-revision, foreign-peer launch/teardown, driven-peer
-    launch/teardown, born-active launch/teardown/state reads (the
+    launch/teardown, born-active     launch/teardown/state reads (the
     launch naming its own --scan-ms cadence, the per-container skew
     lever), and
-    born-field serve/silence/freeze actions, and
+    born-field serve/silence/freeze actions — the serve's `document`
+    arm staging a lane-owned derived document (`qa_lane/rig_model.py`)
+    in the field's place, which the born launch's own `document` arm
+    then mounts on the controller, so both ends read one declaration —
+    and
     forged-checkpoint-endpoint
     launch/teardown actions, the run's shared --pair-token the
     announced-source legs' keyed posture answers, the shipped plant
@@ -3930,13 +3963,13 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
         # controllers onto. born_controller_state is the read-only
         # process verdict the undeclared-refusal class's exit evidence
         # comes from.
-        'start_born_field': lambda mode: start_born_field(
+        'start_born_field': lambda mode, document=None: start_born_field(
             cfg, record, run_dir,
             src / (cfg['foreign_model_fixture']
                    if mode == 'foreign' else cfg['model_fixture']),
             src / (cfg['foreign_dynamics_fixture']
                    if mode == 'foreign' else cfg['dynamics_fixture']),
-            timeline, mode),
+            timeline, mode, document=document),
         'pause_born_field': lambda: pause_born_field(run_id, timeline),
         'unpause_born_field': lambda: unpause_born_field(
             run_id, timeline),
@@ -4024,6 +4057,12 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
         # instead of staging a launch that raises, and names the device
         # id and fixture its own contract needs.
         'sim_bus_device': _sim_bus_device(cfg),
+        # The run's own mounted plant document — the fixture every lane
+        # derivation starts from (`qa_lane/rig_model.py`'s per-run model
+        # variants derive from it and stage beside the evidence), named
+        # here so a leg never has to reconstruct the revision's
+        # src_dir/sha join to find the document its run mounted.
+        'mounted_model': str(src / cfg['model_fixture']),
         'state_files': {key: str(_controller_dir(run_dir, peer)
                                  / 'state.json')
                         for key, peer in names.items()},

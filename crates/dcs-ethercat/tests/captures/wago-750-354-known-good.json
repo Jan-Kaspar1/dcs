@@ -1,0 +1,31 @@
+{
+  "name": "wago-750-354-known-good",
+  "description": [
+    "The Wago 750-354 coupler with one 750-400 digital input module and one",
+    "750-501 digital output module: two input bytes, two output bytes, one",
+    "station. This recording is the known-good baseline a first live rig",
+    "run produced: four consecutive complete exchanges carrying the",
+    "coupler's actual process data, then a late frame, then a station-0",
+    "working-counter shortfall, then recovery."
+  ],
+  "stations": [
+    {
+      "position": 0,
+      "name": "WAGO 750-354",
+      "vendor_id": 6,
+      "product_id": 354,
+      "revision": 3,
+      "input_bytes": 2,
+      "output_bytes": 2
+    }
+  ],
+  "cycles": [
+    { "outcome": "complete", "inputs": "0000" },
+    { "outcome": "complete", "inputs": "0100" },
+    { "outcome": "complete", "inputs": "0101" },
+    { "outcome": "complete", "inputs": "0001" },
+    { "outcome": "late", "inputs": "0101" },
+    { "outcome": "short", "station": 0, "inputs": "0101" },
+    { "outcome": "complete", "inputs": "0011" }
+  ]
+}

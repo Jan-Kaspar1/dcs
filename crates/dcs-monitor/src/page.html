@@ -1668,6 +1668,28 @@ function renderIoHealth(health, commandQueue) {
       if (exchange.working_counter_mismatches || exchange.missed_deadlines) {
         troubled = true;
       }
+      // Per-bus attribution: on a fan-out over several cyclic buses the
+      // counters above are sums, and only these rows say which bus moved
+      // them. Absent on a single-bus driver, which records no rows.
+      (exchange.buses || []).forEach(function (bus) {
+        const name = bus.bus != null
+          ? bus.bus + (bus.device == null ? "" : " (device " + bus.device + ")")
+          : (bus.device == null ? "local sim" : "device " + bus.device);
+        rows.push(healthRow("bus " + name,
+          (bus.state ? "state " + bus.state : "no reported state") +
+          ", link " + bus.link +
+          (bus.binding ? ", bound to " + bus.binding : "") +
+          ", exchanges " + bus.attempted + "/" + bus.succeeded +
+          ", failed " + bus.failed_exchanges +
+          ", short " + bus.working_counter_mismatches +
+          ", late " + bus.missed_deadlines +
+          ", last exchange tick " +
+          (bus.last_exchange_tick == null ? "none" : bus.last_exchange_tick) +
+          (bus.last_error ? ", last failure " + bus.last_error : "")));
+        if (bus.link !== "connected" || bus.failed_exchanges) {
+          troubled = true;
+        }
+      });
     }
   }
   rows.push(healthRow("failed reads", health.failed_reads));
