@@ -229,7 +229,7 @@ class InconclusiveReport(unittest.TestCase):
 
 class Registration(unittest.TestCase):
     def test_the_leg_registers_a_free_order_with_a_doctored_case(self):
-        self.assertEqual(205, leg.LEG["order"])
+        self.assertEqual(206, leg.LEG["order"])
         self.assertEqual("release-orphan-window-leg", leg.LEG["passes"])
         self.assertEqual("release-orphan-window-failed",
                          leg.LEG["failed"])

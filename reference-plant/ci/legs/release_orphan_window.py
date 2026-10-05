@@ -109,9 +109,9 @@ import simulate
 # episode.
 LEG = {
     # The next free slot between demote-reconvergence (200) and
-    # managed-lifecycle (210) — the stage runs the legs in this order
-    # and no two may share one.
-    "order": 205,
+    # managed-lifecycle (210), behind involuntary-demote-verify's 205 —
+    # the stage runs the legs in this order and no two may share one.
+    "order": 206,
     "title": "the release-orphan-window leg",
     "passes": "release-orphan-window-leg",
     "failed": "release-orphan-window-failed",
