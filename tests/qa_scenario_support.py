@@ -712,8 +712,20 @@ class ClaimPlantPeer(_SocketPeerLifecycle):
         self.shared_write_fenced = False  # a holder's write is refused
         self.release_drops_claim = False  # one release frees the claim
         self.idle_release_fails = False   # a holder of nothing refused
+        self.release_dissolves = False    # a non-holder's release frees
+                                          # the claim — the pre-#638
+                                          # shape, the defect
+                                          # dead-owner-fencing pins
+        self.ensure_rearms_refused = False  # a same-owner ensure_writer
+                                          # refuses, so a dead owner
+                                          # can never re-arm
+        self.foreign_grants_after = None  # grant a foreign
+                                          # ensure_writer only from
+                                          # the Nth one on — the
+                                          # after-the-re-arm takeover
         self.refuse_rogue = False         # claim_writer answers fenced
         self.rogue_token = scenarios.CLAIM_ROGUE
+        self.foreign_ensures = 0
         self.listener = socket.socket()
         self.listener.setsockopt(socket.SOL_SOCKET,
                                  socket.SO_REUSEADDR, 1)
@@ -792,10 +804,18 @@ class ClaimPlantPeer(_SocketPeerLifecycle):
         except OSError:
             pass
         finally:
-            # Disconnect releases nothing: the claim outlives a dead
-            # owner so the field fails closed until another claim.
+            # Disconnect reaps the attachment's *hold*, never the
+            # claim: the claim outlives a dead owner so the field
+            # fails closed until another claim, exactly as the shipped
+            # server's `release_hold` does. Without the reap a
+            # closed attachment's corpse would sit in the holder set
+            # forever and the empty-holder window the dead-owner
+            # contract turns on could never open in a leg's fixture.
             with self.lock:
-                self.conn_ids.pop(id(conn), None)
+                cid = self.conn_ids.pop(id(conn), None)
+                if cid is not None and self.claim is not None:
+                    self.claim['holders'].discard(cid)
+                    self.shared_conns.discard(cid)
             conn.close()
 
     def _grant(self, owner, cid, request):
@@ -861,6 +881,19 @@ class ClaimPlantPeer(_SocketPeerLifecycle):
                 return {'result': 'done'}
             if op == 'ensure_writer':
                 owner = request['owner']
+                if self.foreign_grants_after is not None:
+                    self.foreign_ensures += 1
+                    if self.foreign_grants_after <= self.foreign_ensures \
+                            and self.claim is not None \
+                            and owner != self.claim['owner']:
+                        # The late takeover: the foreign token is
+                        # refused while the dead owner's window stands
+                        # and granted only once the owner has
+                        # re-armed — the clause the leg reads after the
+                        # re-arm.
+                        self.claim = self._grant(owner, cid, request)
+                        self.shared_conns = set()
+                        return {'result': 'done'}
                 if self.claim is None:
                     self.claim = self._grant(owner, cid, request)
                     self.shared_conns = set()
@@ -870,6 +903,11 @@ class ClaimPlantPeer(_SocketPeerLifecycle):
                         self.claim = self._grant(owner, cid, request)
                         self.shared_conns = set()
                         return {'result': 'done'}
+                    return self._fenced()
+                if self.ensure_rearms_refused:
+                    # The dead owner's own token refused its re-arm:
+                    # the claim stands, but nothing behind it can
+                    # return — the re-arm clause's failure.
                     return self._fenced()
                 self._declare(request)
                 self.claim['holders'].add(cid)
@@ -920,6 +958,12 @@ class ClaimPlantPeer(_SocketPeerLifecycle):
                         self.claim = None
                         self.shared_conns = set()
                     return {'result': 'done'}
+                if self.release_dissolves:
+                    # The pre-#638 shape: a release from an attachment
+                    # holding nothing dissolves the standing claim, so
+                    # a dead owner's fence drops to any next claimant.
+                    self.claim = None
+                    self.shared_conns = set()
                 if self.idle_release_fails:
                     return {'result': 'error',
                             'error': {'kind': 'invalid_request',

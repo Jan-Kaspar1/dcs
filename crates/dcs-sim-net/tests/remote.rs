@@ -1841,6 +1841,17 @@ fn a_non_holder_release_cannot_dissolve_a_dead_owners_claim() {
         stray.claim_writer(2).unwrap();
         stray.write(PointId(20), Value::Float(4.0)).unwrap();
         assert_eq!(stray.read(PointId(20)).unwrap().value, Value::Float(4.0));
+
+        // The other half of the no-op: a `release_writer` from an
+        // attachment holding nothing is `Done` and changes nothing
+        // whether a dead owner's claim stands behind it (the window
+        // above) or no claim stands at all. On a field the recorded
+        // owner's own release emptied, the release cannot conjure a
+        // claim to dissolve and must not raise one: the field stays
+        // `unclaimed`, still closed to mutation.
+        stray.release_writer().unwrap();
+        assert_eq!(stray.probe_writer().unwrap(), FieldClaim::Unclaimed);
+        assert_eq!(stray.step(0.1), Err(RemoteError::Unclaimed));
     });
 }
 

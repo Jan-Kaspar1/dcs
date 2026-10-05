@@ -1906,6 +1906,78 @@ Implementation order: second, after [daily architecture review](daily-architectu
   degraded contact and the field command to stand through the trip; both
   must fail naming the annunciation and the stop the honest run saw.
 
+### Landed 2026-10-05 (dead-owner fencing-claim leg, #638/#672/#843)
+
+- The never-released rule — the plant write claim is cleared only by
+  the last holder's explicit release, never by disconnect — is the
+  clause WW-OPS-003's redundancy requirement rests on: a dead owner's
+  silence is exactly the failure the claim exists to fence, so a closed
+  owner connection must leave the claim fencing every other
+  attachment's mutations until a preempting `claim_writer` lands or the
+  recorded owner re-arms. #638's fix settles the server half (a
+  `release_writer` that removed no hold can no longer empty the holder
+  set, so an empty set is never mistaken for the last holder's
+  hand-back); `crates/dcs-sim-net/tests/remote.rs` proves both halves
+  of the no-op — across the server-side reap of a dropped owner's hold,
+  an attachment holding nothing repeats `release_writer` while the
+  foreign token stays fenced, and on a field no attachment ever claimed
+  the same release answers `Done` and raises no claim. The QA legs
+  around it each pin a neighbouring door — 2350's claim-reclaim the
+  *live* holder's hand-back, 2390's holderless-claim-recovery the
+  fenced peer's bound reclaim, 0700's field-claim the partial release —
+  and none pinned this shape, which is why the finding survived to
+  #638.
+- The rig leg is `qa_lane/scenarios/2487_dead_owner_fencing.py`, filed
+  between the reclaim-convergence and claim-skew legs. It stages the
+  finding on the deployed rig through the claim-aware attachment seam
+  (#426) — the raw plant client, `claim_writer` being an op
+  `dcs-plant-ctl` does not expose — while the field census and the
+  watched-value reads ride the shipped tool (#667). One pass: the
+  launch owner's claim as the baseline; a dedicated attachment taking
+  it with an unconditional `claim_writer` under a fresh tool token and
+  landing a write, so the claim that dies is a used ownership epoch;
+  that attachment's connection closed *without* a release, the
+  finding's own reproduction.
+- The empty holder set is unobservable from the outside — a same-token
+  probe would join it — so the leg reads the reap window the only
+  honest way available, by repeating the non-holder sequence itself
+  across it. On every round an attachment holding nothing sends
+  `release_writer` and reads the field back: the release must answer
+  `done`, `probe_writer` must keep naming the dead owner's token, and a
+  bare `step` must stay `fenced`. A round answering `unclaimed`, or
+  naming another token, is the defect. Then the two documented doors
+  out of a dead owner's claim are exercised — the recorded owner's
+  token re-arms and writes while a foreign token stays fenced, and a
+  preempting `claim_writer` takes the field naming its own token — and
+  the restore hands the claim back to the launch owner inside the pass,
+  so the second pass's baseline is the launch state rather than the
+  first pass's leftovers.
+- Named diagnostics are `dead-owner-fencing-failed` (a non-holder's
+  release dissolving the standing claim, a round's mutation probe not
+  fenced, a foreign grant inside the window, a refused re-arm or a
+  fenced re-armed write, a foreign grant after the re-arm, a refused
+  preempt or one the standing verdict does not follow, a restore that
+  leaves the field under another token or moves the pair's roles) and
+  `dead-owner-fencing-nondeterministic` (a refused staging lever, a
+  dropped monitor or claim-surface read, two passes' digests
+  diverging). The unchecked-diagnostic self-check replays the judge
+  over planted negatives; a rig without a `probe_writer` surface, an
+  unattributed fencing verdict, a `plant_ctl` seam, or a reachable
+  plant endpoint reports inconclusive rather than passing vacuously.
+- The consumer-boundary mirror is `reference-plant/ci/legs/
+  dead_owner_fencing.py` — one new file under `ci/legs/`, discovered by
+  the file-named convention at order 382, between the claim-reclaim and
+  claim-observed legs, needing no `check.sh`, boundary-lint or harness
+  edit. It resolves the same seam out of the consumer's own emitted
+  artifact, probes the pinned release for the lifecycle surface — no
+  owner-token claim line, an `invalid_request` claim verb, an
+  unattributed fencing verdict, or a model declaring no writable field
+  output reports inconclusive, never a product failure — and runs the
+  same window, re-arm, and preempt against the manifest-declared pair.
+  Its `--tamper expect-dissolved` case wants the dead owner's claim
+  dissolved inside the window and must fail naming the standing fence
+  the honest run saw.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,
