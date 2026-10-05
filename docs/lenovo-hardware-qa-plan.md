@@ -1673,6 +1673,113 @@ Implementation order: second, after [daily architecture review](daily-architectu
   raw claim seam, or no settled owner-plus-tracker layout reports
   inconclusive.
 
+### Landed 2026-10-04 (divergence gate, lifecycle, and wedge-recovery legs, #1476)
+
+- Three scenario legs and one consumer-boundary reference-plant leg
+  complete the staged-versus-field divergence evidence the plan's
+  failover-integrity rows call for: `2330_standby_divergence` (#444),
+  `2335_divergence_resolution` (#573), and
+  `2340_diverged_field_recovery` (#922) in the lane, and
+  `ci/legs/diverged_field_recovery.py` (#923) at the customer
+  boundary. The consolidation that carried them (#1476, from #730,
+  #922, #923, #444, #573) added no roadmap scope: the product defect
+  #730 recorded was already answered by decision 94 (#915) and
+  decision 97's fencing-loss reclaim, and these legs grade the
+  contracts those decisions rest on.
+- The induction seam is the **shared** writer claim — the shape
+  `dcs-controller --owner-token` exists for ("pins it when an
+  external attachment must share the claim"). An attachment
+  `ensure_writer`s the claim under the settled active's pinned token,
+  the field answers `claimed_shared`, and the active keeps its
+  ownership, its writes, and its `active` role across the whole
+  episode. That seam is a *finding* about the contract, not a
+  convenience: an attachment's unconditional `claim_writer` preempt
+  lands the owner's next field write fenced, the owner demotes in
+  place, and every later checkpoint of that seat stamps
+  `source_owns_field: false` — which decision 87's `orphaned` verdict
+  uses to supersede a `Diverged` verdict outright, and which the
+  promote gate admits. So the preempting seam lands the sibling wedge
+  (`scenario_unclaimed_rearm`, `scenario_claim_reclaim`), never
+  decision 26's staged-versus-field verdict; the shared claim is the
+  only claim a third attachment may take while the tracked line keeps
+  reporting that it owns the field.
+- `2330_standby_divergence` grades the gate whole: the diverged report
+  naming the mismatched point with both sides' values, one journaled
+  `divergence_detected`, `POST /promote` answering the named
+  `not_converged` carrying that report with the active neither fenced
+  nor demoted, the reported staged value written back reconverging the
+  peer on fresh evidence rather than latching, the promoted peer's own
+  claim preempting the attachment's, and the closing demote/promote
+  restoring the launch roles. Because the active rewrites its outputs
+  every scan, a single poke opens only a one-scan window; the leg
+  holds the field off-image with repeated pokes under the shared claim
+  until the comparison convicts it, which is what makes the induction
+  deterministic on a continuously-scanning rig.
+- `2335_divergence_resolution` grades the lifecycle's other two legs:
+  the blocked clear — an error fault injected on the compared field
+  points through the shipped tool's `fault` subcommand leaves the
+  standing verdict across the applies whose field reads cannot complete,
+  with no `divergence_resolved` journaled and the gate still closed
+  (decision 26's #541 positive-evidence rule) — and the journaled
+  resolution, where the first fully-read matching comparison returns
+  the peer to `tracking` with exactly one `divergence_resolved`
+  carrying every compared point with both sides' values and reopens
+  the promote gate.
+- `2340_diverged_field_recovery` and the reference-plant leg stage the
+  #730 wedge itself — an interposer's `claim_writer` preempt, one field
+  `Out` write off the staged value, `release_writer` — and run
+  decision 94's recorded remedy. Two contract facts bound what either
+  can observe, and both legs assert rather than assume them: the
+  `Diverged` verdict is reachable only while the tracked line's source
+  still stamps ownership, so the driven consumer leg orders its scans
+  into that one window and the rig leg grades whichever named
+  un-converged verdict the contract serves (`diverged` with the point
+  and both values where the comparison convicted, `orphaned` where the
+  demoted source's stamp superseded it); and decision 97's
+  fencing-loss reclaim takes a free field back on the ex-owner's next
+  scan, so the unclaimed-field surface is observable only with that
+  actor gone — the leg's first `stop_controller` is the recorded
+  remedy's own first half, and the `start_controller` on the same seat
+  is its second: a fresh active whose conditional startup grant takes
+  the free field, whose declared image overwrites the un-commanded
+  actuation, and after which the survivor's next same-tick comparison
+  clears it to `tracking` in place. Both legs then audit the record
+  that reconvergence owes: the transition into the served un-converged
+  verdict journals once — exactly once in the consumer leg, whose scan
+  order puts the comparison convicting it inside the one window where
+  it is reachable, and at most once in the rig leg, which grades
+  whichever named verdict the contract serves — and a standing
+  `Diverged` verdict resolves exactly once, carrying every compared
+  field `Out` point with both sides' values. Zero resolutions is the
+  honest count where the demoted source's stamp superseded the
+  divergence and the survivor reconverged through the ordinary pull,
+  and a flap is refused either way. The pair's launch roles restore
+  either way.
+  The gate is graded on *every* peer while the interposer's claim
+  still stands — the reproduction's "every promote refused" clause:
+  the convergence gate answers a `diverged` peer with
+  `not_converged` carrying the report it declined on, and the field's
+  own arbitration answers a peer whose verdict is promotable but whose
+  conditional orphan claim a live foreign claim refuses (decision 91).
+  Neither hands the field off and neither has an override. Nothing is
+  posted after the release: a free field is the state the remedy
+  needs, and a promotable survivor would take it through the ordinary
+  promote — decision 94's own recorded lighter recovery boundary —
+  instead of the relaunch being graded. The wedge's duration and the
+  field state across it land in the leg's evidence beside the served
+  verdicts, the measure the finding's reproduction reported as minutes
+  of frozen un-commanded actuation.
+- Named diagnostics: `standby-divergence-failed` /
+  `-nondeterministic`, `divergence-resolution-failed` /
+  `-nondeterministic`, `wedge-recovery-failed` /
+  `-nondeterministic` in the lane, and
+  `wedge-recovery-failed` / `wedge-recovery-nondeterministic` /
+  `diverged-field-recovery-unchecked` in the consumer stage. Two
+  consecutive lane passes must produce identical evidence digests; the
+  consumer leg's two doctored cases (`expect-promote`, which wants the
+  wedge's promote admitted, and `skip-relaunch`, which never relaunches
+  the wedged field owner) must each fail naming their evidence.
+
 ### Landed 2026-10-03 (stale-budget cadence-domain leg, #1411)
 
 - The declared freshness budget's measurement domain — the per-revision
