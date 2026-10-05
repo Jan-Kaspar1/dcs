@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The scan-batch bound leg for the reference plant — the consumer-side
-proof that the deployed pair's driven `POST /scan` accepts only
+proof that the declared pair's driven `POST /scan` accepts only
 bounded batches: a `scans` past the monitor's declared per-request
 bound is refused `400` by name before the first scan, and a batch
 whose client dies mid-flight still terminates inside its own request
@@ -12,13 +12,22 @@ boundary on the manifest-declared pair, whose controllers run
 The pair leg (`ci/legs/pair.py`) proves the declared pair runs and
 switches; the bounded-liveness leg proves its reads stay answered
 under a wedged client. This leg exercises the driven lane's work
-bound on the same deployment: without it one `POST /scan` carrying a
+bound on the same model and pair wiring: without it one `POST /scan` carrying a
 huge `scans` count hands a single client the run's whole timeline and
 pins its submission worker for as long as it cares to — and a client
 gone mid-batch leaves nothing to cancel the runaway work. The
 monitor's socket API hands a request no liveness to poll, so the
 declared bound is the cancellation: the batch that always terminates
-is the batch that is bounded. The run:
+is the batch that is bounded.
+
+This leg launches without the optional persistence files. Its unpaced
+256-scan burst can outrun the checkpoint writer's 64-entry queue on a
+contended runner; that queue's designed fatal refusal stops the batch
+and leaves the last published tick standing, which a longer settle
+deadline cannot repair. Persistence, restart, and durable history have
+their own legs on the manifest's full file-backed deployment. Here the
+HTTP work bound and the actual shared plant's step count own the proof.
+The run:
 
 - converges the declared standby to `tracking` through the pair
   leg's driven-tick loop, recording the field owner's served tick and
@@ -207,7 +216,7 @@ def scan_batch_pass(args, tamper):
     digest_entries, evidence, failures = [], {}, []
     rig = None
     try:
-        rig = pair.launch_pair(args, declared)
+        rig = pair.launch_pair(args, declared, persistence=False)
         duty_url, standby_url = rig.duty_url, rig.standby_url
 
         # Phase 1 — convergence, then the baselines the refusal and
