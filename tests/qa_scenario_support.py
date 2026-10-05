@@ -925,7 +925,8 @@ class ClaimPlantPeer(_SocketPeerLifecycle):
                 return {'result': 'done'}
             if op == 'ensure_writer':
                 owner = request['owner']
-<<<<<<< HEAD
+                if self.refuse_ensure:
+                    return self._fenced()
                 if self.foreign_grants_after is not None:
                     self.foreign_ensures += 1
                     if self.foreign_grants_after <= self.foreign_ensures \
@@ -939,10 +940,6 @@ class ClaimPlantPeer(_SocketPeerLifecycle):
                         self.claim = self._grant(owner, cid, request)
                         self.shared_conns = set()
                         return {'result': 'done'}
-=======
-                if self.refuse_ensure:
-                    return self._fenced()
->>>>>>> codex/resolve-pr-1509
                 if self.claim is None:
                     self.claim = self._grant(owner, cid, request)
                     self.shared_conns = set()

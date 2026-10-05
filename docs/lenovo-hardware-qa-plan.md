@@ -2272,7 +2272,6 @@ Implementation order: second, after [daily architecture review](daily-architectu
   degraded contact and the field command to stand through the trip; both
   must fail naming the annunciation and the stop the honest run saw.
 
-<<<<<<< HEAD
 ### Landed 2026-10-05 (dead-owner fencing-claim leg, #638/#672/#843)
 
 - The never-released rule — the plant write claim is cleared only by
@@ -2344,7 +2343,7 @@ Implementation order: second, after [daily architecture review](daily-architectu
   Its `--tamper expect-dissolved` case wants the dead owner's claim
   dissolved inside the window and must fail naming the standing fence
   the honest run saw.
-=======
+
 
 ### Landed 2026-10-04 (phantom source-restart leg, #694/#1132/#1133)
 
@@ -2656,7 +2655,6 @@ Implementation order: second, after [daily architecture review](daily-architectu
   shared claim-enforcing plant fake, and the two consumer legs against
   their registration records, verdict classifications, staging seams, and
   `main`'s inconclusive and doctored-case exits.
->>>>>>> codex/resolve-pr-1509
 
 ## Outcome
 
