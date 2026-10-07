@@ -453,6 +453,43 @@ pub struct Connection {
     pub to: Endpoint,
 }
 
+/// One reusable equipment instance and its operator-facing surface.
+///
+/// Members refer to the model's existing components and logical points;
+/// values, command admission, alarms, and state remain owned by those
+/// declarations. `points` preserves the engineered summary order and
+/// `controls` selects the writable inputs an operator may use there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Equipment {
+    /// Stable equipment identity, unique within the plant.
+    pub id: String,
+    /// Human-facing equipment name.
+    pub label: String,
+    /// Library equipment kind, opaque to the model validator.
+    pub kind: String,
+    /// Components owned by this equipment, including its alarms.
+    pub components: Vec<ComponentId>,
+    /// Ordered summary points, resolved through the existing signal index.
+    pub points: Vec<PointId>,
+    /// Summary points accepting commands and feeding a member component.
+    pub controls: Vec<EquipmentControl>,
+}
+
+/// A labeled operator action on an equipment's existing writable point.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EquipmentControl {
+    /// The command target, also present in the equipment summary.
+    pub point: PointId,
+    /// Human-facing control name.
+    pub label: String,
+    /// Action label for writing `false`, valid only on Boolean points.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub false_label: Option<String>,
+    /// Action label for writing `true`, valid only on Boolean points.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub true_label: Option<String>,
+}
+
 /// A versioned plant model document: the single contract shared by
 /// engineering data, controllers, and the monitoring UI.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -470,6 +507,10 @@ pub struct PlantModel {
     pub components: Vec<ComponentInstance>,
     /// Wires between points and component ports.
     pub connections: Vec<Connection>,
+    /// Equipment ownership and operator surfaces. Older documents load
+    /// with no equipment; an empty collection preserves their serialization.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub equipment: Vec<Equipment>,
 }
 
 /// Failure to [`PlantModel::load`] a document.

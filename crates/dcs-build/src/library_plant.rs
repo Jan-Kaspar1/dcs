@@ -275,6 +275,7 @@ pub fn library_plant(config: &LibraryPlantConfig) -> Result<LibraryPlant, BuildE
         signals: Vec::new(),
         components: Vec::new(),
         connections: Vec::new(),
+        equipment: Vec::new(),
     };
     for (frame, train) in [
         (STATION_FRAME, &station.model),
@@ -321,6 +322,22 @@ pub fn library_plant(config: &LibraryPlantConfig) -> Result<LibraryPlant, BuildE
 /// unrenamed, so the merged document cannot carry a dangling reference
 /// into another train's id space.
 fn merge(plant: &mut PlantModel, frame: IdFrame, train: &PlantModel) {
+    for equipment in &train.equipment {
+        let mut equipment = equipment.clone();
+        if frame != PLANT_FRAMES[0] {
+            equipment.id = format!("{}:{}", frame.components, equipment.id);
+        }
+        for component in &mut equipment.components {
+            *component = frame.component(*component);
+        }
+        for point in &mut equipment.points {
+            *point = frame.point(*point);
+        }
+        for control in &mut equipment.controls {
+            control.point = frame.point(control.point);
+        }
+        plant.equipment.push(equipment);
+    }
     for device in &train.devices {
         let mut device = device.clone();
         device.id = frame.device(device.id);

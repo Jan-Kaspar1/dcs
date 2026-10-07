@@ -6201,6 +6201,7 @@ mod tests {
             SignalIndex {
                 points: Vec::new(),
                 components: Vec::new(),
+                equipment: Vec::new(),
             },
         )
         .unwrap();

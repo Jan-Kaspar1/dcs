@@ -151,6 +151,7 @@ fn signal_index() -> SignalIndex {
             entry(SEQ_DONE, Direction::Out, ValueKind::Bool, false),
         ],
         components: vec![],
+        equipment: vec![],
     }
 }
 

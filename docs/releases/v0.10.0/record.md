@@ -1,17 +1,15 @@
 # Release record: v0.10.0
 
-The tenth release of the DCS platform, cutting the consumer contract
-line forward from the `v0.9.0` record: the tranche owes no
-supported-surface, model-grammar, manifest-shape, served-wire, or
-checkpoint change at all — every commit `main` carries since the
-`v0.9.0` record landed, this record's own landing included, touched
-release mechanics, the consumer boundary's own proof, and the prose
-that names them, and no crate library source at all (the workspace's
-only `crates/` edits are the four `recorded_release_*` drift tests) —
-so all four artifacts this record pins are byte-identical to the ones
-the `v0.9.0` record pins, and the minor bump exists to open the next
-`0.10` line a `version = "0.9"` requirement cannot silently resolve. It
-is cut under the procedure in `docs/release-contract.md` (decision 80).
+The tenth release of the DCS platform opens the `0.10` line and adds a
+reusable pump engineering API with an equipment surface in the unified
+plant model. Equipment metadata owns existing component identities,
+lists ordered summary points, and declares labeled controls through the
+existing validated command path. The plant-model schema and served
+signal index carry these additive declarations; existing flat JSON
+documents still load. Direct Rust construction of the expanded public
+records needs the new fields described below. The manifest and
+checkpoint formats remain unchanged. This release is cut under the
+procedure in `docs/release-contract.md` (decision 80).
 Fields marked *pending* are filled mechanically by the release procedure
 when the supervisor cuts the tag and publishes the images; the
 checked-in schemas are the current emission, byte-pinned by the drift
@@ -25,8 +23,8 @@ carried.
 | Tag | `v0.10.0` — *pending*: the release tag is placed on the recorded commit below when the release is cut (`git tag v0.10.0 <recorded sha>`; the tag names this release's commit, not whatever `main` carries afterwards) |
 | Commit | *pending* — the tagged `main` commit carrying this record, the revision this record's schemas are emitted at. A commit cannot name its own sha, so the supervisor's publication commit fills this field; the cut lands on it and `reference-plant/Cargo.lock` is re-resolved against it in the same step (see the post-cut checklist) |
 | Crate versions | `0.10.0` for every crate in the release set — one workspace version covers `dcs-build`, `dcs-core`, `dcs-model` (and the `dcs-model` / `dcs-controller` binaries built from it), `dcs-monitor` (shipping `dcs-ctl` and `dcs-alarm-report`), `dcs-plant` (`dcs-plant-server`), and `dcs-sim-net` (`dcs-plant-ctl`); the `[workspace.package]` bump and the regenerated workspace `Cargo.lock` land with this publication |
-| Plant-model JSON Schema | `plant-model.schema.json` beside this record — `dcs-model schema` emitted at the recorded commit, pinned byte-for-byte with its sha256 by the schema drift test in `crates/dcs-model/tests/schema.rs`. Byte-identical to `v0.9.0`'s recorded artifact — the emission last moved with #548's declared-unit metadata, which landed on `main` while the `v0.8.0` tag was still uncut and is therefore already carried by every record from `v0.8.0`'s on, this one included |
-| Plant-model schema sha256 | `07f9f93d1475c7bc783e99e4e7807fe5706a1549302a3701b67212bb3e793301` |
+| Plant-model JSON Schema | `plant-model.schema.json` beside this record — `dcs-model schema` emitted at the recorded commit, pinned byte-for-byte with its sha256 by the schema drift test in `crates/dcs-model/tests/schema.rs`. Includes optional equipment ownership, ordered summary points, and labeled controls; pending artifact copies track this emission under the existing drift-test procedure |
+| Plant-model schema sha256 | `ad3550f3d30ee9b0bbe16744aa92e51f1f95cf7d9c2a35381c945575d4361b1c` |
 | Served-registry JSON Schema | `block-interfaces.schema.json` beside this record — `dcs-model interface-schema` emitted at the recorded commit, pinned byte-for-byte with its sha256 by the drift test in `crates/dcs-model/tests/interface_schema.rs`. Byte-identical to `v0.9.0`'s recorded artifact. Unchanged since `v0.3.0`'s recorded commit — decision 108's `usurped` sync state and `standby_usurped` pair-fault kind are payload values the registry's kinds do not enumerate |
 | Served-registry schema sha256 | `ddc00496814a4e8cd0d6ec8a5d9fbb95e83f518dcd927b17a4802f13ac84013a` |
 | Dynamics-document JSON Schema | `dynamics.schema.json` beside this record — `dcs-plant-server --dynamics-schema` emitted at the recorded commit, pinned byte-for-byte with its sha256 by the drift test in `crates/dcs-plant/tests/dynamics_schema.rs`. Byte-identical to `v0.9.0`'s recorded artifact. Unchanged since `v0.3.0`'s recorded commit |
@@ -86,16 +84,25 @@ the `v0.9.0` record landed:
   `deploy/compose.yaml`'s `x-dcs-release` and images),
   `docs/customer-quickstart.md` and `docs/requirements/water-wastewater.md`'s
   `WW-ENG-003` status naming this record and publication, and this
-  record's own filled fields. No crate library source changed, so the
-  repin is the whole of what a consumer sees.
+  record's own filled fields. That publication prepared the repin;
+  the equipment amendment below adds a supported library surface.
+- The reusable pump and equipment amendment (`WW-FND-001`,
+  `WW-OPS-001`, `WW-CTL-001`, `WW-CTL-002`): the public pump helper
+  composes existing control and alarm blocks through typed bindings.
+  `PlantBuilder::equipment` registers `Equipment` with component
+  ownership, summary points, and labeled `EquipmentControl`s. Model
+  validation rejects unresolved or repeated members, conflicting
+  ownership, and controls that are not listed writable inputs feeding
+  a member. Boolean action labels require a Boolean point. The served
+  `SignalIndex` carries the same equipment declaration and optional
+  `ComponentRecord.id` identities for descriptor joins. Equipment-only
+  changes also appear in `ModelDiff` and the model CLI's diff listing.
 
-So this tranche carries no contract correction, no model-grammar move,
-no manifest-shape move, no served-wire growth, and no checkpoint move.
-What it carries is the release line itself: a `0.10` minor series a
-consumer's `version = "0.9"` requirement cannot resolve, the four
-artifacts a non-Rust consumer pins unchanged from `v0.9.0`, and the
-`main` commit the `v0.9.0` record's contract corrections stand on —
-the `v0.9.0` line and this one agree on every emitted byte.
+The equipment amendment grows the supported engineering surface and
+the optional model and signal-index metadata. It uses existing point
+values, component interfaces, command receipts, alarms, and checkpoint
+state rather than defining another execution or command schema.
+Manifest, journal, durable-history, and checkpoint shapes do not move.
 
 ### What a contract landing before the cut owes this record
 
@@ -160,10 +167,9 @@ The determination:
 
 - `MODEL_VERSION` holds at `1`; `PlantModel::load` still accepts
   exactly that version. A `version: 1` document written against
-  `v0.9.0` validates unchanged under `v0.10.0` tooling; the
-  plant-model schema emission is byte-identical to `v0.9.0`'s recorded
-  artifact, so a `v0.9.0` document still validates unchanged against the
-  recorded schema as well.
+  `v0.9.0` validates unchanged under `v0.10.0` tooling. The new schema
+  adds optional `equipment`; older documents omit it and decode an
+  empty list, and empty lists serialize without that key.
 - The checkpoint format set holds: `Checkpoint.format_version` still
   negotiates against `SUPPORTED_FORMAT_VERSIONS` (`{0, 1}`; absent
   reads as `0`), and `CHECKPOINT_FORMAT_VERSION` is still `1`.
@@ -171,17 +177,22 @@ The determination:
   and fingerprint gate — no checkpoint migration is owed, and no
   checkpoint, journal, or durable-history file changed shape in this
   tranche.
-- Nothing on the supported engineering surface was removed or
-  re-shaped, so a consumer's composition code compiles unchanged on the
-  repin. The migration expectation is the repin itself — the reference
-  plant's `ci/check.sh` `upgrade` stage proves the `07ec24f` →
-  `v0.10.0` crossing byte-identically from a baseline this tree's own
-  source still compiles against, the baseline the repin below names;
-  non-Rust consumers pin the same four schema artifacts `v0.9.0`
-  recorded, all four emissions byte-identical, so a consumer's own
-  schema screening is unaffected.
-- The served wire did not grow this tranche, and the additive growth
-  the `v0.9.0` line carries stays readable by an older consumer: a
+- Existing `PlantBuilder` compositions keep their signatures and
+  emit flat documents until they register equipment. Direct Rust
+  literals of `PlantModel`, `SignalIndex`, and `ModelDiff` must supply
+  `equipment: Vec::new()` when unused; a `ComponentRecord` literal
+  supplies `id: None` when no model identity is available. These source
+  additions are named under the `0.x` minor-release policy. Exhaustive
+  matches on `BuildError` must handle `InvalidConfiguration`, and
+  exhaustive matches on `ValidationError` must handle the new equipment
+  validation variants. Non-Rust
+  consumers use this record's updated plant-model schema when screening
+  equipment-bearing documents; the other three schemas are unchanged.
+- The served signal index adds optional equipment metadata and
+  component identities. Legacy indexes deserialize with those fields
+  absent, and existing consumers that ignore additional JSON fields
+  remain usable. The additive growth the `v0.9.0` line carries also
+  stays readable by an older consumer: a
   payload an older peer serves decodes unchanged, an older page renders
   the new sync state as `orphaned`-shaped detail rather than crashing,
   and the pair-fault vocabulary's version field is what tells a

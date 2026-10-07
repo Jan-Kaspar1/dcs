@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from scripts import verify
 
@@ -73,10 +73,35 @@ class PhaseTimingTests(unittest.TestCase):
                 "rust-proofs",
             ),
         )
-        self.assertEqual(
-            verify.RUST_PHASES,
-            frozenset(("rust-clippy", "rust-tests", "rust-proofs")),
-        )
+        self.assertTrue({"rust-clippy", "rust-tests", "rust-proofs"}.issubset(verify.RUST_PHASES))
+
+    def test_heavy_phase_entry_points_hold_the_shared_build_slot(self):
+        # A new artifact build must not silently skip the clone-wide budget.
+        # The existing lock tests own exclusion; this checks CLI routing.
+        for phase in ("rust-clippy", "rust-tests", "rust-proofs", "rust-demo"):
+            with self.subTest(phase=phase):
+                held = False
+
+                @contextlib.contextmanager
+                def slot():
+                    nonlocal held
+                    held = True
+                    try:
+                        yield Mock(fileno=lambda: 11)
+                    finally:
+                        held = False
+
+                def subprocess_run(_command, **_kwargs):
+                    self.assertTrue(held, f"{phase} started outside the shared build slot")
+
+                with (
+                    patch.object(verify, "build_slot", slot),
+                    patch.object(verify.subprocess, "run", side_effect=subprocess_run) as run,
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    verify.main(["--phase", phase])
+                run.assert_called_once()
+                self.assertFalse(held)
 
 
 class CiWorkflowGateTests(unittest.TestCase):

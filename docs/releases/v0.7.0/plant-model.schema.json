@@ -519,6 +519,85 @@
       ],
       "type": "object"
     },
+    "equipment": {
+      "additionalProperties": false,
+      "properties": {
+        "components": {
+          "items": {
+            "$ref": "#/$defs/id"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "controls": {
+          "items": {
+            "$ref": "#/$defs/equipment-control"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "id": {
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "kind": {
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "label": {
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "points": {
+          "items": {
+            "$ref": "#/$defs/id"
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "kind",
+        "components",
+        "points",
+        "controls"
+      ],
+      "type": "object"
+    },
+    "equipment-control": {
+      "additionalProperties": false,
+      "properties": {
+        "false_label": {
+          "pattern": "\\S",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "point": {
+          "$ref": "#/$defs/id"
+        },
+        "true_label": {
+          "pattern": "\\S",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "point",
+        "label"
+      ],
+      "type": "object"
+    },
     "float-value": {
       "additionalProperties": false,
       "properties": {
@@ -1108,7 +1187,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "The versioned plant-model document: devices, logical io_points, signals, components, and connections. The schema covers structure, field types, and intra-element rules; cross-reference and wiring checks remain with the Rust validator (docs/architecture.md).",
+  "description": "The versioned plant-model document: devices, logical io_points, signals, components, connections, and optional equipment surfaces. The schema covers structure, field types, and intra-element rules; cross-reference and wiring checks remain with the Rust validator (docs/architecture.md).",
   "properties": {
     "components": {
       "items": {
@@ -1129,6 +1208,12 @@
       },
       "type": "array",
       "uniqueItems": true
+    },
+    "equipment": {
+      "items": {
+        "$ref": "#/$defs/equipment"
+      },
+      "type": "array"
     },
     "io_points": {
       "items": {

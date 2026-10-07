@@ -161,6 +161,12 @@
 </section>
 </div>
 
+<section id="equipment-library" hidden>
+<h2>Equipment</h2>
+<p>Select equipment to see its controls, feedback, protections, alarms, and history.</p>
+<div id="equipment-list"></div>
+</section>
+
 <section id="alarm-pane" hidden>
 <h2>Alarms</h2>
 <p id="alarm-summary"></p>
@@ -574,6 +580,7 @@ const metaByPoint = new Map();
 // rationalization block. The index's components section is
 // serde-defaulted — an index served without it simply joins nothing.
 const componentsByName = new Map();
+const componentsById = new Map();
 // point id -> { samples: [Sample], lastSeq, lastTick, run, caughtUp }
 // — the series a trend draws. lastSeq is the since-cursor in the
 // *current* source's stream; lastTick is the merge watermark that
@@ -2162,6 +2169,11 @@ function captureEdits(container) {
     pending.set(input.dataset.point, input.value);
     if (input === document.activeElement) focused = input.dataset.point;
   }
+  for (const input of document.querySelectorAll(container + " input.equipment-reason")) {
+    const key = "equipment-reason:" + input.dataset.point;
+    pending.set(key, input.value);
+    if (input === document.activeElement) focused = key;
+  }
   for (const control of document.querySelectorAll(container + " .param-value")) {
     const key = paramKey(control.dataset.component, control.dataset.param);
     pending.set(key, control.value);
@@ -2176,7 +2188,8 @@ function captureEdits(container) {
   for (const details of document.querySelectorAll(container + " details.interface")) {
     interfaceOpen.set(details.dataset.component, details.open);
   }
-  return { pending, focused };
+  const internals = document.querySelector(container + " details.equipment-internals");
+  return { pending, focused, internalsOpen: !!(internals && internals.open) };
 }
 
 // Re-applies captureEdits' record after the subtree's rebuild — the
@@ -2186,9 +2199,16 @@ function captureEdits(container) {
 function restoreEdits(container, captured) {
   const pending = captured.pending;
   const focused = captured.focused;
+  const internals = document.querySelector(container + " details.equipment-internals");
+  if (internals) internals.open = captured.internalsOpen;
   for (const input of document.querySelectorAll(container + " input.command-value")) {
     if (pending.has(input.dataset.point)) input.value = pending.get(input.dataset.point);
     if (input.dataset.point === focused) input.focus();
+  }
+  for (const input of document.querySelectorAll(container + " input.equipment-reason")) {
+    const key = "equipment-reason:" + input.dataset.point;
+    if (pending.has(key)) input.value = pending.get(key);
+    if (key === focused) input.focus();
   }
   for (const control of document.querySelectorAll(container + " .param-value")) {
     const key = paramKey(control.dataset.component, control.dataset.param);
@@ -2641,9 +2661,9 @@ async function submitInterfaceCommand(button) {
 // The alarm-acknowledgment decision's summary slice: the two-flag model
 // an alarm kind declares — a standing `alarm` plus a latched
 // `unacknowledged` — surfaces through ordinary status-role ports, so the
-// pane needs no alarm-specific contract. Every status-role Out port
-// whose live sample asserts lists with its component, value, quality,
-// and last-changed tick; the same join's related points and components
+// pane joins declared Boolean alarm outputs. Each alarm instance lists
+// once, with its active and acknowledgment flags, quality, and change
+// tick; the same join's related points and components
 // filter the merged journal into the alarm journal, and a component
 // declaring an `ack` input bound to a model-writable point gets the
 // acknowledge affordance.
@@ -2690,20 +2710,23 @@ const PRIORITY_VOCABULARY = [
   { code: 3, label: "P3", cls: "p3" },
 ];
 
-// One snapshot's alarm surface: the status-role Out ports the standing
-// list draws from, plus the sets the journal filter tests against —
-// every point any status-role port binds (the `ack` input included) and
-// every component declaring a status-role port.
+// One snapshot's alarm instances and the lifecycle points their journal
+// filter follows, including the acknowledgment input.
 function alarmJoin(snapshot) {
   const standing = [];
   const related = new Set();
   const components = new Set();
   for (const descriptor of snapshot.descriptors) {
+    // A status role also describes normal modes and duty indices.
+    // Alarm identity follows the declared Boolean alarm output used
+    // by the alarm report.
+    if (!descriptor.ports.some(port => port.name === "alarm" &&
+        port.role === "status" && port.direction === "out" && port.kind === "bool")) continue;
     for (const port of descriptor.ports) {
       if (port.role !== "status") continue;
       components.add(descriptor.name);
       if (port.point != null) related.add(port.point);
-      if (port.direction === "out") standing.push({ descriptor, port });
+      if (port.direction === "out" && port.name === "alarm") standing.push({ descriptor, port });
     }
   }
   return { standing, related, components };
@@ -3039,7 +3062,7 @@ function alarmEntryComponent(entry, descriptors) {
 // its first row only.
 function alarmRow(descriptor, port, sample, telemetry, forced, parameters, actions) {
   const states = alarmRowStates(descriptor, telemetry);
-  const cls = qualityClass(sample.quality);
+  const cls = sample ? qualityClass(sample.quality) : "nosample";
   const meta = portMeta(port);
   // The row carries the quality class: a Bad or Uncertain value draws
   // degraded — italic, tinted — instead of as a clean assertion, so a
@@ -3048,17 +3071,17 @@ function alarmRow(descriptor, port, sample, telemetry, forced, parameters, actio
   return {
     states,
     managed: MANAGED_STATES.filter(state => states.has(state)),
-    degraded: !isGood(sample.quality),
+    degraded: !sample || !isGood(sample.quality),
     html: "<tr class=\"alarm " + cls + "\">" +
       "<td>" + equipmentLink(descriptor.name, esc(descriptor.label)) +
         rationalizationMarkup(descriptor.name) + "</td>" +
       "<td>" + esc(port.name) + (meta ? " · " + esc(meta.name) : "") +
         truthFlags(descriptor, telemetry) + "</td>" +
-      "<td class=\"value " + cls + "\">" + esc(formatValue(sample.value)) +
+      "<td class=\"value " + cls + "\">" + (sample ? esc(formatValue(sample.value)) : "—") +
         forcedBadge(port.point, forced) + "</td>" +
-      "<td class=\"" + cls + "\">" + esc(formatQuality(sample.quality)) +
+      "<td class=\"" + cls + "\">" + (sample ? esc(formatQuality(sample.quality)) : "no sample") +
       "</td>" +
-      "<td>" + lastChangedTick(port.point, sample) + "</td>" +
+      "<td>" + (sample ? lastChangedTick(port.point, sample) : "—") + "</td>" +
       "<td>" + (priority === ""
         ? "" : equipmentLink(descriptor.name, priority)) + "</td>" +
       "<td>" + actions + "</td></tr>",
@@ -3088,16 +3111,13 @@ function renderAlarms(snapshot, telemetry, forced) {
   // through the same `ack` input — and every managed list the states
   // route the component's rows to shares the one affordance set, the
   // ack plus the managed-state commands, built once.
-  const offered = new Set();
   const rows = [];
   let degraded = 0;
   for (const { descriptor, port } of join.standing) {
     const sample = port.point == null ? null : portSample(port, telemetry);
-    if (!isAsserted(sample)) continue;
-    const actions = offered.has(descriptor.name)
-      ? ""
-      : ackAffordance(descriptor) + managedAffordance(descriptor, telemetry);
-    if (actions !== "") offered.add(descriptor.name);
+    const states = alarmRowStates(descriptor, telemetry);
+    if (states.size === 0) continue;
+    const actions = ackAffordance(descriptor) + managedAffordance(descriptor, telemetry);
     const row = alarmRow(descriptor, port, sample, telemetry, forced,
       parameters, actions);
     if (row.degraded) degraded++;
@@ -3122,14 +3142,13 @@ function renderAlarms(snapshot, telemetry, forced) {
   const managed = MANAGED_STATES
     .map((state, i) => counts[i] + " " + MANAGED_LABELS[state])
     .filter((_, i) => counts[i] > 0);
-  summary.textContent = rows.length === 0
-    ? "no standing alarms"
-    : rows.length + " standing" +
+  const standing = rows.filter(row => row.states.has("active") || row.states.has("unacknowledged")).length;
+  summary.textContent = (standing === 0 ? "no standing alarms" : standing + " standing") +
       (managed.length > 0 ? " — " + managed.join(" · ") : "") +
       (degraded > 0 ? " — " + degraded + " degraded" : "") +
       (filter !== "all"
         ? " — showing " + (MANAGED_LABELS[filter] || filter) : "");
-  summary.className = rows.length === 0 ? "good" : "bad";
+  summary.className = standing === 0 ? "good" : "bad";
   // The alarm journal lists in the durable journal's transition order —
   // seq order — so a burst's initiating cause stands first: equal-tick
   // point_changed transitions and the settled receipt that caused them
@@ -3352,22 +3371,88 @@ function equipmentJournalEntries(descriptor) {
   return journalEntries.filter(attributed).sort((a, b) => a.seq - b.seq);
 }
 
+function declaredEquipment() {
+  return index.equipment || [];
+}
+
+function equipmentMembers(equipment) {
+  return equipment.components.map(id => componentsById.get(id))
+    .filter(Boolean).map(record => descriptorByName.get(record.name)).filter(Boolean);
+}
+
+function selectEquipment(selection) {
+  equipmentSelection = selection;
+  if (rendered.snapshot !== null) {
+    renderEquipment(rendered.snapshot, rendered.telemetry, rendered.forced);
+  }
+}
+
+function renderEquipmentList() {
+  const equipment = declaredEquipment();
+  document.getElementById("equipment-library").hidden = equipment.length === 0;
+  document.getElementById("equipment-list").innerHTML = equipment.map(item =>
+    "<a href=\"#equipment\" class=\"equipment-choice\" data-equipment=\"" +
+      esc(item.id) + "\">" + esc(item.label) + "</a>").join(" · ");
+}
+
+// Labels are declared by the equipment in the plant model. Writes
+// target the original typed point through the bounded command path.
+function equipmentControls(equipment, telemetry, forced, members) {
+  const rows = equipment.controls.map(control => {
+    const meta = metaByPoint.get(control.point);
+    const sample = (telemetry.get(control.point) || {}).sample;
+    if (!meta || !meta.writable || meta.direction !== "in") return "";
+    const current = sample && sample.value && "bool" in sample.value
+      ? (sample.value.bool ? control.true_label : control.false_label) || formatValue(sample.value)
+      : sample ? formatValue(sample.value) : "no sample";
+    const caption = "<div class=\"role\"><span>" + esc(control.label) + " — " + esc(current) + "</span> ";
+    const reason = meta.requires_reason ? "<input class=\"equipment-reason\" data-point=\"" +
+      control.point + "\" placeholder=\"reason\" title=\"Required command reason\"> " : "";
+    if (meta.value_type !== "bool") {
+      return caption + reason + commandAffordance({ point: control.point }, sample, forced) + "</div>";
+    }
+    const buttons = [false, true].map(level => {
+      const label = level ? (control.true_label || "Set true") : (control.false_label || "Set false");
+      return "<button type=\"button\" class=\"equipment-write\" data-point=\"" +
+        control.point + "\" data-level=\"" + level + "\">" + esc(label) + "</button>";
+    }).join(" ");
+    return caption + reason + buttons + forcedBadge(control.point, forced) + "</div>";
+  }).join("");
+  const alarms = members.filter(descriptor => descriptor.ports.some(port =>
+    port.name === "alarm" && port.direction === "out" && port.kind === "bool"));
+  const alarmRows = alarms.map(descriptor => {
+    const alarm = descriptor.ports.find(port => port.name === "alarm" && port.direction === "out");
+    const sample = portSample(alarm, telemetry);
+    const unack = flagSample(descriptor, telemetry, "unacknowledged");
+    return "<div class=\"role\"><span>" + esc(descriptor.label) + " — " +
+      (sample ? (isAsserted(sample) ? "active" : "clear") + " · " +
+        esc(formatQuality(sample.quality)) : "no sample") +
+      (isAsserted(unack) ? " · unacknowledged" : "") + "</span> " +
+      ackAffordance(descriptor) + "</div>";
+  }).join("");
+  return "<section class=\"faceplate\"><h3>Operator controls</h3>" + rows +
+    "<p>A command receipt confirms the request. Check the driven output and running feedback to confirm operation.</p>" +
+    (alarms.length ? "<h3>Equipment alarms</h3>" + alarmRows : "") + "</section>";
+}
+
 // Renders the pane for the current selection from the poll's inputs —
 // the render refresh() performs and a between-polls navigation repeats
 // from `rendered`. An empty selection, or one the snapshot no longer
 // describes, hides the pane: there is nothing to navigate to.
 function renderEquipment(snapshot, telemetry, forced) {
   const pane = document.getElementById("equipment");
-  const descriptor = equipmentSelection === null
-    ? null : descriptorByName.get(equipmentSelection);
-  if (!descriptor) {
+  const equipment = declaredEquipment().find(item => "equipment:" + item.id === equipmentSelection);
+  const members = equipment ? equipmentMembers(equipment) : [];
+  const descriptor = equipment ? null : descriptorByName.get(equipmentSelection);
+  if (!equipment && !descriptor) {
     pane.hidden = true;
     return;
   }
   const captured = captureEdits("#equipment-faceplate");
   pane.hidden = false;
   document.getElementById("equipment-name").textContent =
-    descriptor.label + " (" + descriptor.kind + ")";
+    (equipment ? equipment.label : descriptor.label) + " (" +
+      (equipment ? equipment.kind : descriptor.kind) + ")";
   // The pair-health line — the pair section's own verdict, so the
   // navigation surface carries the same redundancy reading.
   const pairLine = document.getElementById("equipment-pair");
@@ -3389,18 +3474,22 @@ function renderEquipment(snapshot, telemetry, forced) {
   const parameters = new Map(
     (snapshot.parameters || []).map(p => [p.name, p.values]));
   document.getElementById("equipment-faceplate").innerHTML =
-    faceplateMarkup(descriptor, diagnostics.get(descriptor.name),
-      telemetry, forced, parameters);
+    equipment ? equipmentControls(equipment, telemetry, forced, members) +
+      "<details class=\"equipment-internals\"><summary>Internal components and tuning</summary>" +
+      members.map(member => faceplateMarkup(member, diagnostics.get(member.name), telemetry, forced, parameters)).join("") +
+      "</details>" : faceplateMarkup(descriptor, diagnostics.get(descriptor.name), telemetry, forced, parameters);
   restoreEdits("#equipment-faceplate", captured);
   document.getElementById("equipment-rationalization").innerHTML =
-    rationalizationMarkup(descriptor.name);
-  const points = equipmentPoints(descriptor);
+    equipment ? members.map(member => rationalizationMarkup(member.name)).join("") :
+      rationalizationMarkup(descriptor.name);
+  const points = equipment ? equipment.points.map(point => ({ point: point })) : equipmentPoints(descriptor);
   document.getElementById("equipment-points").innerHTML =
     points.map(entry => equipmentPointRow(entry, telemetry, forced)).join("");
   document.getElementById("equipment-trends").innerHTML =
     points.map(equipmentTrend).join("");
   document.getElementById("equipment-journal").innerHTML =
-    equipmentJournalEntries(descriptor).map(entry =>
+    (equipment ? [...new Map(members.flatMap(equipmentJournalEntries).map(entry => [entry.seq, entry])).values()]
+      .sort((a, b) => a.seq - b.seq) : equipmentJournalEntries(descriptor)).map(entry =>
       "<tr><td>" + entry.seq + "</td><td>" + entry.tick + "</td><td>" +
       esc(describeEvent(entry.event)) + "</td></tr>").join("");
 }
@@ -4441,7 +4530,13 @@ async function init() {
   // the alarm pane's rationalization disclosure reads by name.
   for (const record of index.components || []) {
     componentsByName.set(record.name, record);
+    if (record.id != null) componentsById.set(record.id, record);
   }
+  renderEquipmentList();
+  document.getElementById("equipment-list").addEventListener("click", event => {
+    const choice = event.target.closest("a.equipment-choice");
+    if (choice) selectEquipment("equipment:" + choice.dataset.equipment);
+  });
   const select = document.getElementById("command-point");
   // The command form offers only the model-declared writable points —
   // the index carries each io_point's `writable` mark, and writes to
@@ -4484,6 +4579,31 @@ async function init() {
   // receipted commands under the same metadata gates.
   const faceplates = document.getElementById("faceplates");
   const faceplateClick = async event => {
+    const ack = event.target.closest("button.ack");
+    if (ack) {
+      await submitAck(ack);
+      return;
+    }
+    const equipmentWrite = event.target.closest("button.equipment-write");
+    if (equipmentWrite) {
+      const point = Number(equipmentWrite.dataset.point);
+      const meta = metaByPoint.get(point);
+      if (!meta || !meta.writable || meta.direction !== "in" || meta.value_type !== "bool") return;
+      const reasonInput = equipmentWrite.parentElement.querySelector(".equipment-reason");
+      const reason = reasonInput ? reasonInput.value.trim() : "";
+      if (meta.requires_reason && reason === "") {
+        document.getElementById("receipt").textContent = "enter a reason for " + meta.name;
+        return;
+      }
+      try {
+        await submitCommand({ write_value: { point: point, kind: "bool",
+          value: { bool: equipmentWrite.dataset.level === "true" } } }, reason);
+      } catch (error) {
+        document.getElementById("receipt").textContent = "command failed: " + error;
+      }
+      refresh();
+      return;
+    }
     const tune = event.target.closest("button.tune");
     if (tune) {
       await submitParameter(tune);
@@ -4528,8 +4648,14 @@ async function init() {
       kind: meta.value_type,
       value: value,
     } };
+    const reasonInput = button.closest(".role")?.querySelector(".equipment-reason");
+    const reason = reasonInput ? reasonInput.value.trim() : "";
+    if (meta.requires_reason && reasonInput && reason === "") {
+      document.getElementById("receipt").textContent = "enter a reason for " + meta.name;
+      return;
+    }
     try {
-      await submitCommand(command);
+      await submitCommand(command, reason);
       input.value = "";
     } catch (error) {
       document.getElementById("receipt").textContent = "command failed: " + error;
@@ -4548,10 +4674,9 @@ async function init() {
   document.getElementById("alarm-pane").addEventListener("click", async event => {
     const nav = event.target.closest("a.nav-equipment");
     if (nav) {
-      equipmentSelection = nav.dataset.component;
-      if (rendered.snapshot !== null) {
-        renderEquipment(rendered.snapshot, rendered.telemetry, rendered.forced);
-      }
+      const owner = declaredEquipment().find(item => equipmentMembers(item)
+        .some(member => member.name === nav.dataset.component));
+      selectEquipment(owner ? "equipment:" + owner.id : nav.dataset.component);
       return;
     }
     const ack = event.target.closest("button.ack");

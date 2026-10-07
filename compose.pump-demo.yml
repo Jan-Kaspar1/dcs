@@ -1,0 +1,9 @@
+services:
+  pump-demo:
+    build:
+      context: .
+      dockerfile: demos/pump/Dockerfile
+    init: true
+    ports:
+      - "127.0.0.1:9080:8080"
+      - "127.0.0.1:9011:9001"

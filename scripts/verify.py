@@ -17,7 +17,9 @@ else:
 
 BUILD_SLOTS = 4
 PHASES = ("rust-format", "supervisor-tests", "rust-clippy", "rust-tests", "rust-proofs")
-RUST_PHASES = frozenset(("rust-clippy", "rust-tests", "rust-proofs"))
+# The demo build is an optional artifact phase, not an additional CI gate.
+OPTIONAL_PHASES = ("rust-demo",)
+RUST_PHASES = frozenset(("rust-clippy", "rust-tests", "rust-proofs", "rust-demo"))
 
 
 def _try_lock(handle):
@@ -100,6 +102,10 @@ def phase_command(name):
         "rust-clippy": ["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"],
         "rust-tests": [sys.executable, "scripts/run_rust_tests.py", "--scope", "workspace"],
         "rust-proofs": [sys.executable, "scripts/run_rust_tests.py", "--scope", "proofs"],
+        "rust-demo": [
+            "cargo", "build", "--locked", "-p", "dcs-controller", "-p", "dcs-plant",
+            "-p", "dcs-build", "--bins", "--examples",
+        ],
     }
     return commands[name]
 
@@ -108,8 +114,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--phase",
-        choices=PHASES,
-        help="run one CI check phase; by default run every required phase",
+        choices=PHASES + OPTIONAL_PHASES,
+        help="run one check or artifact phase; by default run every required check",
     )
     options = parser.parse_args(argv)
 

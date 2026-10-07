@@ -92,7 +92,7 @@ use crate::model::MODEL_VERSION;
 const SCHEMA_SOURCE: &str = r##"{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "DCS plant model",
-  "description": "The versioned plant-model document: devices, logical io_points, signals, components, and connections. The schema covers structure, field types, and intra-element rules; cross-reference and wiring checks remain with the Rust validator (docs/architecture.md).",
+  "description": "The versioned plant-model document: devices, logical io_points, signals, components, connections, and optional equipment surfaces. The schema covers structure, field types, and intra-element rules; cross-reference and wiring checks remain with the Rust validator (docs/architecture.md).",
   "type": "object",
   "additionalProperties": false,
   "required": ["version", "devices", "io_points", "signals", "components", "connections"],
@@ -121,10 +121,38 @@ const SCHEMA_SOURCE: &str = r##"{
     "connections": {
       "type": "array",
       "items": { "$ref": "#/$defs/connection" }
+    },
+    "equipment": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/equipment" }
     }
   },
   "$defs": {
     "id": { "type": "integer", "minimum": 0 },
+    "equipment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "kind", "components", "points", "controls"],
+      "properties": {
+        "id": { "type": "string", "pattern": "\\S" },
+        "label": { "type": "string", "pattern": "\\S" },
+        "kind": { "type": "string", "pattern": "\\S" },
+        "components": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "points": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "controls": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/equipment-control" } }
+      }
+    },
+    "equipment-control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["point", "label"],
+      "properties": {
+        "point": { "$ref": "#/$defs/id" },
+        "label": { "type": "string", "pattern": "\\S" },
+        "false_label": { "type": ["string", "null"], "pattern": "\\S" },
+        "true_label": { "type": ["string", "null"], "pattern": "\\S" }
+      }
+    },
     "direction": { "enum": ["in", "out"] },
     "value-kind": { "enum": ["bool", "int", "float"] },
     "nonneg-int": { "type": "integer", "minimum": 0 },

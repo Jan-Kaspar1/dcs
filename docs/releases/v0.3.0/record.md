@@ -16,7 +16,7 @@ they cannot diverge from the code before the tag is cut.
 | Commit | *pending* — the tagged `main` commit carrying this record, the revision this record's schemas are emitted at |
 | Crate versions | `0.3.0` for every crate in the release set — one workspace version covers `dcs-build`, `dcs-core`, `dcs-model` (and the `dcs-model` / `dcs-controller` binaries built from it); the `[workspace.package]` bump lands with the cut |
 | Plant-model JSON Schema | `plant-model.schema.json` beside this record — `dcs-model schema` emitted at the recorded commit, pinned byte-for-byte with its sha256 by the schema drift test in `crates/dcs-model/tests/schema.rs` |
-| Plant-model schema sha256 | `07f9f93d1475c7bc783e99e4e7807fe5706a1549302a3701b67212bb3e793301` |
+| Plant-model schema sha256 | `ad3550f3d30ee9b0bbe16744aa92e51f1f95cf7d9c2a35381c945575d4361b1c` |
 | Served-registry JSON Schema | `block-interfaces.schema.json` beside this record — `dcs-model interface-schema` emitted at the recorded commit, pinned byte-for-byte with its sha256 by the drift test in `crates/dcs-model/tests/interface_schema.rs` |
 | Served-registry schema sha256 | `ddc00496814a4e8cd0d6ec8a5d9fbb95e83f518dcd927b17a4802f13ac84013a` |
 | Dynamics-document JSON Schema | `dynamics.schema.json` beside this record — `dcs-plant-server --dynamics-schema` emitted at the recorded commit, pinned byte-for-byte with its sha256 by the drift test in `crates/dcs-plant/tests/dynamics_schema.rs`. The first record carrying it: `v0.2.0`'s recorded commit predates the dynamics-document schema emission (#870) |

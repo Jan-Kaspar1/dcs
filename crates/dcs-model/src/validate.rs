@@ -11,8 +11,8 @@ use crate::model::{
 };
 use dcs_core::{PointId, SignalId, ValueKind};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 /// A model collection whose element ids must be unique.
@@ -63,6 +63,85 @@ impl fmt::Display for End {
 /// offending element by id, name, or connection index.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ValidationError {
+    /// An equipment declaration omits a meaningful identity or member set.
+    EmptyEquipmentField {
+        /// The declared equipment id, possibly empty.
+        equipment: String,
+        /// The empty field: `id`, `label`, `kind`, or `components`.
+        field: String,
+    },
+    /// Two equipment declarations have the same identity.
+    DuplicateEquipmentId {
+        /// The repeated identity.
+        equipment: String,
+    },
+    /// An equipment member names no declared component.
+    UnknownEquipmentComponent {
+        /// The equipment carrying the reference.
+        equipment: String,
+        /// The missing component.
+        component: ComponentId,
+    },
+    /// A component is listed twice by one equipment.
+    DuplicateEquipmentComponent {
+        /// The equipment carrying the repeated reference.
+        equipment: String,
+        /// The repeated component.
+        component: ComponentId,
+    },
+    /// A component is claimed by two equipment instances.
+    EquipmentComponentOwned {
+        /// The later equipment claiming the component.
+        equipment: String,
+        /// The equipment already owning the component.
+        owner: String,
+        /// The contested component.
+        component: ComponentId,
+    },
+    /// An equipment summary names no declared logical point.
+    UnknownEquipmentPoint {
+        /// The equipment carrying the reference.
+        equipment: String,
+        /// The missing point.
+        point: PointId,
+    },
+    /// A point occurs twice in an equipment summary or control list.
+    DuplicateEquipmentPoint {
+        /// The equipment carrying the repeated reference.
+        equipment: String,
+        /// The repeated point.
+        point: PointId,
+        /// The list containing it: `points` or `controls`.
+        field: String,
+    },
+    /// A control is absent from the equipment's ordered summary.
+    EquipmentControlNotListed {
+        /// The equipment carrying the control.
+        equipment: String,
+        /// The unlisted point.
+        point: PointId,
+    },
+    /// A control is not a writable `In` point.
+    EquipmentControlNotWritable {
+        /// The equipment carrying the control.
+        equipment: String,
+        /// The invalid command target.
+        point: PointId,
+    },
+    /// Boolean action labels were declared for a non-Boolean point.
+    EquipmentControlLabelsNotBoolean {
+        /// The equipment carrying the control.
+        equipment: String,
+        /// The point with mismatched labels.
+        point: PointId,
+    },
+    /// A control does not feed any equipment member component.
+    EquipmentControlNotConnected {
+        /// The equipment carrying the control.
+        equipment: String,
+        /// The disconnected command target.
+        point: PointId,
+    },
     /// Two elements of one collection share an id.
     DuplicateId {
         /// The collection containing the duplicate.
@@ -294,6 +373,85 @@ pub enum ValidationError {
 impl fmt::Display for ValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::EmptyEquipmentField { equipment, field } => {
+                write!(f, "equipment {equipment:?} has empty {field}")
+            }
+            Self::DuplicateEquipmentId { equipment } => {
+                write!(f, "duplicate equipment id {equipment:?}")
+            }
+            Self::UnknownEquipmentComponent {
+                equipment,
+                component,
+            } => {
+                write!(
+                    f,
+                    "equipment {equipment:?} names unknown component {}",
+                    component.0
+                )
+            }
+            Self::DuplicateEquipmentComponent {
+                equipment,
+                component,
+            } => {
+                write!(
+                    f,
+                    "equipment {equipment:?} repeats component {}",
+                    component.0
+                )
+            }
+            Self::EquipmentComponentOwned {
+                equipment,
+                owner,
+                component,
+            } => {
+                write!(
+                    f,
+                    "equipment {equipment:?} claims component {} owned by {owner:?}",
+                    component.0
+                )
+            }
+            Self::UnknownEquipmentPoint { equipment, point } => {
+                write!(f, "equipment {equipment:?} names unknown point {}", point.0)
+            }
+            Self::DuplicateEquipmentPoint {
+                equipment,
+                point,
+                field,
+            } => {
+                write!(
+                    f,
+                    "equipment {equipment:?} repeats point {} in {field}",
+                    point.0
+                )
+            }
+            Self::EquipmentControlNotListed { equipment, point } => {
+                write!(
+                    f,
+                    "equipment {equipment:?} control {} is absent from its summary",
+                    point.0
+                )
+            }
+            Self::EquipmentControlNotWritable { equipment, point } => {
+                write!(
+                    f,
+                    "equipment {equipment:?} control {} is not a writable input",
+                    point.0
+                )
+            }
+            Self::EquipmentControlLabelsNotBoolean { equipment, point } => {
+                write!(
+                    f,
+                    "equipment {equipment:?} control {} has Boolean labels on a non-Boolean point",
+                    point.0
+                )
+            }
+            Self::EquipmentControlNotConnected { equipment, point } => {
+                write!(
+                    f,
+                    "equipment {equipment:?} control {} does not feed a member",
+                    point.0
+                )
+            }
             Self::DuplicateId { collection, id } => {
                 write!(f, "duplicate {collection} id {id}")
             }
@@ -620,6 +778,136 @@ impl PlantModel {
             |component| component.id.0,
             &mut errors,
         );
+
+        let mut equipment_ids = HashSet::new();
+        let mut owners: HashMap<ComponentId, &str> = HashMap::new();
+        for equipment in &self.equipment {
+            for (field, value) in [
+                ("id", equipment.id.as_str()),
+                ("label", equipment.label.as_str()),
+                ("kind", equipment.kind.as_str()),
+            ] {
+                if value.trim().is_empty() {
+                    errors.push(ValidationError::EmptyEquipmentField {
+                        equipment: equipment.id.clone(),
+                        field: field.to_string(),
+                    });
+                }
+            }
+            if equipment.components.is_empty() {
+                errors.push(ValidationError::EmptyEquipmentField {
+                    equipment: equipment.id.clone(),
+                    field: "components".to_string(),
+                });
+            }
+            if !equipment_ids.insert(equipment.id.as_str()) {
+                errors.push(ValidationError::DuplicateEquipmentId {
+                    equipment: equipment.id.clone(),
+                });
+            }
+            let mut members = HashSet::new();
+            for component in &equipment.components {
+                if !members.insert(*component) {
+                    errors.push(ValidationError::DuplicateEquipmentComponent {
+                        equipment: equipment.id.clone(),
+                        component: *component,
+                    });
+                    continue;
+                }
+                if !components.contains_key(&component.0) {
+                    errors.push(ValidationError::UnknownEquipmentComponent {
+                        equipment: equipment.id.clone(),
+                        component: *component,
+                    });
+                }
+                match owners.entry(*component) {
+                    Entry::Occupied(owner) => {
+                        errors.push(ValidationError::EquipmentComponentOwned {
+                            equipment: equipment.id.clone(),
+                            owner: (*owner.get()).to_string(),
+                            component: *component,
+                        })
+                    }
+                    Entry::Vacant(slot) => {
+                        slot.insert(equipment.id.as_str());
+                    }
+                }
+            }
+            let mut summary = HashSet::new();
+            for point in &equipment.points {
+                if !summary.insert(*point) {
+                    errors.push(ValidationError::DuplicateEquipmentPoint {
+                        equipment: equipment.id.clone(),
+                        point: *point,
+                        field: "points".to_string(),
+                    });
+                }
+                if !points.contains_key(&point.0) {
+                    errors.push(ValidationError::UnknownEquipmentPoint {
+                        equipment: equipment.id.clone(),
+                        point: *point,
+                    });
+                }
+            }
+            let mut controls = HashSet::new();
+            for control in &equipment.controls {
+                let id = &control.point;
+                for (field, label) in [
+                    ("control.label", Some(control.label.as_str())),
+                    ("control.false_label", control.false_label.as_deref()),
+                    ("control.true_label", control.true_label.as_deref()),
+                ] {
+                    if label.is_some_and(|label| label.trim().is_empty()) {
+                        errors.push(ValidationError::EmptyEquipmentField {
+                            equipment: equipment.id.clone(),
+                            field: field.to_string(),
+                        });
+                    }
+                }
+                if !controls.insert(*id) {
+                    errors.push(ValidationError::DuplicateEquipmentPoint {
+                        equipment: equipment.id.clone(),
+                        point: *id,
+                        field: "controls".to_string(),
+                    });
+                }
+                if !summary.contains(id) {
+                    errors.push(ValidationError::EquipmentControlNotListed {
+                        equipment: equipment.id.clone(),
+                        point: *id,
+                    });
+                }
+                if !points
+                    .get(&id.0)
+                    .is_some_and(|point| point.writable && point.direction == Direction::In)
+                {
+                    errors.push(ValidationError::EquipmentControlNotWritable {
+                        equipment: equipment.id.clone(),
+                        point: *id,
+                    });
+                }
+                if (control.false_label.is_some() || control.true_label.is_some())
+                    && points
+                        .get(&id.0)
+                        .is_some_and(|point| point.value_type != ValueKind::Bool)
+                {
+                    errors.push(ValidationError::EquipmentControlLabelsNotBoolean {
+                        equipment: equipment.id.clone(),
+                        point: *id,
+                    });
+                }
+                if !self.connections.iter().any(|connection| {
+                    matches!((&connection.from, &connection.to),
+                        (Endpoint::Point(point), Endpoint::Port(port))
+                        if point == id && members.contains(&port.component))
+                }) {
+                    errors.push(ValidationError::EquipmentControlNotConnected {
+                        equipment: equipment.id.clone(),
+                        point: *id,
+                    });
+                }
+            }
+        }
 
         for point in &self.io_points {
             // `writable` interacts with the direction rule: only `In`

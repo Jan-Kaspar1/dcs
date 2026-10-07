@@ -248,6 +248,7 @@ fn signal_index() -> SignalIndex {
             entry(PID_OUT, Direction::Out, ValueKind::Float, false),
         ],
         components: vec![],
+        equipment: vec![],
     }
 }
 

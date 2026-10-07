@@ -39,6 +39,7 @@
   ],
   "components": [
     {
+      "id": 1,
       "name": "gain:1",
       "kind": "gain"
     }
