@@ -1375,8 +1375,13 @@ impl<'d> Executor<'d> {
 
     /// The generation this run's checkpoint stream belongs to — the
     /// value [`with_generation`](Self::with_generation) recorded or the
-    /// last adoption carried; `None` while unidentified.
-    pub(crate) fn generation(&self) -> Option<u64> {
+    /// last adoption carried; `None` while unidentified. It is the line
+    /// identity a checkpoint's own
+    /// [`generation`](crate::Checkpoint::generation) field carries, so a
+    /// consumer holding a document reads it beside this run's to tell
+    /// one tick domain from another — the comparison the restart-as-
+    /// active consult's continuation proof makes.
+    pub fn generation(&self) -> Option<u64> {
         self.generation
     }
 
@@ -1829,6 +1834,29 @@ impl<'d> Executor<'d> {
     /// snapshot.
     pub fn receipts(&self) -> &[CommandReceipt] {
         &self.receipts
+    }
+
+    /// The lifetime count of command submissions this run has admitted
+    /// — `command_admission.attempts`, the same high-water the retained
+    /// log's window is addressed from
+    /// ([`receipt_base`](Executor::receipt_base) plus
+    /// [`receipts`](Executor::receipts)'s length) and the counter
+    /// [`Checkpoint::command_admission`](crate::Checkpoint) carries
+    /// across an adoption.
+    ///
+    /// It is the run's own answer to *how far the line's command audit
+    /// has come*, which is what makes it a currency measure rather than
+    /// a position one: a document whose `attempts` stands strictly
+    /// ahead of this run's carries settled verdicts this baseline
+    /// cannot have produced, whatever its stream position says. Every
+    /// submission produced exactly one receipt, so the difference is a
+    /// count of settlements, not an estimate — and a peer that admits
+    /// nothing of its own (a standby, whose log converges by adoption)
+    /// never stands ahead of the baseline it tracks, which is what
+    /// separates a quiesced tracker from a peer that held the field and
+    /// stood down.
+    pub fn admitted_commands(&self) -> u64 {
+        self.command_admission.attempts
     }
 
     /// The standing force set — each forced point's substituted value.

@@ -14,7 +14,8 @@
 //! the duty container dies, the incumbent takes a receipted tune and a
 //! force, and the duty container restarts.
 //!
-//! Two legs, because the merged baseline answers the seize itself:
+//! Three legs, because the merged baseline answers the seize itself in
+//! two of the three shapes:
 //!
 //! 1. **The reproduction, verbatim** — the duty container restarts with
 //!    the same arguments it was launched with. The consult must pull
@@ -25,13 +26,20 @@
 //!    so the run exits naming the `--standby` remedy instead of
 //!    seizing. Either way the field never serves the pre-tune values
 //!    again, and the consult is on the durable record.
-//! 2. **The granted-claim form** — the same restart once the incumbent
-//!    stands down and releases the claim, which is the only shape in
-//!    which a launched-active restart can still take the field. The
-//!    claim must land on the *adopted* line: the tuned parameter and
-//!    the force the gap accumulated survive the takeover, and the
-//!    adopted `applied` receipts are not re-journaled as this run's own
-//!    settlements.
+//! 2. **The demote-then-restart shape** — QA finding
+//!    `stale-checkpoint-rollback-via-demote-then-restart`: the same
+//!    restart one step later, once the incumbent has stood down and
+//!    released the claim. Nothing refuses the claim there, so the
+//!    consult is the only thing standing between the restartee's stale
+//!    checkpoint and the field, and the peer's own non-ownership stamp
+//!    must not read as licence to seize on it. The reclaimed field must
+//!    serve the tuned parameter and the force the gap accumulated.
+//! 3. **The quiesced tracker** — the same rig with no gap commands, so
+//!    the peer that stood down carries nothing the resumed baseline
+//!    lacks. A standby admits no command of its own, so its receipt log
+//!    converges to the baseline's: there is nothing of the line's in
+//!    its document, and the consult must still decline it and let the
+//!    restart resume its own tick axis.
 
 use dcs_core::{
     Command, CommandOutcome, IoDriver, JournalEvent, PointId, RestartConsultOutcome, Role,
@@ -120,8 +128,11 @@ struct Stalled {
 
 /// Brings the pair up to the finding's reproduction point and returns
 /// it. `tag` names the scratch directory so two legs in one binary do
-/// not share fixtures.
-fn stalled_pair(tag: &str) -> Stalled {
+/// not share fixtures; `gap` stages the incumbent's receipted tune and
+/// force — the run state a silent revert discards — or leaves the gap
+/// empty, so the stood-down peer carries nothing the restartee's
+/// baseline lacks and the consult's tracker refusal is what stands.
+fn stalled_pair(tag: &str, gap: bool) -> Stalled {
     let dir =
         std::env::temp_dir().join(format!("dcs-restart-consult-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -216,12 +227,14 @@ fn stalled_pair(tag: &str) -> Stalled {
         kind: ValueKind::Float,
         value: Value::Float(FORCED),
     };
-    for command in [&tune, &force] {
-        let receipt = peer_client.command(command).unwrap();
-        assert!(
-            matches!(receipt.outcome, CommandOutcome::Accepted { .. }),
-            "the incumbent must receipt the command accepted: {receipt:?}"
-        );
+    if gap {
+        for command in [&tune, &force] {
+            let receipt = peer_client.command(command).unwrap();
+            assert!(
+                matches!(receipt.outcome, CommandOutcome::Accepted { .. }),
+                "the incumbent must receipt the command accepted: {receipt:?}"
+            );
+        }
     }
     peer_client.advance(1).unwrap();
     peer_client.advance(1).unwrap();
@@ -230,11 +243,17 @@ fn stalled_pair(tag: &str) -> Stalled {
         incumbent.tick > stale_tick,
         "the incumbent's stream must be newer than the persisted checkpoint"
     );
-    assert_eq!(
-        incumbent.components["pid:2"].get("kp"),
-        Some(Value::Float(KP))
-    );
-    assert_eq!(incumbent.forces[&SETPOINT], Value::Float(FORCED));
+    if gap {
+        assert_eq!(
+            incumbent.components["pid:2"].get("kp"),
+            Some(Value::Float(KP))
+        );
+        assert_eq!(incumbent.forces[&SETPOINT], Value::Float(FORCED));
+        assert!(
+            incumbent.command_admission.attempts > stale_attempts(&state_file),
+            "the gap's receipts must stand past the restartee's own admission high-water"
+        );
+    }
     assert_eq!(incumbent.tracking_source, Some(duty.addr));
 
     Stalled {
@@ -252,6 +271,16 @@ fn stalled_pair(tag: &str) -> Stalled {
     }
 }
 
+/// The restartee's own admission high-water, read off its persisted
+/// checkpoint — the settled-command count the consulted peer's document
+/// must stand ahead of for its state to be the line's to carry.
+fn stale_attempts(state_file: &Path) -> u64 {
+    let body = std::fs::read(state_file).expect("the duty container persisted its checkpoint");
+    let checkpoint: dcs_runtime::Checkpoint =
+        serde_json::from_slice(&body).expect("the state file holds a checkpoint");
+    checkpoint.command_admission.attempts
+}
+
 /// The consult entry the restart's durable record carries — the
 /// claiming line's own audit of what the pre-claim pull found.
 fn consult_entry(entries: &[dcs_core::JournalEntry]) -> (&String, &RestartConsultOutcome) {
@@ -266,7 +295,7 @@ fn consult_entry(entries: &[dcs_core::JournalEntry]) -> (&String, &RestartConsul
 
 #[test]
 fn the_reproduction_restart_adopts_the_incumbents_line_and_never_rolls_the_field_back() {
-    let pair = stalled_pair("reproduction");
+    let pair = stalled_pair("reproduction", true);
 
     // The reproduction, verbatim: the duty container's container comes
     // back with the arguments it was launched with. The consult pulls
@@ -385,34 +414,47 @@ fn the_reproduction_restart_adopts_the_incumbents_line_and_never_rolls_the_field
     let _ = std::fs::remove_dir_all(&pair._dir);
 }
 
+/// The demote-then-restart shape — QA finding
+/// `stale-checkpoint-rollback-via-demote-then-restart`, the same
+/// applied-state loss one step past #735's closed window. The
+/// incumbent stands down, so its claim releases and nothing refuses the
+/// ex-owner's startup claim any more: the consult is the only gate
+/// between the restartee's stale pre-tune checkpoint and the field. The
+/// reclaimed run must serve the tuned parameter and the force the gap
+/// accumulated — carrying the stood-down peer's settled line across the
+/// takeover — where the finding's revision resumed the stale checkpoint,
+/// claimed the field, and served pre-tune values while its own journal
+/// recorded nothing about the divergence.
 #[test]
-fn a_restart_never_adopts_a_trackers_stream_even_when_its_claim_is_granted() {
-    let pair = stalled_pair("granted");
+fn a_restart_after_the_incumbent_stands_down_carries_its_settled_line() {
+    let pair = stalled_pair("demoted", true);
 
-    // The incumbent stands down: its claim releases, so this is the
-    // only shape in which a launched-active restart can still take the
-    // field. The peer is now a *tracker* of this same line — its stream
-    // leads the stale persisted checkpoint only because it scanned on
-    // past the duty container's death with its own writes quiesced.
+    // The incumbent stands down: its claim releases, and the ex-owner
+    // comes back with the field genuinely free to take.
     pair.incumbent.demote().unwrap();
     pair.incumbent.advance(1).unwrap();
     assert_eq!(pair.incumbent.role().unwrap().role, Role::Standby);
-    let tracker = pair.incumbent.checkpoint().unwrap();
+    let stood_down = pair.incumbent.checkpoint().unwrap();
     assert_eq!(
-        tracker.source_owns_field,
+        stood_down.source_owns_field,
         Some(false),
-        "the stood-down peer must declare it does not own the field"
+        "the stood-down peer declares it writes nothing — the stamp the \
+         consult must read past, on this peer's evidence"
     );
     assert!(
-        tracker.tick > pair.stale_tick,
-        "the tracker's stream must lead the stale checkpoint — the \
-         window a stale seize would have rolled the tuned line back on"
+        stood_down.tick > pair.stale_tick,
+        "the stood-down peer's stream leads the stale checkpoint — the \
+         line whose receipted state a stale seize would have reverted"
     );
+    // Where the line stood when the restartee dials it — the position
+    // the adoption must land on, ahead of the stale baseline and behind
+    // nothing.
+    let stood_down_at = stood_down.tick;
 
     // The restart: the persisted checkpoint resumes, the consult finds
-    // a strictly newer stream and declines it as a tracker's, and the
-    // claim lands on the resumed run's own line — its persisted tick,
-    // not the tracker's local scans (decision 26's own-tick-ahead rule).
+    // the same line strictly newer and carrying the gap's settled
+    // submissions, and adopts it in place — so the claim lands on the
+    // tuned line rather than the pre-tune one.
     let (duty, preamble) = spawn_controller_logged(&pair.model, &pair.duty_args, DT);
     let duty_client = MonitorClient::new(duty.addr);
     assert!(
@@ -424,6 +466,128 @@ fn a_restart_never_adopts_a_trackers_stream_even_when_its_claim_is_granted() {
     assert!(
         preamble
             .iter()
+            .any(|line| line.contains("adopted the incumbent's checkpoint")),
+        "the restart must adopt the stood-down peer's line before it \
+         claims: {preamble:?}"
+    );
+    assert!(
+        preamble
+            .iter()
+            .any(|line| line.contains("settled submissions past this run's")),
+        "the adoption must name the receipted state it carried, not \
+         revert it silently: {preamble:?}"
+    );
+    assert_eq!(
+        duty_client.role().unwrap().role,
+        Role::Active,
+        "the released field is this run's to claim: {:?}",
+        duty_client.role().unwrap()
+    );
+
+    // The reclaimed field serves the gap's run state: the tuned
+    // parameter and the force, on the adopted line's own tick.
+    let reclaimed = duty_client.checkpoint().unwrap();
+    assert_eq!(reclaimed.tick, stood_down_at);
+    assert_eq!(
+        reclaimed.components["pid:2"].get("kp"),
+        Some(Value::Float(KP)),
+        "the reclaimed field must serve the tuned parameter, not the \
+         pre-tune value the stale checkpoint held"
+    );
+    assert_eq!(
+        reclaimed.forces[&SETPOINT],
+        Value::Float(FORCED),
+        "the reclaimed field must keep the gap's force"
+    );
+    let snapshot = duty_client.snapshot().unwrap();
+    let tuned = snapshot
+        .parameters
+        .iter()
+        .find(|parameters| parameters.name == "pid:2")
+        .and_then(|parameters| parameters.values.get("kp"));
+    assert_eq!(
+        tuned,
+        Some(&Value::Float(KP)),
+        "the operator surface must report the tuned gain: {tuned:?}"
+    );
+
+    // The takeover is on the durable record: the consult names the peer
+    // it asked and the baseline its adoption superseded, and the
+    // adopted `applied` receipts are the line's own rather than this
+    // run's settlements.
+    let journal = duty_client.journal(0).unwrap();
+    let (source, outcome) = consult_entry(&journal);
+    assert_eq!(source, &pair.incumbent_addr.to_string());
+    assert_eq!(
+        outcome,
+        &RestartConsultOutcome::Adopted {
+            superseded_at: Some(pair.stale_tick),
+            resumed_at: stood_down_at,
+        }
+    );
+    let tune = Command::SetParameter {
+        component: "pid:2".to_string(),
+        name: "kp".to_string(),
+        value: Value::Float(KP),
+    };
+    assert!(
+        !journal.iter().any(|entry| matches!(
+            &entry.event,
+            JournalEvent::CommandSettled { receipt } if receipt.command == tune
+        )),
+        "the adopted applied tune must not re-journal as this run's \
+         settlement: {journal:?}"
+    );
+
+    // And the field keeps running the tuned line under the reclaim: the
+    // forced input stands and the next scan's output is what the plant
+    // carries.
+    let scanned = duty_client.advance(1).unwrap();
+    assert_eq!(image_value(&scanned, SETPOINT), Value::Float(FORCED));
+    assert_eq!(
+        pair.field.read(VALVE).unwrap().value,
+        image_value(&scanned, VALVE)
+    );
+
+    let _ = std::fs::remove_dir_all(&pair._dir);
+}
+
+/// The refusal the fix must not widen: the same rig with no gap
+/// commands. The peer that stood down then admits nothing of its own —
+/// a standby's receipt log converges by adoption — so its document
+/// carries nothing the resumed baseline lacks, and adopting it would
+/// import a tracker's local ticks for no state at all. The consult
+/// declines it by name and the restart resumes its own line.
+#[test]
+fn a_restart_still_declines_a_stood_down_peer_carrying_nothing_new() {
+    let pair = stalled_pair("tracker", false);
+
+    pair.incumbent.demote().unwrap();
+    pair.incumbent.advance(1).unwrap();
+    let stood_down = pair.incumbent.checkpoint().unwrap();
+    assert_eq!(stood_down.source_owns_field, Some(false));
+    assert!(
+        stood_down.tick > pair.stale_tick,
+        "the tracker's stream leads the persisted checkpoint only \
+         through its own quiesced scans"
+    );
+    assert!(
+        stood_down.command_admission.attempts
+            <= stale_attempts(
+                &Path::new(&pair.model)
+                    .parent()
+                    .unwrap()
+                    .join("duty.state.json")
+            ),
+        "a quiesced tracker settles nothing of its own — the evidence \
+         the consult's continuation proof reads"
+    );
+
+    let (duty, preamble) = spawn_controller_logged(&pair.model, &pair.duty_args, DT);
+    let duty_client = MonitorClient::new(duty.addr);
+    assert!(
+        preamble
+            .iter()
             .any(|line| line.starts_with("restart consult")),
         "the restart must run the incumbent consult: {preamble:?}"
     );
@@ -432,15 +596,13 @@ fn a_restart_never_adopts_a_trackers_stream_even_when_its_claim_is_granted() {
         "the unheld field is this run's to claim: {:?}",
         duty_client.role().unwrap()
     );
-    let resumed = duty_client.checkpoint().unwrap();
     assert_eq!(
-        resumed.tick, pair.stale_tick,
+        duty_client.checkpoint().unwrap().tick,
+        pair.stale_tick,
         "the restart must own the field on its own resumed tick, never a \
          tracker's"
     );
 
-    // The consult's own audit names the decline: the restart neither
-    // adopted a tracker's stream nor passed unexamined.
     let journal = duty_client.journal(0).unwrap();
     let (source, outcome) = consult_entry(&journal);
     assert_eq!(source, &pair.incumbent_addr.to_string());

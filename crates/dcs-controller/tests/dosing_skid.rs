@@ -1242,9 +1242,12 @@ fn run_dosing(tag: &str) -> serde_json::Value {
     // The restart-as-active consult trails the boundary: the persisted
     // checkpoint stamped the standby's announced stream and the
     // restarted run pulled it before claiming. The peer it found is the
-    // standby — a tracker of the interrupted line, not an incumbent —
-    // so the consult declines its stream by name rather than adopting
-    // a tracker's local ticks onto this run's own tick axis.
+    // standby — a quiesced tracker of the interrupted line, which never
+    // admitted a command of its own, so its receipt log converged to
+    // the resumed baseline's and its document carries nothing this run
+    // lacks. The consult declines it by name for exactly that, rather
+    // than adopting a tracker's local ticks onto this run's own tick
+    // axis.
     assert_eq!(
         served[before_restart.len() + 1],
         JournalEntry {
@@ -1253,7 +1256,9 @@ fn run_dosing(tag: &str) -> serde_json::Value {
             event: JournalEvent::RestartConsult {
                 source: standby_process.addr.to_string(),
                 outcome: RestartConsultOutcome::Unadopted {
-                    detail: "the consulted peer reports it does not own the field".to_string(),
+                    detail: "the consulted peer reports it does not own the field and carries \
+                             no settled command the resumed checkpoint lacks"
+                        .to_string(),
                 },
             },
         },
