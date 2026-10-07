@@ -13,17 +13,52 @@ example; an independent supervisory demand lets you try automatic control.
 
 ## Start from this checkout
 
-Start Docker Desktop with its Linux engine, then run this command from the
-repository root:
+From a Linux terminal at the repository root, build the matching artifacts
+through the shared build gate, then start the simulation:
 
 ```sh
-docker compose -f compose.pump-demo.yml up --build
+python3 scripts/verify.py --phase rust-demo
+python3 scripts/pump_demo.py run
 ```
 
-The first build downloads the base images and compiles the current source.
-Open [the operator UI](http://127.0.0.1:9080/). The container starts the real
-`dcs-plant-server` and `dcs-controller`, scans every 200 ms, and serves the
-ordinary DCS monitoring page. Both exposed ports bind to host loopback.
+Open [the operator UI](http://127.0.0.1:9080/). The launcher generates and checks
+the model, starts the real `dcs-plant-server` and `dcs-controller`, scans every
+200 ms, and serves the ordinary DCS monitoring page. Both services bind to
+loopback by default. Pass `--no-browser` after `run` when starting from SSH or
+a terminal without a browser.
+
+On Windows, run those same commands inside WSL after changing to the checkout,
+for example `cd /mnt/c/Users/Kaspar/workspace/dcs2/dcs`. Open the URL in the
+Windows browser.
+
+The launcher expects current `dcs-controller`, `dcs-plant-server`, and the
+`pump` example under `target/debug`. It requires the equipment metadata from
+this checkout and stops its children on Ctrl+C. Logs and the generated model
+are under `target/pump-demo/<timestamp>/`. Pass `--artifacts target/release`
+after `run` for matching release binaries. Full workspace verification remains
+`python3 scripts/verify.py`.
+
+## Home-network access
+
+To serve the monitor on the Lenovo's home-network interface, use:
+
+```sh
+python3 scripts/pump_demo.py run --listen 192.168.178.107:9080 --no-browser
+```
+
+Other home-network devices can open [the monitor directly](http://192.168.178.107:9080/).
+With the home lab's DNS and Caddy route configured, the same monitor is available
+at [dcs-demo.home.arpa](https://dcs-demo.home.arpa/). The simulated plant service
+remains on local port 9011; fault injection runs on the Lenovo.
+
+For this launch, add `--monitor http://192.168.178.107:9080` before each helper
+action, for example:
+
+```sh
+python3 scripts/pump_demo.py --monitor http://192.168.178.107:9080 fault p101
+```
+
+The steps below use the default local launch and helper addresses.
 
 ## Try manual operation and protection
 
@@ -33,7 +68,7 @@ ordinary DCS monitoring page. Both exposed ports bind to host loopback.
 3. In another terminal, inject bad quality on the simulated thermal contact:
 
    ```sh
-   docker compose -f compose.pump-demo.yml exec pump-demo python3 /app/scripts/pump_demo.py --monitor http://127.0.0.1:8080 --plant 127.0.0.1:9001 fault p101
+   python3 scripts/pump_demo.py fault p101
    ```
 
 4. The protection state trips and the command stops. The contact quality and
@@ -43,7 +78,7 @@ ordinary DCS monitoring page. Both exposed ports bind to host loopback.
 5. Select **Stop request**, then clear the simulated contact fault:
 
    ```sh
-   docker compose -f compose.pump-demo.yml exec pump-demo python3 /app/scripts/pump_demo.py --monitor http://127.0.0.1:8080 --plant 127.0.0.1:9001 recover p101
+   python3 scripts/pump_demo.py recover p101
    ```
 
 6. The protection recovers. Select **Run request** again to restart. Try
@@ -60,7 +95,7 @@ and protection/fault state separately.
 Select **Auto** for Pump 1, then submit its supervisory demand:
 
 ```sh
-docker compose -f compose.pump-demo.yml exec pump-demo python3 /app/scripts/pump_demo.py --monitor http://127.0.0.1:8080 automatic p101 on
+python3 scripts/pump_demo.py automatic p101 on
 ```
 
 The helper resolves the model-declared signal and uses `POST /command`, prints
@@ -71,33 +106,13 @@ runtime's `/signals` and `/snapshot` surfaces.
 
 ## Stop or restart
 
-Press Ctrl+C in the startup terminal, then remove the stopped container:
-
-```sh
-docker compose -f compose.pump-demo.yml down
-```
+Press Ctrl+C in the startup terminal to stop both simulated processes.
 
 Each startup creates a fresh generated model, journal, and simulation. This demo
 does not demonstrate retained plant state across restart or redundant takeover.
 Those runtime capabilities need their separate acceptance runs.
 
-## Native run with matching compiled artifacts
-
-Build matching native artifacts through the shared build gate, then start:
-
-```sh
-python3 scripts/verify.py --phase rust-demo
-python3 scripts/pump_demo.py run
-```
-
-The launcher expects current `dcs-controller`, `dcs-plant-server`, and the
-`pump` example under `target/debug` (`.exe` on Windows). It validates the emitted
-model, requires the new equipment metadata, starts both processes, opens the UI,
-and stops its children on Ctrl+C. Logs and the generated model are under
-`target/pump-demo/<timestamp>/`. Pass `--artifacts target/release` for release
-binaries. Heavy workspace verification remains `python3 scripts/verify.py`.
-
-With the native run, the helper's default addresses already match:
+The same actions can be submitted from a second terminal:
 
 ```sh
 python3 scripts/pump_demo.py mode p101 manual
@@ -107,6 +122,25 @@ python3 scripts/pump_demo.py stop p101
 python3 scripts/pump_demo.py recover p101
 python3 scripts/pump_demo.py status
 ```
+
+## Docker alternative
+
+With a Linux Docker engine running, start from the repository root:
+
+```sh
+docker compose -f compose.pump-demo.yml up --build
+```
+
+Open [the local operator UI](http://127.0.0.1:9080/). The container compiles the
+current source and exposes both services on host loopback. Run helpers inside
+the container with its internal addresses:
+
+```sh
+docker compose -f compose.pump-demo.yml exec pump-demo python3 /app/scripts/pump_demo.py --monitor http://127.0.0.1:8080 --plant 127.0.0.1:9001 fault p101
+```
+
+Substitute the other helper actions from above. Stop with Ctrl+C, then run
+`docker compose -f compose.pump-demo.yml down` to remove the stopped container.
 
 The example source shows the supported engineering seam: a consumer owns device
 and logical-I/O bindings, calls `pump(...)` once per instance, and emits the

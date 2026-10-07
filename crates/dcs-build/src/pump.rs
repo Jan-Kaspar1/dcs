@@ -824,7 +824,7 @@ pub fn pump(
         protect_tripped: protect_tripped.id(),
         protections_ok: protections_ok.id(),
         dry_run: below_cutoff_in.id(),
-        motor: motor.id(),
+        motor: motor.id,
         fault_alarm: fault_alarm_layout,
         thermal_alarm: thermal_alarm_layout,
         moisture_alarm: moisture_alarm_layout,
