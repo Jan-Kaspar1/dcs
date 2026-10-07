@@ -631,7 +631,24 @@ pub fn pump(
     plant.connect(oos, &inv_oos.input);
     plant.connect(thermal, &inv_thermal.input);
     plant.connect(moisture, &inv_moisture.input);
-    plant.connect(&inputs.automatic_request, group_cmd);
+    // Point-to-point connections are feedback loopbacks: the Out point
+    // drives the In point. Route a caller-owned input through a block so
+    // it produces into the demand carrier instead of being overwritten.
+    let automatic_input = if matches!(
+        inputs.automatic_request.endpoint(),
+        dcs_model::Endpoint::Point(_)
+    ) {
+        let copy = plant.add(DigitalInputSpec::new(parameters([(
+            "invert",
+            Value::Bool(false),
+        )])));
+        plant.connect(&inputs.automatic_request, &copy.input);
+        plant.connect(&copy.out, group_cmd);
+        Some(copy.id)
+    } else {
+        plant.connect(&inputs.automatic_request, group_cmd);
+        None
+    };
     plant.connect(group_cmd_in, group_cmd);
     plant.connect(&inv_mode.out, auto);
     plant.connect(auto_leg_in, auto);
@@ -829,7 +846,7 @@ pub fn pump(
         thermal_alarm: thermal_alarm_layout,
         moisture_alarm: moisture_alarm_layout,
     };
-    let components = vec![
+    let mut components = vec![
         inv_mode.id,
         inv_oos.id,
         inv_thermal.id,
@@ -850,6 +867,9 @@ pub fn pump(
         moisture_alarm.id,
         oos_copy.id,
     ];
+    if let Some(component) = automatic_input {
+        components.push(component);
+    }
     let mut points = vec![
         layout.run,
         layout.cmd,

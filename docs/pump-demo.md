@@ -46,10 +46,25 @@ To serve the monitor on the Lenovo's home-network interface, use:
 python3 scripts/pump_demo.py run --listen 192.168.178.107:9080 --no-browser
 ```
 
-Other home-network devices can open [the monitor directly](http://192.168.178.107:9080/).
-With the home lab's DNS and Caddy route configured, the same monitor is available
-at [dcs-demo.home.arpa](https://dcs-demo.home.arpa/). The simulated plant service
-remains on local port 9011; fault injection runs on the Lenovo.
+The Lenovo installation is available at
+[dcs-demo.home.arpa](https://dcs-demo.home.arpa/) through the home lab's configured
+DNS and Caddy route. DNS and HTTPS were checked from the Lenovo on 2026-10-07.
+Other home-network devices can also open
+[the monitor directly](http://192.168.178.107:9080/). The simulated plant service
+remains on local port 9011; fault injection runs on the Lenovo. The new demo's
+phone/Tailscale access has not been independently checked.
+
+This installation runs as the Lenovo user service `dcs-pump-demo.service`.
+Manage it there with:
+
+```sh
+systemctl --user status dcs-pump-demo.service --no-pager
+systemctl --user stop dcs-pump-demo.service
+systemctl --user restart dcs-pump-demo.service
+```
+
+Stop the service before starting another copy on the same ports. Restarting
+starts a fresh simulation.
 
 For this launch, add `--monitor http://192.168.178.107:9080` before each helper
 action, for example:

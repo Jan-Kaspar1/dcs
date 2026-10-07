@@ -3422,9 +3422,10 @@ function equipmentControls(equipment, telemetry, forced, members) {
     port.name === "alarm" && port.direction === "out" && port.kind === "bool"));
   const alarmRows = alarms.map(descriptor => {
     const alarm = descriptor.ports.find(port => port.name === "alarm" && port.direction === "out");
+    const label = alarm.point == null ? descriptor.label : pointName(alarm.point);
     const sample = portSample(alarm, telemetry);
     const unack = flagSample(descriptor, telemetry, "unacknowledged");
-    return "<div class=\"role\"><span>" + esc(descriptor.label) + " — " +
+    return "<div class=\"role\"><span>" + esc(label) + " — " +
       (sample ? (isAsserted(sample) ? "active" : "clear") + " · " +
         esc(formatQuality(sample.quality)) : "no sample") +
       (isAsserted(unack) ? " · unacknowledged" : "") + "</span> " +
