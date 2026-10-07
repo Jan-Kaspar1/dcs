@@ -1,6 +1,7 @@
 //! Bool latching alarm: the two-flag alarm lifecycle for Bool-sourced
 //! alarm conditions — the Bool-input sibling of `latching-alarm`.
 
+use crate::ack_latch::AckLatch;
 use crate::describe;
 use crate::params::{ParameterError, Parameters};
 use crate::rationalization::Rationalization;
@@ -77,14 +78,10 @@ pub struct BoolLatchingAlarm {
     /// first read is a fresh assertion — the same convention
     /// [`EdgeTrigger`](crate::EdgeTrigger)'s edge detection follows.
     state: bool,
-    /// The `ack` level observed on the previous scan — the baseline
-    /// the acknowledgment's rising edge is detected against. `false`
-    /// before the first scan, so a `true` first read is an
-    /// acknowledgment.
-    ack_seen: bool,
-    /// The acknowledgment latch: set on a fresh assertion, cleared on
-    /// `ack`'s rising edge.
-    latched: bool,
+    /// The shared acknowledgment latch — the observed `ack` level and
+    /// the `unacknowledged` latch [`AckLatch`] owns, checkpointed as
+    /// `ack`/`unacknowledged`.
+    latch: AckLatch,
 }
 
 impl BoolLatchingAlarm {
@@ -111,8 +108,7 @@ impl BoolLatchingAlarm {
             unacknowledged,
             rationalization,
             state: false,
-            ack_seen: false,
-            latched: false,
+            latch: AckLatch::new(),
         }
     }
 
@@ -157,10 +153,8 @@ impl Component for BoolLatchingAlarm {
         let sample = io.read_typed::<bool>(self.input)?;
         let ack = io.read_typed::<bool>(self.ack)?;
         let fresh_trip = sample.value && !self.state;
-        let acknowledged = ack.value && !self.ack_seen;
         self.state = sample.value;
-        self.ack_seen = ack.value;
-        self.latched = (self.latched && !acknowledged) || fresh_trip;
+        let latched = self.latch.update(ack.value, fresh_trip);
         let quality = sample.quality.merge(ack.quality);
         io.write_sample(
             self.alarm,
@@ -168,7 +162,7 @@ impl Component for BoolLatchingAlarm {
         )?;
         io.write_sample(
             self.unacknowledged,
-            Sample::new(Value::Bool(self.latched), quality, tick),
+            Sample::new(Value::Bool(latched), quality, tick),
         )?;
         Ok(())
     }
@@ -218,8 +212,7 @@ impl Component for BoolLatchingAlarm {
     fn capture_state(&self) -> StateMap {
         let mut state = self.report_parameters();
         state.insert("state", Value::Bool(self.state));
-        state.insert("ack", Value::Bool(self.ack_seen));
-        state.insert("unacknowledged", Value::Bool(self.latched));
+        self.latch.capture(&mut state);
         state
     }
 
@@ -236,14 +229,10 @@ impl Component for BoolLatchingAlarm {
             ],
         )?;
         let restored = state.require_bool(&self.name, "state")?;
-        let latched = state.require_bool(&self.name, "unacknowledged")?;
+        let latch = AckLatch::restore(&self.name, state)?;
         self.rationalization = Rationalization::restore(&self.name, state)?;
         self.state = restored;
-        // `ack` is absent from checkpoints predating the field; a held
-        // level then reads as an edge on the first restored scan — the
-        // same clearing the older level-rule applied every scan.
-        self.ack_seen = state.optional_bool(&self.name, "ack")?.unwrap_or(false);
-        self.latched = latched;
+        self.latch = latch;
         Ok(())
     }
 }
@@ -630,7 +619,7 @@ mod tests {
                 .unwrap();
         assert_eq!(block.rationalization, RATIONALIZATION);
         assert!(!block.state);
-        assert!(!block.latched);
+        assert!(!block.latch.latched());
 
         assert!(matches!(
             BoolLatchingAlarm::from_parameters("bal", IN, ACK, ALARM, UNACK, &Parameters::new())

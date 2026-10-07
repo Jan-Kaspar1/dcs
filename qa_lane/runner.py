@@ -1014,6 +1014,14 @@ def _dcs_ctl_path(cfg):
         / 'release' / 'dcs-ctl'
 
 
+def _alarm_report_path(cfg):
+    """The host-side dcs-alarm-report binary the lane's image build
+    produces beside dcs-ctl — the flood-and-performance seam the
+    alarm-report scenario consumes through ctx['alarm_report']."""
+    return Path(cfg['state_dir']) / 'build-cache' / 'target' \
+        / 'release' / 'dcs-alarm-report'
+
+
 def _docker_run_args(cfg, run_id, name):
     return ['run', '-d', '--name', name,
             '--label', MANAGED_LABEL + '=1',
@@ -4082,6 +4090,7 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
         'park_drain_writer': lever[1] if lever else None,
         'release_drain_writer': lever[2] if lever else None,
         'dcs_ctl': str(_dcs_ctl_path(cfg)),
+        'alarm_report': str(_alarm_report_path(cfg)),
     }
     probe = _probe_pair(cfg)
     if probe is not None:

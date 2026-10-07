@@ -1419,6 +1419,7 @@ class DcsCtlBuildTests(unittest.TestCase):
                                             'dcs-plant-ctl',
                                             'dcs-ctl',
                                             'dcs-forge',
+                                            'dcs-alarm-report',
                                             'dcs-sim-bus-device',
                                             'dcs-sim-bus-ctl')):
         def fake_docker(*args, timeout=120, check=True):
@@ -1443,6 +1444,7 @@ class DcsCtlBuildTests(unittest.TestCase):
         build = next(args for args in calls
                      if args[0] == 'run' and 'cargo' in str(args))
         self.assertIn('-p dcs-monitor --bin dcs-ctl', build[-1])
+        self.assertIn('--bin dcs-alarm-report', build[-1])
         self.assertEqual(set(digests), {'controller', 'plant'})
         self.assertIn('tool-built', events)
 
@@ -1458,6 +1460,22 @@ class DcsCtlBuildTests(unittest.TestCase):
                 runner._build_images(self.src, self.cfg, self.run_dir,
                                      lambda e, d=None: None, 'qa-1')
 
+    def test_build_fails_loudly_without_the_alarm_report(self):
+        with patch.object(runner, 'docker',
+                          self._fake_docker(
+                              [], binaries=('dcs-controller',
+                                            'dcs-plant-server',
+                                            'dcs-plant-ctl',
+                                            'dcs-ctl',
+                                            'dcs-forge',
+                                            'dcs-sim-bus-device',
+                                            'dcs-sim-bus-ctl'))):
+            with self.assertRaises(RuntimeError) as caught:
+                runner._build_images(self.src, self.cfg, self.run_dir,
+                                     lambda e, d=None: None, 'qa-1')
+            self.assertEqual(str(caught.exception),
+                             'build produced no dcs-alarm-report')
+
     def test_scenario_ctx_hands_the_binary_to_the_case(self):
         ctx = runner._scenario_ctx(self.cfg, {'run_id': 'qa-1'},
                                    self.src, self.run_dir,
@@ -1466,6 +1484,10 @@ class DcsCtlBuildTests(unittest.TestCase):
         self.assertEqual(ctx['dcs_ctl'],
                          str(Path(self.cfg['state_dir']) / 'build-cache'
                              / 'target' / 'release' / 'dcs-ctl'))
+        self.assertEqual(ctx['alarm_report'],
+                         str(Path(self.cfg['state_dir']) / 'build-cache'
+                             / 'target' / 'release'
+                             / 'dcs-alarm-report'))
 
 
 class PlantCtlShipTests(unittest.TestCase):
@@ -1492,6 +1514,7 @@ class PlantCtlShipTests(unittest.TestCase):
                                             'dcs-plant-ctl',
                                             'dcs-ctl',
                                             'dcs-forge',
+                                            'dcs-alarm-report',
                                             'dcs-sim-bus-device',
                                             'dcs-sim-bus-ctl')):
         def fake_docker(*args, timeout=120, check=True):
@@ -3275,6 +3298,7 @@ class ForgeEndpointTests(unittest.TestCase):
                 target.mkdir(parents=True, exist_ok=True)
                 for binary in ('dcs-controller', 'dcs-plant-server',
                                'dcs-plant-ctl', 'dcs-ctl', 'dcs-forge',
+                               'dcs-alarm-report',
                                'dcs-sim-bus-device',
                                'dcs-sim-bus-ctl'):
                     (target / binary).write_text('bin')
@@ -3366,6 +3390,7 @@ class SimBusDeviceImageTests(unittest.TestCase):
                                             'dcs-plant-ctl',
                                             'dcs-ctl',
                                             'dcs-forge',
+                                            'dcs-alarm-report',
                                             'dcs-sim-bus-device',
                                             'dcs-sim-bus-ctl')):
         target = Path(self.cfg['state_dir']) / 'build-cache' \
@@ -3980,6 +4005,7 @@ class ShippedBinaryContractTests(unittest.TestCase):
             / 'target' / 'release'
         self.every_binary = ('dcs-controller', 'dcs-plant-server',
                              'dcs-plant-ctl', 'dcs-ctl', 'dcs-forge',
+                             'dcs-alarm-report',
                              'dcs-sim-bus-device', 'dcs-sim-bus-ctl')
 
     def tearDown(self):
@@ -4045,7 +4071,8 @@ class ShippedBinaryContractTests(unittest.TestCase):
             'controller': ['dcs-controller', 'dcs-forge',
                            'dcs-sim-bus-device', 'dcs-sim-bus-ctl'],
             'plant': ['dcs-plant-server', 'dcs-plant-ctl']})
-        self.assertEqual(contract['host_tools'], ['dcs-ctl'])
+        self.assertEqual(contract['host_tools'], ['dcs-ctl',
+                                                'dcs-alarm-report'])
         # Every shipped binary and host tool has the compile target that
         # builds it, so no image can name a binary the builder never
         # produces.
@@ -4130,10 +4157,10 @@ class ShippedBinaryContractTests(unittest.TestCase):
         # builder never produces. It fails before the compile, by name.
         contract = ship.load()
         gapped = copy.deepcopy(contract)
-        gapped['images'][0]['ships'].append('dcs-alarm-report')
+        gapped['images'][0]['ships'].append('dcs-phantom-tool')
         with self.assertRaises(ship.ShipError) as caught:
             ship.assert_complete(gapped)
-        self.assertIn('dcs-alarm-report', str(caught.exception))
+        self.assertIn('dcs-phantom-tool', str(caught.exception))
         self.assertIn('no recorded compile target produces',
                       str(caught.exception))
 
@@ -4203,7 +4230,8 @@ class ShippedBinaryContractTests(unittest.TestCase):
         printed = json.loads(out.getvalue())
         self.assertEqual(printed['payload']['plant'],
                          ['dcs-plant-server', 'dcs-plant-ctl'])
-        self.assertEqual(printed['host_tools'], ['dcs-ctl'])
+        self.assertEqual(printed['host_tools'], ['dcs-ctl',
+                                                'dcs-alarm-report'])
         self.assertTrue(printed['revision_contract'])
         # The deployment step's own check: a pinned copy predating the
         # revision the dispatcher will push from fails by name here,

@@ -129,6 +129,7 @@
 
 #![warn(missing_docs)]
 
+mod ack_latch;
 mod alarm_monitor;
 mod analog_input;
 mod analog_output;

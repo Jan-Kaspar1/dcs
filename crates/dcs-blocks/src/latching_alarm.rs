@@ -1,6 +1,7 @@
 //! Latching alarm: high/low limit checking with hysteresis plus an
 //! operator-acknowledgment latch.
 
+use crate::ack_latch::AckLatch;
 use crate::alarm_monitor::{Alarm, AlarmLimits};
 use crate::describe;
 use crate::params::{ParameterError, Parameters};
@@ -67,14 +68,10 @@ pub struct LatchingAlarm {
     limits: AlarmLimits,
     rationalization: Rationalization,
     state: Alarm,
-    /// The `ack` level observed on the previous scan — the baseline
-    /// the acknowledgment's rising edge is detected against. `false`
-    /// before the first scan, so a `true` first read is an
-    /// acknowledgment.
-    ack_seen: bool,
-    /// The acknowledgment latch: set on a fresh trip, cleared on
-    /// `ack`'s rising edge.
-    latched: bool,
+    /// The shared acknowledgment latch — the observed `ack` level and
+    /// the `unacknowledged` latch [`AckLatch`] owns, checkpointed as
+    /// `ack`/`unacknowledged`.
+    latch: AckLatch,
 }
 
 impl LatchingAlarm {
@@ -104,8 +101,7 @@ impl LatchingAlarm {
             unacknowledged,
             rationalization,
             state: Alarm::Clear,
-            ack_seen: false,
-            latched: false,
+            latch: AckLatch::new(),
         })
     }
 
@@ -156,9 +152,7 @@ impl Component for LatchingAlarm {
         let previous = self.state;
         self.state = previous.evaluate(pv, self.limits);
         let fresh_trip = self.state != Alarm::Clear && self.state != previous;
-        let acknowledged = ack.value && !self.ack_seen;
-        self.ack_seen = ack.value;
-        self.latched = (self.latched && !acknowledged) || fresh_trip;
+        let latched = self.latch.update(ack.value, fresh_trip);
         let mut quality = sample.quality.merge(ack.quality);
         if pv.is_nan() {
             quality = quality.merge(Quality::Bad(QualityReason::DeviceFault));
@@ -169,7 +163,7 @@ impl Component for LatchingAlarm {
         )?;
         io.write_sample(
             self.unacknowledged,
-            Sample::new(Value::Bool(self.latched), quality, tick),
+            Sample::new(Value::Bool(latched), quality, tick),
         )?;
         Ok(())
     }
@@ -239,8 +233,7 @@ impl Component for LatchingAlarm {
     fn capture_state(&self) -> StateMap {
         let mut state = self.report_parameters();
         state.insert("state", Value::Int(self.state.code()));
-        state.insert("ack", Value::Bool(self.ack_seen));
-        state.insert("unacknowledged", Value::Bool(self.latched));
+        self.latch.capture(&mut state);
         state
     }
 
@@ -260,7 +253,7 @@ impl Component for LatchingAlarm {
             ],
         )?;
         let restored = Alarm::from_code(&self.name, state.require_i64(&self.name, "state")?)?;
-        let latched = state.require_bool(&self.name, "unacknowledged")?;
+        let latch = AckLatch::restore(&self.name, state)?;
         let limits = AlarmLimits {
             low: state.require_f64(&self.name, "low_limit")?,
             high: state.require_f64(&self.name, "high_limit")?,
@@ -271,11 +264,7 @@ impl Component for LatchingAlarm {
         self.limits = limits;
         self.rationalization = Rationalization::restore(&self.name, state)?;
         self.state = restored;
-        // `ack` is absent from checkpoints predating the field; a held
-        // level then reads as an edge on the first restored scan — the
-        // same clearing the older level-rule applied every scan.
-        self.ack_seen = state.optional_bool(&self.name, "ack")?.unwrap_or(false);
-        self.latched = latched;
+        self.latch = latch;
         Ok(())
     }
 }
