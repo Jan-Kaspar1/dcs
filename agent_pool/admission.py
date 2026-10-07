@@ -141,6 +141,11 @@ def classify(receipt, text, max_delay=MAX_HINT_DELAY):
     classifies one, so a hint quoted in agent output or a test fixture
     cannot become a group rate event. Honored hints keep the provider's
     unit and are clamped to `max_delay`, the cooldown ceiling.
+
+    A nonzero exit carrying the runner's stall-watchdog signature
+    ('treating as hang') categorizes as 'stall' once the provider words
+    are ruled out, so reconcile can boundedly redispatch external kills;
+    a generic nonzero exit remains 'failure'.
     """
     receipt = receipt or {}
     if receipt.get('status') == 'timeout':
@@ -165,6 +170,8 @@ def classify(receipt, text, max_delay=MAX_HINT_DELAY):
         return 'rate', retry_after
     if any(word in tail for word in ENDPOINT_WORDS):
         return 'endpoint', retry_after
+    if 'treating as hang' in str(receipt.get('error') or '').lower():
+        return 'stall', None
     return 'failure', None
 
 
