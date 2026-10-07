@@ -254,6 +254,19 @@ def activations(entries, alarm_point):
     ]
 
 
+def standing_owner(plant_io):
+    """The owner token the field's standing write-ownership claim
+    asserts — the read-only `probe_writer` verdict names the holder's
+    token, answers `done` while this attachment holds the claim itself,
+    and `unclaimed` while none stands. The probe mutates nothing, so
+    reading the field's ownership cannot move it: the leg re-learns
+    the holder after a promotion moved the claim, rather than driving a
+    restore write through the launch owner's now-stale token and
+    meeting the field's own fencing refusal."""
+    verdict = plant_io.request({"op": "probe_writer"})
+    return (verdict.get("error") or {}).get("owner")
+
+
 def field_write(plant_io, owner_token, point, boolean):
     """One field-side `write` through the plant protocol — the unfenced
     diagnostic surface the scenario legs use for driven inputs. Where
@@ -504,7 +517,11 @@ def carryover_pass(args, tamper):
 
         # Phase 5 — the return and the restore: the cleared contact
         # returns the standing alarm, and the acknowledged state rides
-        # the switch back to the manifest's declared roles.
+        # the switch back to the manifest's declared roles. The write
+        # lands through the promoted peer's own claim — the promotion
+        # moved the field's write-ownership, so the launch owner's
+        # token is stale here.
+        owner_token = standing_owner(plant_io) or owner_token
         verdict = field_write(
             plant_io, owner_token, points["power_fail"], False
         )

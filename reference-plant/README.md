@@ -892,6 +892,15 @@ promoted peer's snapshot or the sample no longer the forced value at
 substituted quality — or a release leaving the set non-empty is
 `force-carryover-failed`; two force-carryover passes diverging is
 `force-carryover-nondeterministic`;
+a standing managed alarm's `unacknowledged` latch dropped across a
+promotion — the promoted peer not still asserting `alarm` and
+`unacknowledged`, or its durable journal re-journaling the standing
+condition's activation — or the receipted `ack` on the new active
+not settling `applied` under its actor, not clearing the latch while
+the alarm persists, or not journaling its attributed acknowledgment
+on the promoted peer — is `latch-carryover-failed`; two
+latch-carryover passes diverging is
+`latch-carryover-nondeterministic`;
 a foreign `?peer=` announce
 landing on the field owner's monitor — the checkpoint read refusing
 to answer, or the demoted peer stranding `unsynchronized` instead of
