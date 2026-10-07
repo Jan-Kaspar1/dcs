@@ -69,11 +69,20 @@ class SupervisorTests(unittest.TestCase):
         self.supervisor = Supervisor(self.config)
         self.github = FakeGitHub()
         self.runtime = Mock()
-        self.runtime.prepare_clone.side_effect=lambda worker, **kw: Path(self.config['pool_root'])/worker
+        self.prepared_branch = [None]
+        def prepare_clone(worker, **kw):
+            self.prepared_branch[0] = kw.get('branch')
+            return Path(self.config['pool_root'])/worker
+        self.runtime.prepare_clone.side_effect=prepare_clone
         self.runtime.spawn.side_effect=lambda key,*a,**kw: {'invocation':key,'key':key,'started_at':0}
         self.runtime.poll.return_value={'exit_code':0}
         self.runtime.inspect_result.return_value={'clean':True,'changed':True}
-        self.runtime.run_git.return_value='base'
+        def run_git(cwd, *args):
+            # The fake clone is always on the branch prepare_clone made.
+            if args[:2] == ('branch', '--show-current'):
+                return self.prepared_branch[0] or 'main'
+            return 'base'
+        self.runtime.run_git.side_effect=run_git
         self.runtime.session_id.return_value='session-one'
         self.runtime.recover.return_value=[]
         self.supervisor.github=self.github
@@ -112,6 +121,30 @@ class SupervisorTests(unittest.TestCase):
         self.assertIn('separate source facts from proposed DCS behavior', text)
         self.assertIn('does not implement vendor-derived product behavior', text)
         self.assertIn('never edit files outside this checkout', text)
+
+    def test_worker_prompt_forbids_git_mutations_and_requires_blocked(self):
+        """#177: the prompt names mutating Git commands and the BLOCKED rule."""
+        text = self.supervisor.worker_prompt(issue(), 'codex/issue-1-1')
+        self.assertIn('already checked out', text)
+        self.assertIn('Never run Git commands that mutate repository state', text)
+        for command in ('checkout', 'switch', 'branch', 'commit', 'reset',
+                        'restore', 'stash', 'push'):
+            self.assertIn(command, text)
+        self.assertIn('report BLOCKED with evidence instead', text)
+
+    def test_dispatch_refuses_clone_on_wrong_head(self):
+        """#177 tripwire: a prepared clone on the wrong HEAD blocks pre-spawn."""
+        s = self.supervisor
+        def run_git(cwd, *args):
+            if args[:2] == ('branch', '--show-current'):
+                return 'codex/issue-99-9'
+            return 'base'
+        self.runtime.run_git.side_effect = run_git
+        s.dispatch(self.github.items)
+        job = s.state.job(1)
+        self.assertEqual(job['status'], 'blocked')
+        self.assertIn('codex/issue-1-1', job['error'])
+        self.runtime.spawn.assert_not_called()
 
     def test_full_issue_pr_merge_closed_flow(self):
         s=self.supervisor
@@ -677,6 +710,98 @@ class SupervisorTests(unittest.TestCase):
         self.assertFalse(s.state.get('retry:1'))
         rec = s.state.get('recovery:1') or {}
         self.assertFalse(rec.get('requeue'))
+
+    def test_timeout_receipt_arms_bounded_kill_requeue(self):
+        """#978: a hard-timeout receipt requeues through the shared bound."""
+        s=self.supervisor
+        s.dispatch(self.github.items)
+        self.runtime.poll.return_value={'status':'timeout','exit_code':-15}
+        s.reconcile_workers(self.github.items)
+        self.assertEqual(s.state.job(1)['status'],'blocked')
+        self.assertEqual(s.state.get('retry:1'),'kill-requeue')
+        rec = s.state.get('recovery:1')
+        self.assertEqual(rec['quota_requeues'],1)
+        self.assertEqual(rec['requeue']['source'],'default')
+        self.assertEqual(rec['requeue']['seconds'],s.admission.quota_requeue_delay)
+        self.runtime.pool_root=Path(self.config['pool_root'])
+        rec = self.recoverable()
+        rec['requeue']['not_before'] = time.time() - 1
+        s.state.set('recovery:1', rec)
+        s.retries(self.github.items)
+        self.assertEqual(s.state.job(1)['status'],'working')
+        redispatches = [json.loads(e['payload']) for e in s.state.events(1)
+                        if e['kind'] == 'redispatch']
+        self.assertEqual(redispatches[0]['cause'],'kill-requeue')
+        self.assertEqual(redispatches[0]['delay'],
+                         {'source':'default','seconds':s.admission.quota_requeue_delay})
+
+    def test_stall_kill_receipt_arms_bounded_kill_requeue(self):
+        """#978: a stall-watchdog SIGKILL requeues through the shared bound."""
+        s=self.supervisor
+        s.dispatch(self.github.items)
+        self.runtime.poll.return_value={'status':'failed','exit_code':-9,
+            'error':'No agent output for 1240s; treating as hang; '
+                    'idle process tree: 123(devin); log tail at byte 512'}
+        s.reconcile_workers(self.github.items)
+        self.assertEqual(s.state.job(1)['status'],'blocked')
+        self.assertEqual(s.state.get('retry:1'),'kill-requeue')
+        self.assertEqual(s.state.get('recovery:1')['quota_requeues'],1)
+        self.runtime.pool_root=Path(self.config['pool_root'])
+        rec = self.recoverable()
+        rec['requeue']['not_before'] = time.time() - 1
+        s.state.set('recovery:1', rec)
+        s.retries(self.github.items)
+        self.assertEqual(s.state.job(1)['status'],'working')
+        self.assertIn(('redispatch','kill-requeue'), self.attributed_events(1))
+
+    def test_blocked_transcript_never_arms_kill_requeue(self):
+        """#978: a BLOCKED report parks even on a killed invocation."""
+        s=self.supervisor
+        s.dispatch(self.github.items)
+        self.runtime.poll.return_value={'status':'timeout','exit_code':-15}
+        log = Path(self.tmp.name)/'blocked.log'
+        log.write_text('BLOCKED: cannot push to the remote')
+        record = s.state.get('process:1')
+        record['log']=str(log)
+        s.state.set('process:1',record)
+        s.reconcile_workers(self.github.items)
+        self.assertEqual(s.state.job(1)['status'],'blocked')
+        self.assertFalse(s.state.get('retry:1'))
+        self.assertFalse((s.state.get('recovery:1') or {}).get('requeue'))
+
+    def test_kill_requeue_budget_exhaustion_stays_blocked(self):
+        """#978: a job at max_quota_requeues parks with exhaustion logged."""
+        s=self.supervisor
+        s.admission.max_quota_requeues=1
+        s.dispatch(self.github.items)
+        self.runtime.poll.return_value={'status':'timeout','exit_code':-15}
+        s.reconcile_workers(self.github.items)
+        self.assertEqual(s.state.get('retry:1'),'kill-requeue')
+        self.runtime.pool_root=Path(self.config['pool_root'])
+        rec = self.recoverable()
+        rec['requeue']['not_before'] = time.time() - 1
+        s.state.set('recovery:1', rec)
+        s.retries(self.github.items)
+        self.assertEqual(s.state.job(1)['status'],'working')
+        # The next timeout kill spends no further requeue: the bound parks it.
+        self.runtime.poll.return_value={'status':'timeout','exit_code':-15}
+        s.reconcile_workers(self.github.items)
+        self.assertEqual(s.state.job(1)['status'],'blocked')
+        self.assertFalse(s.state.get('retry:1'))
+        log_text = (Path(self.config['state_root'])/'supervisor.log').read_text()
+        self.assertIn('quota requeue budget exhausted (1)',log_text)
+        s.retries(self.github.items)
+        self.assertEqual(s.state.job(1)['status'],'blocked')
+
+    def test_stopped_runner_receipt_parks_without_requeue(self):
+        """#978: a stopped runner is an operator stop; it still parks."""
+        s=self.supervisor
+        s.dispatch(self.github.items)
+        self.runtime.poll.return_value={'status':'stopped','exit_code':-15}
+        s.reconcile_workers(self.github.items)
+        self.assertEqual(s.state.job(1)['status'],'blocked')
+        self.assertFalse(s.state.get('retry:1'))
+        self.assertFalse((s.state.get('recovery:1') or {}).get('requeue'))
 
     def test_missing_checks_do_not_merge_or_repair(self):
         s=self.supervisor

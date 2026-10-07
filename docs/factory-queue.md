@@ -70,6 +70,9 @@ count, and records a `timeout-requeue` redispatch separately from provider waits
 Only a timeout receipt with positively captured work is eligible. Missing or
 uncertain work, stopped/lost processes, ordinary worker failures, reported
 blockers and an exhausted semantic repair budget remain parked for inspection.
+A stall-watchdog kill (`treating as hang`) is not a continuation: it arms the
+shared bounded requeue (`scheduler.max_quota_requeues`) as a `kill-requeue`
+redispatch, in factory mode exactly as in the legacy path.
 The existing dependency, closed-issue, pause, admission and provider-block guards
 still apply. Automatic continuations never reset provider mode or deadlines.
 Once the timeout budget is exhausted, the saved work stays blocked; an operator
