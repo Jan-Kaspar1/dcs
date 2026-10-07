@@ -2781,6 +2781,101 @@ no freeze and no timing race.
   their registration records, verdict classifications, staging seams, and
   `main`'s inconclusive and doctored-case exits.
 
+### Landed 2026-10-05 (alarm lifecycle acceptance, #1487 consolidating #819/#596/#603/#607/#464)
+
+- The alarm lifecycle's remaining acceptance gap is closed on both sides of the
+  seam: one shared ack-latch core in the product, and four evidence legs — three
+  on the simulated rig, one on the customer-owned pair. The product contracts
+  themselves all landed earlier; what was missing was the shared core's
+  convergence and the per-revision lane and consumer evidence.
+- **The shared ack-latch core (#819).** `crates/dcs-blocks/src/ack_latch.rs` is a
+  private module beside `managed.rs` owning the consumed-edge `ack` rule, the
+  latch update, and the capture/restore vocabulary once, and all four
+  latching-alarm kinds (`latching-alarm`, `bool-latching-alarm`,
+  `managed-latching-alarm`, `managed-bool-latching-alarm`) delegate their two
+  shared fields to it. Each kind still computes its own standing `state` and
+  `fresh_trip`, still owns its own quality merge, suppression gate and
+  port/parameter vocabulary; the checkpoint names and kinds stay byte-identical
+  (`ack`, `unacknowledged`), so persisted model formats, checkpoint documents and
+  every wire spelling are untouched. It is a wire-neutral internal refactor: the
+  four per-kind suites pass unchanged, and the module's own tests pin the
+  consumed-edge rule, the edge-scan fresh trip, held-ack suppression, and the
+  pre-`ack` checkpoint's absent-field default.
+- **The rig's first-out ordering across a consequential burst (#603).** Scenario
+  leg `3010_first_out_burst` (case key `first-out-burst`, diagnostics
+  `burst-order-failed` / `burst-order-nondeterministic`) drives the fixture's
+  deterministic cascade through the plant-side seams under the settled active's
+  shared writer claim: a quality fault on `level-primary` so `backup-active`
+  annunciates first, then the `power-fail` drive so the station permissives drop
+  and the power alarm fires while the undrawn level climbs, then both run
+  contacts faulted so `none-available`/`all-faulted` land last. It asserts every
+  driven alarm asserting `alarm`/`unacknowledged`, the durable journal's
+  `point_changed` first-true order preserving the driven activation order with no
+  dropped or reordered entry, the served `/history` first-out surface agreeing
+  with that record, and the restored inputs journaling their returns in order —
+  then acknowledges and re-arms every latch it drove through the receipted path
+  and perturbs no role. A rig whose model declares no cascade wiring, no writable
+  ack inputs, or no pinned plant-writer owner reports `inconclusive`.
+- **The rig's managed-alarm run-state carryover (#607).** Scenario leg
+  `3020_managed_state_carryover` (case key `managed-state-carryover`, diagnostics
+  `carryover-failed` / `carryover-nondeterministic`) shelves `lal` mid-run, drives
+  the moisture alarm's condition so `unacknowledged` latches, and puts the p101
+  fault alarm out of service through `p101-oos`, then demotes and promotes inside
+  the declared 8-tick shelve bound. On the promoted peer `lal-shelved` still
+  stands and releases on the tick the countdown would have expired rather than a
+  restarted bound, the `unacknowledged` latch and `out_of_service` carry rather
+  than reset, and the durable journal's ordered record stays continuous across the
+  switch. Every written point and the pair's roles restore; a promoted peer that
+  never reports the carried state finishes `inconclusive` rather than failed.
+- **The rig's `dcs-alarm-report` lane (#464).** `qa_lane/ship.json` now records
+  `dcs-alarm-report` beside `dcs-ctl` as a host tool the bounded image build
+  produces through the same `-p dcs-monitor` compile group, so the lane derives
+  its presence assertion from the record and refuses a run whose build did not
+  produce it; `qa_lane/runner.py` hands the path to the scenario context as
+  `ctx['alarm_report']`. Scenario leg `3030_alarm_report` (case key
+  `alarm-report`) drives a counted force/ack/release burst on one managed alarm
+  plus one genuine field-fault-driven activation so the record mixes forced and
+  plant-driven transitions, then invokes the tool twice — once over the served
+  `GET /journal` and once over the controller's runner-owned `--journal-file` —
+  asserting the declared metric set is present with counts consistent with the
+  driven transitions, the ordered transition evidence preserves first-out order,
+  the two invocations over identical input print byte-identical output, and the
+  file run and the served run agree over their overlapping window. A run context
+  without a binary path, or a rig model declaring no alarm instances, reports
+  `inconclusive`.
+- **The consumer's unacknowledged-latch carryover (#596).** One new file under
+  `reference-plant/ci/legs/`, `latch_carryover.py` (order 115, diagnostics
+  `latch-carryover-failed` / `-nondeterministic` / `-unchecked`), discovered by
+  the file-named convention and needing no `check.sh`, boundary-lint or harness
+  edit. It resolves the latch seam out of the consumer's own emitted artifact —
+  the `managed-bool-latching-alarm` whose journaled field `In` trigger is
+  `power-fail` and whose writable internal `In` is its `ack` — then, with the
+  manifest-declared pair settled and tracking, drives the field protocol's own
+  `write` to raise the declared managed alarm and asserts through the active's
+  monitor that `alarm` and `unacknowledged` assert with the activation journaled;
+  demotes and promotes, and asserts on the promoted peer that both flags still
+  stand with no re-journaled activation, so the latch carried through the
+  checkpoint rather than being cleared or re-armed; submits the managed `ack`
+  through the receipted path on the *new* active and asserts the settled
+  `applied` receipt under the leg's actor, `unacknowledged` clearing while the
+  standing `alarm` persists, and the attributed acknowledgment journaled on the
+  promoted peer; then clears the field contact — through the standing
+  write-ownership claim the promotion moved, read back with the read-only
+  `probe_writer` verdict, since the launch owner's token is stale on the far side
+  — asserts the alarm's declared return behavior, and restores the pair's launch
+  roles with the driven inputs back at baseline. Its two doctored cases drop the
+  promoted peer's `unacknowledged` assertion and plant a second activation; both
+  must fail naming the dropped latch and the re-journaled activation the honest
+  run saw.
+- Four new pool-test modules carry the coverage: one per new rig leg against the
+  lane's simulated-rig runner path with fakes for each cascade/carriage leg, the
+  determinism assertion and the inconclusive paths, plus runner-side coverage for
+  the added binary build, and one for the consumer leg against its registration
+  record, verdict classifications and doctored-case exits. The consumer leg's
+  diagnostics join the release contract's named-diagnostics table, the
+  `<leg>-unchecked` convention's emitted set, and the consumer README's pair
+  paragraph.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,

@@ -3,6 +3,7 @@
 //! out-of-service lifecycle architecture decisions 71–73 record — the
 //! Float-`in` managed sibling.
 
+use crate::ack_latch::AckLatch;
 use crate::alarm_monitor::{Alarm, AlarmLimits};
 use crate::describe;
 use crate::managed::{ManagedAlarmConfig, ManagedAlarmIo, ManagedState};
@@ -75,14 +76,11 @@ pub struct ManagedLatchingAlarm {
     limits: AlarmLimits,
     config: ManagedAlarmConfig,
     state: Alarm,
-    /// The `ack` level observed on the previous scan — the baseline
-    /// the acknowledgment's rising edge is detected against. `false`
-    /// before the first scan, so a `true` first read is an
-    /// acknowledgment.
-    ack_seen: bool,
-    /// The acknowledgment latch: set on a fresh trip, cleared on
-    /// `ack`'s rising edge, withheld while `suppress` stands.
-    latched: bool,
+    /// The shared acknowledgment latch — the observed `ack` level and
+    /// the `unacknowledged` latch [`AckLatch`] owns, checkpointed as
+    /// `ack`/`unacknowledged`. Suppression gating stays per-kind: the
+    /// latch update is withheld while `suppress` stands.
+    latch: AckLatch,
     /// The managed-state machine's run state — the shelve-expiry timer,
     /// the suppression baseline, the out-of-service level.
     managed: ManagedState,
@@ -109,8 +107,7 @@ impl ManagedLatchingAlarm {
             io,
             config,
             state: Alarm::Clear,
-            ack_seen: false,
-            latched: false,
+            latch: AckLatch::new(),
             managed: ManagedState::default(),
         })
     }
@@ -162,9 +159,9 @@ impl Component for ManagedLatchingAlarm {
         self.state = previous.evaluate(pv, self.limits);
         let fresh_trip =
             self.state != Alarm::Clear && (self.state != previous || managed.was_suppressed);
-        let acknowledged = ack.value && !self.ack_seen;
-        self.ack_seen = ack.value;
-        self.latched = ((self.latched && !acknowledged) || fresh_trip) && !managed.suppressed;
+        let latched = self
+            .latch
+            .update_suppressed(ack.value, fresh_trip, managed.suppressed);
         let mut quality = sample.quality.merge(ack.quality);
         if pv.is_nan() {
             quality = quality.merge(Quality::Bad(QualityReason::DeviceFault));
@@ -175,7 +172,7 @@ impl Component for ManagedLatchingAlarm {
         )?;
         io.write_sample(
             self.io.unacknowledged,
-            Sample::new(Value::Bool(self.latched), quality, tick),
+            Sample::new(Value::Bool(latched), quality, tick),
         )?;
         Ok(())
     }
@@ -248,8 +245,7 @@ impl Component for ManagedLatchingAlarm {
     fn capture_state(&self) -> StateMap {
         let mut state = self.report_parameters();
         state.insert("state", Value::Int(self.state.code()));
-        state.insert("ack", Value::Bool(self.ack_seen));
-        state.insert("unacknowledged", Value::Bool(self.latched));
+        self.latch.capture(&mut state);
         self.managed.capture(&mut state);
         state
     }
@@ -274,7 +270,7 @@ impl Component for ManagedLatchingAlarm {
             ],
         )?;
         let restored = Alarm::from_code(&self.name, state.require_i64(&self.name, "state")?)?;
-        let latched = state.require_bool(&self.name, "unacknowledged")?;
+        let latch = AckLatch::restore(&self.name, state)?;
         let limits = AlarmLimits {
             low: state.require_f64(&self.name, "low_limit")?,
             high: state.require_f64(&self.name, "high_limit")?,
@@ -288,11 +284,7 @@ impl Component for ManagedLatchingAlarm {
         self.config = config;
         self.managed = managed;
         self.state = restored;
-        // `ack` is absent from checkpoints predating the field; a held
-        // level then reads as an edge on the first restored scan — the
-        // same clearing the older level-rule applied every scan.
-        self.ack_seen = state.optional_bool(&self.name, "ack")?.unwrap_or(false);
-        self.latched = latched;
+        self.latch = latch;
         Ok(())
     }
 }
