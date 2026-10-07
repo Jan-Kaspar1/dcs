@@ -135,6 +135,17 @@ class AdmissionTests(unittest.TestCase):
         self.assertEqual(classify({'exit_code': 1}, 'Rate limit exceeded. Retry-After: 300'), ('rate', 300))
         self.assertEqual(classify({'exit_code': 0}, 'test verifies rate limit handling')[0], 'success')
 
+    def test_stall_watchdog_signature_classifies_stall_below_provider_words(self):
+        """#978: a 'treating as hang' receipt is a kill, not a failure."""
+        hang = {'status': 'failed', 'exit_code': -9,
+                'error': 'No agent output for 300s; treating as hang; '
+                         'idle process tree: none'}
+        self.assertEqual(classify(hang, '')[0], 'stall')
+        # A provider signal in the tail still outranks the kill mechanism.
+        self.assertEqual(classify(hang, 'Rate limit exceeded')[0], 'rate')
+        self.assertEqual(classify({'status': 'stopped', 'exit_code': -15}, '')[0],
+                         'failure')
+
     def test_provider_reset_message_gates_until_the_stated_window(self):
         message = 'Reached free model rate limit. Your limit will reset in 1 hour 34 minutes.'
         meta = self.start('limited')

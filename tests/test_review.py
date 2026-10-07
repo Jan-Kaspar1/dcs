@@ -262,10 +262,18 @@ class ReviewLaneTests(unittest.TestCase):
         self.supervisor = Supervisor(self.config)
         self.github = FakeGitHub()
         self.runtime = Mock()
-        self.runtime.prepare_clone.side_effect = lambda worker, **kw: self.clone
+        self.prepared_branch = [None]
+        def prepare_clone(worker, **kw):
+            self.prepared_branch[0] = kw.get('branch')
+            return self.clone
+        self.runtime.prepare_clone.side_effect = prepare_clone
         self.runtime.spawn.side_effect = lambda key, *a, **kw: {'invocation': key, 'key': key, 'started_at': 0}
         self.runtime.poll.return_value = None
-        self.runtime.run_git.return_value = 'abc123 commit'
+        def run_git(cwd, *args):
+            if args[:2] == ('branch', '--show-current'):
+                return self.prepared_branch[0] or 'abc123 commit'
+            return 'abc123 commit'
+        self.runtime.run_git.side_effect = run_git
         self.runtime.session_id.return_value = 'session-one'
         self.runtime.recover.return_value = []
         self.supervisor.github = self.github

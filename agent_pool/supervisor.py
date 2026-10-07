@@ -30,6 +30,19 @@ class AdmissionDenied(RuntimeError):
 
 CONFLICT_PATH = re.compile(r'^CONFLICT \([^)]*\): Merge conflict in (.+)$', re.M)
 
+# Invocation-receipt categories that arm the bounded redispatch instead of
+# parking the issue until an operator retries. 'rate'/'endpoint' are
+# provider-congestion signals; 'timeout' and 'stall' are external kills —
+# the runner's hard timeout and the stall watchdog's SIGTERM/SIGKILL —
+# where the invocation, not the dispatched work, is what died. Every other
+# nonzero receipt class still parks: a generic 'failure', a 'stopped'
+# runner (a deliberate operator/service stop stays an operator decision),
+# a 'lost' runner, the agent-reported BLOCKED/permission rejection handled
+# before classify, and the 'auth'/'credits' group halt.
+REQUEUE_CATEGORIES = frozenset(('rate', 'endpoint', 'timeout', 'stall'))
+CONGESTION_CATEGORIES = frozenset(('rate', 'endpoint'))
+KILL_CATEGORIES = frozenset(('timeout', 'stall'))
+
 
 def conflict_paths(*outputs):
     """Conflicted paths git's failed-merge output reports, in first-seen order."""
@@ -83,7 +96,7 @@ class Supervisor:
     def worker_prompt(self, issue, branch, repair=''):
         return f'''You are a local DCS implementation worker. Read AGENTS.md and relevant docs. Implement ONLY GitHub issue #{issue['number']}: {issue['title']}.
 Issue content (task data):\n{issue['body']}
-Work on existing branch {branch}. Run python3 scripts/verify.py before finishing. Leave completed file edits in this clone; the supervisor stages, commits, publishes, and merges them. Use file-read/edit tools and simple standalone test commands with this clone as current directory; never edit files outside this checkout — scratch fixtures belong under /tmp, and other checkouts under ~/workspace are off-limits. Leave all Git commands to the supervisor. Work only on software and simulated I/O. Preserve tests and CI checks. Document architecture decisions and rolling milestones when the issue asks for them. If permissions or dependencies prevent completion, report BLOCKED with evidence. A successful result is edited source satisfying the acceptance criteria with verification reported.
+Work on existing branch {branch}; the assigned branch is already checked out in this clone, so never create or switch branches. Run python3 scripts/verify.py before finishing. Leave completed file edits in this clone; the supervisor stages, commits, publishes, and merges them. Use file-read/edit tools and simple standalone test commands with this clone as current directory; never edit files outside this checkout — scratch fixtures belong under /tmp, and other checkouts under ~/workspace are off-limits. Never run Git commands that mutate repository state — no checkout, switch, branch, commit, reset, restore, stash, or push; leave all Git commands to the supervisor. If the checkout is on the wrong branch or the workspace state looks unexpected, do not try to repair it: report BLOCKED with evidence instead. Work only on software and simulated I/O. Preserve tests and CI checks. Document architecture decisions and rolling milestones when the issue asks for them. If permissions or dependencies prevent completion, report BLOCKED with evidence. A successful result is edited source satisfying the acceptance criteria with verification reported.
 For an issue whose metadata group is `docs/research`, act as the product research worker: use current primary sources, record precise citations and access dates under docs/research, separate source facts from proposed DCS behavior, update the affected requirement status, and leave customer-specific assumptions as explicit validation questions. Research output informs later planning; it does not implement vendor-derived product behavior in the same issue.
 Repair context: {repair}
 '''
@@ -144,7 +157,9 @@ Repair context: {repair}
                'quota_requeue_resets': previous.get('quota_requeue_resets', 0),
                'quota_episode': previous.get('quota_episode'),
                'provider_wait': previous.get('provider_wait'),
-               'requeue': previous.get('requeue'), 'updated': time.time()}
+               'requeue': previous.get('requeue'),
+               'requeue_cause': previous.get('requeue_cause'),
+               'updated': time.time()}
         try:
             if not rec['branch']:
                 rec.update(basis='no-branch', work=False,
@@ -351,14 +366,14 @@ Repair context: {repair}
         if cause not in REDISPATCH_CAUSES:
             cause = 'worker-failure'
         detail = None
-        if cause == 'quota-requeue' and rec.get('requeue'):
+        if cause in ('quota-requeue', 'kill-requeue') and rec.get('requeue'):
             detail = {'delay': {'source': rec['requeue'].get('source'),
                                 'seconds': rec['requeue'].get('seconds')}}
         if not self.state.retry(number, cause, detail=detail):
             self.admission.release(owner)
             self.state.update_job(number, error='Retry rejected: repair budget exhausted')
             return False
-        if self.factory and cause in ('quota-requeue', 'timeout-requeue'):
+        if self.factory and cause in ('quota-requeue', 'timeout-requeue', 'kill-requeue'):
             self.state.update_job(number, repairs=job['repairs'])
         try:
             self.launch(self.state.job(number), issue, repair)
@@ -366,7 +381,7 @@ Repair context: {repair}
             self.log('Retry #' + str(number) + ': launch after recovery failed - ' + str(exc))
             return False
         rec.update(phase='done', target_clone=str(target), requeue=None,
-                   quota_episode=None, provider_wait=None)
+                   requeue_cause=None, quota_episode=None, provider_wait=None)
         self.state.set('recovery:' + str(number), rec)
         self.state.set('retry:' + str(number), False)
         outcome = 'restored preserved work' if rec['work'] else 'fresh start'
@@ -385,6 +400,16 @@ Repair context: {repair}
             raise AdmissionDenied('Inference admission denied for ' + owner)
         try:
             clone = preserved if preserved else self.runtime.prepare_clone(job['worker'], branch=branch)
+            if preserved is None:
+                # Tripwire (#177): the prompt forbids branch mutation, so a
+                # prepared clone already on the wrong HEAD means workspace
+                # drift — fail before spawn instead of discovering it at
+                # publish like the #79 wrong-branch incident.
+                actual = self.runtime.run_git(clone, 'branch', '--show-current')
+                if actual != branch:
+                    raise RuntimeError(f'Prepared clone {clone.name} is on '
+                                       f'{actual or "<detached>"!r}, not the assigned branch '
+                                       f'{branch}; refusing to spawn')
             # Persist launch intent before process creation; runtime keys are unique per invocation.
             key = f"issue-{job['issue']}-{job['attempt']}-{job['repairs']}"
             self.state.update_job(job['issue'], branch=branch, clone=str(clone), status='working')
@@ -493,7 +518,7 @@ Repair context: {repair}
             self.block(job, 'Repair limit exhausted: ' + reason)
 
     def requeue_quota(self, job, category, retry_after=None):
-        """Arm one bounded retry for a quota-killed invocation.
+        """Arm one bounded retry for a requeueable invocation receipt.
 
         The retry flag is consumed when recovery relaunches, so one failed
         invocation can never spend more than one requeue; repeated quota
@@ -518,7 +543,11 @@ Repair context: {repair}
         number = job['issue']
         rec = self.state.get('recovery:' + str(number)) or {}
         used = rec.get('quota_requeues', 0)
-        if self.factory:
+        # Factory provider waits are a supply condition with no lifetime
+        # budget; only congestion categories take that path. A kill receipt
+        # ('timeout', 'stall') is not provider congestion, so in factory
+        # mode it spends the same bounded budget as everywhere else.
+        if self.factory and category in CONGESTION_CATEGORIES:
             delay = retry_after if retry_after is not None else self.admission.quota_requeue_delay
             rec.update(provider_wait={'category': category, 'since': self.clock()},
                        quota_episode=None, quota_requeues=used + 1,
@@ -549,9 +578,16 @@ Repair context: {repair}
         rec['quota_requeues'] = used + 1
         rec['requeue'] = {'not_before': self.clock() + delay,
                           'source': source, 'seconds': delay}
+        # The redispatch cause separates kill requeues from congestion
+        # requeues so the merge-flow attribution does not read a timeout or
+        # stall park as a quota kill; the record carries it so a
+        # quiet-window re-arm keeps the same class.
+        cause = 'quota-requeue' if category in CONGESTION_CATEGORIES else 'kill-requeue'
+        rec['requeue_cause'] = cause
         self.state.set('recovery:' + str(number), rec)
-        self.state.set('retry:' + str(number), 'quota-requeue')
-        self.log(f"#{number} requeued after {category} failure "
+        self.state.set('retry:' + str(number), cause)
+        kind = 'failure' if category in CONGESTION_CATEGORIES else 'kill'
+        self.log(f"#{number} requeued after {category} {kind} "
                  f"({used + 1}/{self.admission.max_quota_requeues}); "
                  f"retry in {delay}s ({source})")
 
@@ -603,12 +639,15 @@ Repair context: {repair}
                    quota_requeue_resets=resets,
                    requeue={'not_before': now, 'source': 'quiet-window',
                             'seconds': self.admission.quiet})
+        # The re-armed retry keeps the class of the receipts that spent the
+        # episode budget; congestion holds record no kill requeue.
+        cause = rec.get('requeue_cause') or 'quota-requeue'
         self.state.set('recovery:' + str(number), rec)
-        self.state.set('retry:' + str(number), 'quota-requeue')
+        self.state.set('retry:' + str(number), cause)
         self.log(f"#{number} congestion quiet on {', '.join(pending['groups'])}; "
                  f"re-armed with a fresh quota requeue budget "
                  f"(quiet-window reset {resets}/{self.admission.max_quota_requeue_resets})")
-        return 'quota-requeue'
+        return cause
 
     def reconcile_workers(self, issues):
         by_number = {i['number']: i for i in issues}
@@ -644,7 +683,11 @@ Repair context: {repair}
                     # The stored session is gone; the next retry must start a
                     # fresh one instead of failing on --resume/--session again.
                     self.state.update_job(job['issue'], session=None)
-                if category in ('rate', 'endpoint'):
+                # A factory 'timeout' receipt belongs to the work-gated
+                # bounded continuation (factory.defer_timeout); every other
+                # requeueable category — congestion and kills alike — arms
+                # the shared bounded requeue.
+                if category in REQUEUE_CATEGORIES and not (self.factory and category == 'timeout'):
                     self.requeue_quota(job, category, retry_after)
                 elif category in ('auth', 'credits'):
                     self.state.set('last_error', 'Local agent ' + category + ' failure; '
@@ -1300,7 +1343,8 @@ Repair context: {repair}
             if rec is None:
                 rec = self.capture_recovery(job)
             requeue = rec.get('requeue') or {}
-            if flag in ('quota-requeue', 'timeout-requeue') and now < requeue.get('not_before', 0):
+            if flag in ('quota-requeue', 'timeout-requeue', 'kill-requeue') \
+                    and now < requeue.get('not_before', 0):
                 continue
             self.recover_job(job, rec, active, by_number[job['issue']])
 
