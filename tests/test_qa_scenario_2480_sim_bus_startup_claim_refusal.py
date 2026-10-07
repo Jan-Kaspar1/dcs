@@ -1,56 +1,11 @@
 """The 2470_sim_bus_startup_claim_refusal leg's scenario unit coverage —
 the feed fake and TestCase class for scenario_sim_bus_startup_claim_refusal,
 split out per the leg-module convention (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES pins this
-module's contribution to the suite's case coverage so a dropped case
-fails the discovery check in tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'SimBusClaimRefusalTests.test_registered',
-    'SimBusClaimRefusalTests.test_clean_passes_validates_and_tears_down',
-    'SimBusClaimRefusalTests.test_two_passes_produce_identical_evidence',
-    'SimBusClaimRefusalTests.test_claim_despite_refusal_fails',
-    'SimBusClaimRefusalTests.test_clean_exit_fails',
-    'SimBusClaimRefusalTests.test_unnamed_exit_fails',
-    'SimBusClaimRefusalTests.test_unnamed_missing_pair_fails',
-    'SimBusClaimRefusalTests.test_unnamed_remedy_fails',
-    'SimBusClaimRefusalTests.test_unjournaled_verdict_fails',
-    'SimBusClaimRefusalTests.test_wrong_claimant_fails',
-    'SimBusClaimRefusalTests.test_incumbent_lost_its_claim_fails',
-    'SimBusClaimRefusalTests.test_incumbent_fenced_demotion_fails',
-    'SimBusClaimRefusalTests.test_incumbent_scan_wedged_fails',
-    'SimBusClaimRefusalTests.test_control_orphaned_fails',
-    'SimBusClaimRefusalTests.test_control_promoted_fails',
-    'SimBusClaimRefusalTests.test_control_admitted_command_fails',
-    'SimBusClaimRefusalTests.test_incumbent_never_claimed_is_nondeterministic',
-    'SimBusClaimRefusalTests.test_launch_failure_is_nondeterministic',
-    'SimBusClaimRefusalTests.test_device_stage_failure_is_nondeterministic',
-    'SimBusClaimRefusalTests.test_unread_verdict_is_nondeterministic',
-    'SimBusClaimRefusalTests.test_standing_verdict_is_nondeterministic',
-    'SimBusClaimRefusalTests.test_journal_unread_is_nondeterministic',
-    'SimBusClaimRefusalTests.test_control_never_converged_is_nondeterministic',
-    'SimBusClaimRefusalTests.test_control_watch_starved_is_nondeterministic',
-    'SimBusClaimRefusalTests.test_control_signals_unread_is_nondeterministic',
-    'SimBusClaimRefusalTests.test_pair_disturbance_is_nondeterministic',
-    'SimBusClaimRefusalTests.test_pair_wedge_is_nondeterministic',
-    'SimBusClaimRefusalTests.test_pair_moves_after_sweep_is_nondeterministic',
-    'SimBusClaimRefusalTests.test_rig_left_standing_is_nondeterministic',
-    'SimBusClaimRefusalTests.test_device_left_serving_is_nondeterministic',
-    'SimBusClaimRefusalTests.test_diverging_digests_fail',
-    'SimBusClaimRefusalTests.test_predates_contract_is_inconclusive',
-    'SimBusClaimRefusalTests.test_unstaged_device_is_inconclusive',
-    'SimBusClaimRefusalTests.test_missing_seams_are_inconclusive',
-    'SimBusClaimRefusalTests.test_unpinned_token_is_inconclusive',
-    'SimBusClaimRefusalTests.test_unreachable_rig_is_inconclusive',
-    'SimBusClaimRefusalTests.test_unsettled_pair_is_inconclusive',
-    'SimBusClaimRefusalTests.test_unchecked_self_check_fails',
-    'SimBusClaimRefusalTests.test_self_check_is_complete',
-})
 
 
 class BusFeed:

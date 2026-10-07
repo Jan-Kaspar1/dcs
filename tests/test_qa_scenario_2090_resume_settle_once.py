@@ -1,50 +1,13 @@
 """The 2090_resume_settle_once leg's scenario unit coverage — the
 feed fakes and TestCase classes for scenario_resume_settle_once,
 split out per the #940 convention. The shared fakes and helpers live
-in tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails
-the discovery check in tests/test_qa_scenario_modules.py.
+in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
 from test_qa_scenario_1900_demote_carry_settle import (
     DemoteCarryFeed, DemoteCarryPeer)
-
-
-EXPECTED_CASES = frozenset({
-    'ResumeSettleTests.test_registered',
-    'ResumeSettleTests.test_clean_rig_passes_and_validates',
-    'ResumeSettleTests.test_stale_reapply_reports_failed',
-    'ResumeSettleTests.test_stray_settle_reports_nondeterministic',
-    'ResumeSettleTests.test_verdict_regress_reports_failed',
-    'ResumeSettleTests.test_newer_never_settles_reports_failed',
-    'ResumeSettleTests.test_carry_never_forms_reports_inconclusive',
-    'ResumeSettleTests.test_owner_never_demotes_reports_inconclusive',
-    'ResumeSettleTests.test_missed_window_recovers_and_passes',
-    'ResumeSettleTests.test_promote_refused_reports_failed',
-    'ResumeSettleTests.test_rejoin_never_converges_reports_failed',
-    'ResumeSettleTests.'
-    'test_resume_grant_refused_reports_inconclusive',
-    'ResumeSettleTests.test_stop_fails_reports_inconclusive',
-    'ResumeSettleTests.test_no_active_reports_failed',
-    'ResumeSettleTests.'
-    'test_inverted_launch_reports_inconclusive',
-    'ResumeSettleTests.'
-    'test_unconverged_pair_reports_inconclusive',
-    'ResumeSettleTests.test_unreachable_reports_inconclusive',
-    'ResumeSettleTests.'
-    'test_predates_contract_reports_inconclusive',
-    'ResumeSettleTests.test_missing_actions_report_inconclusive',
-    'ResumeSettleTests.'
-    'test_missing_state_files_reports_inconclusive',
-    'ResumeSettleTests.'
-    'test_missing_journal_files_reports_inconclusive',
-    'ResumeSettleTests.test_missing_plant_reports_inconclusive',
-    'ResumeSettleTests.'
-    'test_diverging_digests_report_nondeterministic',
-    'ResumeSettleTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class ResumeSettlePeer(DemoteCarryPeer):

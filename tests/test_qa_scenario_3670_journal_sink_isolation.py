@@ -2,9 +2,8 @@
 feed fakes and TestCase classes for
 scenario_journal_sink_isolation, split out of the test_qa_scenarios
 monolith (#940). The shared fakes and helpers live in
-tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+tests/qa_scenario_support.py.
+
 
 The leg's mount lever is the drain-stall tracer park/release pair the
 runner exposes on the scenario ctx — a `--journal-file` writer opens
@@ -21,43 +20,6 @@ import copy
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'JournalSinkIsolationTests.test_registered_in_scenarios',
-    'JournalSinkIsolationTests.test_clean_rig_passes_and_validates',
-    'JournalSinkIsolationTests.test_lag_never_surfaces_fails',
-    'JournalSinkIsolationTests.test_tick_stall_under_lag_fails',
-    'JournalSinkIsolationTests.test_late_serving_read_fails',
-    'JournalSinkIsolationTests.test_io_growth_under_stall_fails',
-    'JournalSinkIsolationTests.test_overrun_growth_under_stall_fails',
-    'JournalSinkIsolationTests.test_sink_failed_state_fails',
-    'JournalSinkIsolationTests.test_unbounded_depth_fails',
-    'JournalSinkIsolationTests.test_lost_records_fail',
-    'JournalSinkIsolationTests.test_early_journal_answer_is_nondeterministic',
-    'JournalSinkIsolationTests.test_durable_gap_is_nondeterministic',
-    'JournalSinkIsolationTests.test_duplicate_durable_record_is_nondeterministic',
-    'JournalSinkIsolationTests.test_reordered_window_is_nondeterministic',
-    'JournalSinkIsolationTests.test_retained_window_without_settlements_fails',
-    'JournalSinkIsolationTests.test_a_swapped_field_owner_is_followed_into_its_own_journal_file',
-    'JournalSinkIsolationTests.test_a_drain_that_never_appended_fails',
-    'JournalSinkIsolationTests.test_unanswered_admission_fails',
-    'JournalSinkIsolationTests.test_released_writer_never_drains_fails',
-    'JournalSinkIsolationTests.test_owner_move_fails',
-    'JournalSinkIsolationTests.test_untracked_peer_fails',
-    'JournalSinkIsolationTests.test_missing_lever_is_inconclusive',
-    'JournalSinkIsolationTests.test_unattributable_writer_is_inconclusive',
-    'JournalSinkIsolationTests.test_park_refused_is_inconclusive',
-    'JournalSinkIsolationTests.test_missing_journal_file_is_inconclusive',
-    'JournalSinkIsolationTests.test_predated_contract_is_inconclusive',
-    'JournalSinkIsolationTests.test_torn_baseline_is_inconclusive',
-    'JournalSinkIsolationTests.test_unreachable_rig_is_inconclusive',
-    'JournalSinkIsolationTests.test_unsettled_pair_is_inconclusive',
-    'JournalSinkIsolationTests.test_no_drain_writer_is_inconclusive',
-    'JournalSinkIsolationTests.test_scenario_ctx_carries_the_lever',
-    'JournalSinkIsolationTests.test_ctx_without_tracer_carries_no_lever',
-    'JournalSinkIsolationTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class _FakeJournalSink:

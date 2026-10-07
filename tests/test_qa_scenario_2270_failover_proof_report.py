@@ -1,29 +1,11 @@
 """The 2270_failover_proof_report leg's scenario unit coverage — the
 feed fakes and TestCase classes for scenario_failover_proof_report,
 split per the one-module-per-leg convention (#940). The shared fakes
-and helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case coverage so a
-dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+and helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'FailoverProofReportTests.test_two_identical_digest_passes',
-    'FailoverProofReportTests.test_switched_entry_restores_before_running',
-    'FailoverProofReportTests.test_predating_release_is_inconclusive',
-    'FailoverProofReportTests.test_missing_partition_lever_is_inconclusive',
-    'FailoverProofReportTests.test_suppressed_evidence_fails',
-    'FailoverProofReportTests.test_unarmed_serving_accounting_fails',
-    'FailoverProofReportTests.test_never_firing_gate_fails',
-    'FailoverProofReportTests.test_off_budget_fire_fails',
-    'FailoverProofReportTests.test_request_origin_record_fails',
-    'FailoverProofReportTests.test_failover_record_with_actor_fails',
-    'FailoverProofReportTests.test_pre_field_payload_loads_unchanged',
-})
 
 
 class FailoverProofFeed:

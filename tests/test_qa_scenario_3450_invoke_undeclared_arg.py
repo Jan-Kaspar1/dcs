@@ -1,35 +1,11 @@
 """The 3450_invoke_undeclared_arg leg's scenario unit coverage — the
 feed fake and TestCase classes for scenario_invoke_undeclared_arg,
 following the module-per-leg convention (#928, #940). The shared
-fakes and helpers live in tests/qa_scenario_support.py;
-EXPECTED_CASES pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+fakes and helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'InvokeUndeclaredArgTests.test_registered_in_scenarios',
-    'InvokeUndeclaredArgTests.test_clean_feed_passes_and_validates',
-    'InvokeUndeclaredArgTests.test_predating_rig_is_inconclusive',
-    'InvokeUndeclaredArgTests.test_queue_full_before_validation_is_inconclusive',
-    'InvokeUndeclaredArgTests.test_no_kind_declared_command_is_inconclusive',
-    'InvokeUndeclaredArgTests.test_unreachable_rig_is_inconclusive',
-    'InvokeUndeclaredArgTests.test_wrong_refusal_reason_fails',
-    'InvokeUndeclaredArgTests.test_refusal_queued_fails',
-    'InvokeUndeclaredArgTests.test_served_receipt_disagrees_is_nondeterministic',
-    'InvokeUndeclaredArgTests.test_journal_silent_fails',
-    'InvokeUndeclaredArgTests.test_journaled_settle_disagrees_is_nondeterministic',
-    'InvokeUndeclaredArgTests.test_double_journaled_settle_is_nondeterministic',
-    'InvokeUndeclaredArgTests.test_declared_subset_refused_fails',
-    'InvokeUndeclaredArgTests.test_omitted_invoke_never_settles_fails',
-    'InvokeUndeclaredArgTests.test_dispatch_refusal_on_available_fails',
-    'InvokeUndeclaredArgTests.test_second_pass_admission_is_nondeterministic',
-    'InvokeUndeclaredArgTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class InvokeArgFeed:

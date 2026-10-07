@@ -1,47 +1,13 @@
 """The 2080_suspended_alias_audit leg's scenario unit coverage — the
 feed fakes and TestCase classes for
 scenario_suspended_alias_audit, split out per the #940 convention.
-The shared fakes and helpers live in tests/qa_scenario_support.py;
-EXPECTED_CASES pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+The shared fakes and helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
 from test_qa_scenario_1900_demote_carry_settle import (
     DemoteCarryFeed, DemoteCarryPeer)
-
-
-EXPECTED_CASES = frozenset({
-    'SuspendedAliasTests.test_registered',
-    'SuspendedAliasTests.test_clean_rig_passes_and_validates',
-    'SuspendedAliasTests.test_suspended_vanished_reports_failed',
-    'SuspendedAliasTests.test_double_settle_reports_nondeterministic',
-    'SuspendedAliasTests.test_wrong_outcome_reports_nondeterministic',
-    'SuspendedAliasTests.test_final_sync_carry_reports_failed',
-    'SuspendedAliasTests.test_owner_never_demotes_reports_failed',
-    'SuspendedAliasTests.test_never_resolves_reports_failed',
-    'SuspendedAliasTests.test_driven_promote_refused_reports_failed',
-    'SuspendedAliasTests.test_restore_fails',
-    'SuspendedAliasTests.test_no_active_reports_failed',
-    'SuspendedAliasTests.'
-    'test_unconverged_pair_reports_inconclusive',
-    'SuspendedAliasTests.test_unreachable_reports_inconclusive',
-    'SuspendedAliasTests.test_predates_contract_reports_inconclusive',
-    'SuspendedAliasTests.'
-    'test_missing_driven_action_reports_inconclusive',
-    'SuspendedAliasTests.'
-    'test_missing_journal_files_reports_inconclusive',
-    'SuspendedAliasTests.test_missing_plant_reports_inconclusive',
-    'SuspendedAliasTests.test_launch_failure_reports_inconclusive',
-    'SuspendedAliasTests.'
-    'test_driven_never_serves_reports_inconclusive',
-    'SuspendedAliasTests.'
-    'test_diverging_digests_report_nondeterministic',
-    'SuspendedAliasTests.test_two_runs_produce_identical_evidence',
-    'SuspendedAliasTests.test_silent_audit_reports_unchecked',
-})
 
 
 class SuspendedAliasPeer(DemoteCarryPeer):

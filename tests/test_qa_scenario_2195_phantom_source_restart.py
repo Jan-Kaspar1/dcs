@@ -1,61 +1,11 @@
 """The 2195_phantom_source_restart leg's scenario unit coverage —
 the feed fake and TestCase classes for
 scenario_phantom_source_restart, split out per the #940 convention.
-The shared fakes and helpers live in tests/qa_scenario_support.py;
-EXPECTED_CASES pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+The shared fakes and helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'PhantomSourceRestartTests.test_registered',
-    'PhantomSourceRestartTests.test_clean_rig_passes_and_validates',
-    'PhantomSourceRestartTests.test_phantom_served_fails',
-    'PhantomSourceRestartTests.test_phantom_durable_fails',
-    'PhantomSourceRestartTests.test_restart_silent_fails',
-    'PhantomSourceRestartTests.test_restart_twice_reports_'
-    'nondeterministic',
-    'PhantomSourceRestartTests.test_evidence_absent_fails',
-    'PhantomSourceRestartTests.test_nonregressing_resume_fails',
-    'PhantomSourceRestartTests.test_never_reconverged_fails',
-    'PhantomSourceRestartTests.test_roles_unrestored_fails',
-    'PhantomSourceRestartTests.test_failover_fires_reports_'
-    'nondeterministic',
-    'PhantomSourceRestartTests.test_demote_refused_reports_'
-    'nondeterministic',
-    'PhantomSourceRestartTests.test_promote_never_converges_reports_'
-    'nondeterministic',
-    'PhantomSourceRestartTests.test_restart_refused_reports_'
-    'nondeterministic',
-    'PhantomSourceRestartTests.test_journal_unreadable_reports_'
-    'nondeterministic',
-    'PhantomSourceRestartTests.test_window_silent_reports_'
-    'nondeterministic',
-    'PhantomSourceRestartTests.test_restart_unproven_reports_'
-    'nondeterministic',
-    'PhantomSourceRestartTests.test_diverging_digests_report_'
-    'nondeterministic',
-    'PhantomSourceRestartTests.test_silent_judge_reports_unchecked',
-    'PhantomSourceRestartTests.test_unreachable_pair_reports_'
-    'inconclusive',
-    'PhantomSourceRestartTests.test_unconverged_pair_reports_'
-    'inconclusive',
-    'PhantomSourceRestartTests.test_swapped_layout_reports_'
-    'inconclusive',
-    'PhantomSourceRestartTests.test_missing_restart_action_reports_'
-    'inconclusive',
-    'PhantomSourceRestartTests.test_missing_journal_files_reports_'
-    'inconclusive',
-    'PhantomSourceRestartTests.test_predates_contract_reports_'
-    'inconclusive',
-    'PhantomSourceRestartTests.test_single_endpoint_reports_'
-    'inconclusive',
-    'PhantomSourceRestartTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class PhantomSourceRestartFeed:

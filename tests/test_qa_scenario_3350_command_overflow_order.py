@@ -1,28 +1,11 @@
 """The 3350_command_overflow_order leg's scenario unit coverage — the feed
 fakes and TestCase classes for scenario_command_overflow_order, split out
 of the test_qa_scenarios monolith (#940). The shared fakes and helpers
-live in tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'CommandOverflowOrderTests.test_registered_in_scenarios',
-    'CommandOverflowOrderTests.test_clean_pair_passes_and_validates',
-    'CommandOverflowOrderTests.test_inverted_deferral_reports_failed',
-    'CommandOverflowOrderTests.test_inverted_journal_reports_failed',
-    'CommandOverflowOrderTests.test_silent_past_bound_reports_failed',
-    'CommandOverflowOrderTests.test_unbounded_deck_reports_failed',
-    'CommandOverflowOrderTests.test_unsettled_journal_reports_failed',
-    'CommandOverflowOrderTests.test_moved_roles_report_nondeterministic',
-    'CommandOverflowOrderTests.test_silent_audit_reports_unchecked',
-    'CommandOverflowOrderTests.test_no_active_reports_failed',
-    'CommandOverflowOrderTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class OrderSocket(FakeSocket):

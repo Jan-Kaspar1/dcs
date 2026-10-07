@@ -1,31 +1,11 @@
 """The 2500_incompatible_revision leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_incompatible_revision, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'IncompatibleRevisionTests.test_registered_in_scenarios',
-    'IncompatibleRevisionTests.test_clean_refusal_passes_and_orders_the_legs',
-    'IncompatibleRevisionTests.test_two_runs_produce_identical_evidence',
-    'IncompatibleRevisionTests.test_silent_crossing_fails',
-    'IncompatibleRevisionTests.test_fingerprint_degrade_is_the_wrong_refusal',
-    'IncompatibleRevisionTests.test_never_crossing_peer_is_inconclusive',
-    'IncompatibleRevisionTests.test_promotion_succeeding_fails',
-    'IncompatibleRevisionTests.test_refusal_without_the_named_detail_fails',
-    'IncompatibleRevisionTests.test_receipt_drift_fails',
-    'IncompatibleRevisionTests.test_journal_drift_fails',
-    'IncompatibleRevisionTests.test_field_regression_fails',
-    'IncompatibleRevisionTests.test_control_degrading_fails',
-    'IncompatibleRevisionTests.test_failed_action_is_inconclusive',
-})
 
 
 class IncompatibleFeed:

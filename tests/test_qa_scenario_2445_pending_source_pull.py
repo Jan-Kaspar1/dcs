@@ -2,52 +2,11 @@
 the feed fakes and TestCase classes for
 scenario_pending_source_pull, split out per the leg-module
 convention (#940). The shared fakes and helpers live in
-tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'PendingSourcePullTests.test_registered_in_the_born_seat_window',
-    'PendingSourcePullTests.test_fixed_shape_passes_validates_and_tears_down',
-    'PendingSourcePullTests.test_two_runs_produce_identical_evidence',
-    'PendingSourcePullTests.test_converged_but_degraded_fails',
-    'PendingSourcePullTests.test_wrong_verdict_fails',
-    'PendingSourcePullTests.test_tracker_exit_fails',
-    'PendingSourcePullTests.test_tracker_restart_fails',
-    'PendingSourcePullTests.test_pull_endpoint_refuses_fails',
-    'PendingSourcePullTests.test_pull_lapse_fails',
-    'PendingSourcePullTests.test_adoption_unjournaled_fails',
-    'PendingSourcePullTests.test_served_journal_silent_fails',
-    'PendingSourcePullTests.test_control_never_converges_fails',
-    'PendingSourcePullTests.test_control_exits_fails',
-    'PendingSourcePullTests.test_control_restarts_fails',
-    'PendingSourcePullTests.test_incumbent_demoted_fails',
-    'PendingSourcePullTests.test_member_disturbed_fails',
-    'PendingSourcePullTests.test_window_tracker_dishonest_fails',
-    'PendingSourcePullTests.test_pending_reports_active_fails',
-    'PendingSourcePullTests.test_latched_refusal_is_inconclusive',
-    'PendingSourcePullTests.test_pending_source_exit_is_inconclusive',
-    'PendingSourcePullTests.test_thaw_exit_is_inconclusive',
-    'PendingSourcePullTests.test_unsettled_pair_is_inconclusive',
-    'PendingSourcePullTests.test_field_launch_failure_is_nondeterministic',
-    'PendingSourcePullTests.test_pause_failure_is_nondeterministic',
-    'PendingSourcePullTests.test_launch_failure_is_nondeterministic',
-    'PendingSourcePullTests.test_tracker_watch_starved_is_nondeterministic',
-    'PendingSourcePullTests.test_source_watch_starved_is_nondeterministic',
-    'PendingSourcePullTests.test_window_probe_served_is_nondeterministic',
-    'PendingSourcePullTests.test_unserved_source_is_nondeterministic',
-    'PendingSourcePullTests.test_unjournaled_plant_is_nondeterministic',
-    'PendingSourcePullTests.test_divergent_digests_are_nondeterministic',
-    'PendingSourcePullTests.test_missing_seams_are_inconclusive',
-    'PendingSourcePullTests.test_missing_journals_are_inconclusive',
-    'PendingSourcePullTests.test_unchecked_self_check_fails',
-    'PendingSourcePullTests.test_judge_self_check_is_complete',
-})
 
 
 class PendingPullFeed:

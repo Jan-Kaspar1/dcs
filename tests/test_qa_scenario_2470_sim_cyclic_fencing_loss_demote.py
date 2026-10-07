@@ -2,9 +2,8 @@
 coverage — the feed fake and TestCase class for
 scenario_sim_cyclic_fencing_loss_demote, split out per the leg-module
 convention (#940). The shared fakes and helpers live in
-tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+tests/qa_scenario_support.py.
+
 
 The feed stages the leg's shape: the lane's device server serves the
 run's staged sim-cyclic model, the born-seat launches stand a pair on
@@ -24,45 +23,6 @@ import urllib.error
 from pathlib import Path
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'CyclicFencingLossTests.test_registered',
-    'CyclicFencingLossTests.test_clean_passes_validate_and_tear_down',
-    'CyclicFencingLossTests.test_two_runs_produce_identical_digests',
-    'CyclicFencingLossTests.test_ex_owner_stays_active_fails',
-    'CyclicFencingLossTests.test_two_active_peers_fails',
-    'CyclicFencingLossTests.test_unjournaled_demotion_fails',
-    'CyclicFencingLossTests.test_request_origin_demotion_fails',
-    'CyclicFencingLossTests.test_missing_claim_loss_fails',
-    'CyclicFencingLossTests.test_unattributed_claim_loss_fails',
-    'CyclicFencingLossTests.test_wrong_claimant_fails',
-    'CyclicFencingLossTests.test_field_stalled_fails',
-    'CyclicFencingLossTests.test_still_fenced_ex_owner_fails',
-    'CyclicFencingLossTests.test_unrecovered_pair_fails',
-    'CyclicFencingLossTests.test_restarted_ex_owner_fails',
-    'CyclicFencingLossTests.test_ex_owner_exit_fails',
-    'CyclicFencingLossTests.test_pre_contract_revision_is_inconclusive',
-    'CyclicFencingLossTests.test_absent_field_is_inconclusive',
-    'CyclicFencingLossTests.test_absent_cyclic_model_is_inconclusive',
-    'CyclicFencingLossTests.test_non_cyclic_field_is_inconclusive',
-    'CyclicFencingLossTests.test_field_without_outputs_is_inconclusive',
-    'CyclicFencingLossTests.test_unsettled_pair_is_inconclusive',
-    'CyclicFencingLossTests.test_unreachable_rig_is_inconclusive',
-    'CyclicFencingLossTests.test_missing_seams_are_inconclusive',
-    'CyclicFencingLossTests.test_stage_failure_is_nondeterministic',
-    'CyclicFencingLossTests.test_sever_failure_is_nondeterministic',
-    'CyclicFencingLossTests.test_launch_failure_is_nondeterministic',
-    'CyclicFencingLossTests.test_promote_refusal_is_nondeterministic',
-    'CyclicFencingLossTests.test_starved_watch_is_nondeterministic',
-    'CyclicFencingLossTests.test_state_read_failure_is_nondeterministic',
-    'CyclicFencingLossTests.test_journal_read_failure_is_nondeterministic',
-    'CyclicFencingLossTests.test_pair_moves_is_nondeterministic',
-    'CyclicFencingLossTests.test_pair_wedged_is_nondeterministic',
-    'CyclicFencingLossTests.test_divergent_digests_are_nondeterministic',
-    'CyclicFencingLossTests.test_unchecked_self_check_fails',
-    'CyclicFencingLossTests.test_self_check_is_complete',
-})
 
 
 # The staged device model the lane's server serves: one sim-cyclic

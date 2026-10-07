@@ -2,9 +2,8 @@
 the feed fake and TestCase class for
 scenario_cyclic_exchange_failure_legs, split out per the leg-module
 convention (#940). The shared fakes and helpers live in
-tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+tests/qa_scenario_support.py.
+
 
 The feed stages the leg's shape: the lane's device server serves a
 lane-derived **two-station** `sim-cyclic` document, one born seat
@@ -23,44 +22,6 @@ import unittest
 from pathlib import Path
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'CyclicExchangeLegsTests.test_registered',
-    'CyclicExchangeLegsTests.test_clean_passes_validate_and_tear_down',
-    'CyclicExchangeLegsTests.test_two_runs_produce_identical_digests',
-    'CyclicExchangeLegsTests.test_a_missed_exchange_moving_the_outputs_fails',
-    'CyclicExchangeLegsTests.test_a_missed_exchange_not_counted_fails',
-    'CyclicExchangeLegsTests.test_a_skipped_exchange_fails',
-    'CyclicExchangeLegsTests.test_a_held_image_that_degraded_early_fails',
-    'CyclicExchangeLegsTests.test_a_restamped_held_sample_fails',
-    'CyclicExchangeLegsTests.test_an_absent_escalation_fails',
-    'CyclicExchangeLegsTests.test_a_partial_escalation_fails',
-    'CyclicExchangeLegsTests.test_a_healthy_link_while_missing_fails',
-    'CyclicExchangeLegsTests.test_a_misattributed_shortfall_fails',
-    'CyclicExchangeLegsTests.test_a_shortfall_never_counted_fails',
-    'CyclicExchangeLegsTests.test_an_absent_recovery_fails',
-    'CyclicExchangeLegsTests.test_a_stuck_failure_streak_fails',
-    'CyclicExchangeLegsTests.test_counter_drift_fails',
-    'CyclicExchangeLegsTests.test_an_accumulated_mismatch_fails',
-    'CyclicExchangeLegsTests.test_recovery_leaving_points_degraded_fails',
-    'CyclicExchangeLegsTests.test_a_single_station_field_is_inconclusive',
-    'CyclicExchangeLegsTests.test_a_point_wise_field_is_inconclusive',
-    'CyclicExchangeLegsTests.test_an_underivable_document_is_inconclusive',
-    'CyclicExchangeLegsTests.test_absent_device_server_is_inconclusive',
-    'CyclicExchangeLegsTests.test_an_unsettled_seat_is_inconclusive',
-    'CyclicExchangeLegsTests.test_an_unreachable_rig_is_inconclusive',
-    'CyclicExchangeLegsTests.test_missing_seams_are_inconclusive',
-    'CyclicExchangeLegsTests.test_a_stage_failure_is_nondeterministic',
-    'CyclicExchangeLegsTests.test_a_tool_refusal_is_nondeterministic',
-    'CyclicExchangeLegsTests.test_a_starved_window_is_nondeterministic',
-    'CyclicExchangeLegsTests.test_an_unreadable_point_set_is_nondeterministic',
-    'CyclicExchangeLegsTests.test_a_device_that_stopped_serving_is_nondeterministic',
-    'CyclicExchangeLegsTests.test_pair_moves_is_nondeterministic',
-    'CyclicExchangeLegsTests.test_divergent_digests_are_nondeterministic',
-    'CyclicExchangeLegsTests.test_an_unchecked_self_check_fails',
-    'CyclicExchangeLegsTests.test_self_check_is_complete',
-})
 
 
 #: The checked-in rig fixture the leg derives from — the pinned

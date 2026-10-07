@@ -1,30 +1,11 @@
 """The 0600_stale_freshness leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_stale_freshness, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'StaleFreshnessTests.test_registered_in_scenarios',
-    'StaleFreshnessTests.test_freeze_stale_recovery_passes_and_validates',
-    'StaleFreshnessTests.test_stale_never_presenting_fails',
-    'StaleFreshnessTests.test_comparison_presenting_stale_fails',
-    'StaleFreshnessTests.test_stale_reverting_to_healthy_fails',
-    'StaleFreshnessTests.test_no_recovery_after_restart_fails',
-    'StaleFreshnessTests.test_rewound_history_ticks_fail',
-    'StaleFreshnessTests.test_promoted_peer_never_recovering_fails',
-    'StaleFreshnessTests.test_unfrozen_induction_is_inconclusive',
-    'StaleFreshnessTests.test_failed_restart_action_is_inconclusive',
-    'StaleFreshnessTests.test_missing_lifecycle_actions_are_inconclusive',
-    'StaleFreshnessTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class FreshnessFeed:

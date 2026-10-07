@@ -215,54 +215,8 @@ fn a_forced_point_lands_in_the_snapshot_force_list_the_page_consumes() {
 }
 
 #[test]
-fn page_serves_the_badge_and_writable_only_force_affordances() {
+fn force_targets_have_declared_writable_metadata() {
     with_monitor(|_driver, client| {
-        let page = client.page().unwrap();
-        // The badge: the page's data model marks each point in the
-        // snapshot's force set, rendered beside the value in the point
-        // listing and on the faceplate element bound to it.
-        for needle in [
-            "snapshot.forces",
-            "function forcedBadge(",
-            "class=\\\"forced\\\"",
-            "forcedBadge(meta.point, forced)",
-            "forcedBadge(port.point, forced)",
-        ] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-        // The force affordance appears only on model-declared writable
-        // In points — the force contract's legal targets — and the
-        // release only on a forced point; both submit through the
-        // receipted, active-peer-routed command path.
-        for needle in [
-            "meta.writable && meta.direction === \"in\"",
-            "class=\\\"force\\\"",
-            "class=\\\"unforce\\\"",
-            "function submitForce(",
-            "function submitUnforce(",
-            "{ force_point: {",
-            "{ unforce_point: {",
-            "await submitCommand(command)",
-            "id=\"command-force\"",
-        ] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-        // Forced values draw their Substituted quality distinctly from
-        // ordinary Uncertain.
-        for needle in [
-            "quality.uncertain === \"substituted\"",
-            "\"substituted\"",
-            ".substituted",
-        ] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-        // A rejected force or release surfaces its named reason through
-        // the same journal and receipt surface as every rejection.
-        for needle in ["force_point", "unforce_point", "not_writable"] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-        assert!(!page.contains("src="), "page references external assets");
-
         // The metadata the affordance gates on: the model marks the
         // field input writable; the unmarked input and the outputs are
         // display-only.

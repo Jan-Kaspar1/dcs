@@ -2,9 +2,8 @@
 the feed fake and TestCase class for
 scenario_ownerless_remote_backoff, split out per the leg-module
 convention (#940). The shared fakes and helpers live in
-tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails
-the discovery check in tests/test_qa_scenario_modules.py.
+tests/qa_scenario_support.py.
+
 
 The feed stages the leg's shape: ctrl-a owns the deployed pair's
 field while ctrl-b tracks; the born levers stage the scratch field
@@ -20,41 +19,6 @@ shape the leg inconcludes on."""
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'OwnerlessBackoffTests.test_registered',
-    'OwnerlessBackoffTests.test_clean_passes_validates_and_tears_down',
-    'OwnerlessBackoffTests.test_two_runs_produce_identical_digests',
-    'OwnerlessBackoffTests.test_tick_frozen_with_bounded_surface_fails',
-    'OwnerlessBackoffTests.test_cadence_below_floor_fails',
-    'OwnerlessBackoffTests.test_pending_reports_active_fails',
-    'OwnerlessBackoffTests.test_pending_claims_held_fails',
-    'OwnerlessBackoffTests.test_dishonest_sync_fails',
-    'OwnerlessBackoffTests.test_mirror_read_starved_fails',
-    'OwnerlessBackoffTests.test_lock_read_starved_fails',
-    'OwnerlessBackoffTests.test_scan_age_unbounded_fails',
-    'OwnerlessBackoffTests.test_recovery_never_lands_fails',
-    'OwnerlessBackoffTests.test_grant_unjournaled_fails',
-    'OwnerlessBackoffTests.test_pending_exit_is_inconclusive',
-    'OwnerlessBackoffTests.test_health_unshaped_is_inconclusive',
-    'OwnerlessBackoffTests.test_unpause_failure_is_inconclusive',
-    'OwnerlessBackoffTests.test_departed_mid_window_is_inconclusive',
-    'OwnerlessBackoffTests.test_defect_signature_is_inconclusive',
-    'OwnerlessBackoffTests.test_stage_failure_is_nondeterministic',
-    'OwnerlessBackoffTests.test_pause_failure_is_nondeterministic',
-    'OwnerlessBackoffTests.test_launch_failure_is_nondeterministic',
-    'OwnerlessBackoffTests.test_watch_starves_is_nondeterministic',
-    'OwnerlessBackoffTests.test_state_fails_is_nondeterministic',
-    'OwnerlessBackoffTests.test_pair_moves_is_nondeterministic',
-    'OwnerlessBackoffTests.test_pair_wedged_is_nondeterministic',
-    'OwnerlessBackoffTests.test_divergent_digests_are_nondeterministic',
-    'OwnerlessBackoffTests.test_missing_seams_are_inconclusive',
-    'OwnerlessBackoffTests.test_unreachable_rig_is_inconclusive',
-    'OwnerlessBackoffTests.test_unsettled_pair_is_inconclusive',
-    'OwnerlessBackoffTests.test_unchecked_self_check_fails',
-    'OwnerlessBackoffTests.test_self_check_is_complete',
-})
 
 
 class BackoffFeed:

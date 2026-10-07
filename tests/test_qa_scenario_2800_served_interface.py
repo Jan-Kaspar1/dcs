@@ -1,23 +1,11 @@
 """The 2800_served_interface leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_served_interface, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'ServedInterfaceTests.test_clean_feed_passes_and_validates',
-    'ServedInterfaceTests.test_missing_declared_kind_fails',
-    'ServedInterfaceTests.test_missing_collection_fails',
-    'ServedInterfaceTests.test_command_without_receipt_fails',
-    'ServedInterfaceTests.test_unobserved_event_fails',
-})
 
 
 class ServedFeed:

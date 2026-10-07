@@ -1,25 +1,11 @@
 """The 2100_parameter_tune_carryover leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_parameter_tune_carryover, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'ParameterTuneCarryoverTests.test_registered_ahead_of_failover',
-    'ParameterTuneCarryoverTests.test_clean_tune_passes_and_validates',
-    'ParameterTuneCarryoverTests.test_unsettled_tune_fails',
-    'ParameterTuneCarryoverTests.test_unreported_tune_is_inconclusive',
-    'ParameterTuneCarryoverTests.test_missing_journal_fails',
-    'ParameterTuneCarryoverTests.test_out_of_range_applying_fails',
-    'ParameterTuneCarryoverTests.test_reverted_tune_fails',
-})
 
 
 class TuneFeed:

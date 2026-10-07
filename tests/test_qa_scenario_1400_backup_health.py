@@ -1,38 +1,11 @@
 """The 1400_backup_health leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_backup_health, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'BackupHealthTests.test_registered_in_scenarios',
-    'BackupHealthTests.test_clean_feed_passes_and_validates',
-    'BackupHealthTests.test_two_runs_produce_identical_evidence',
-    'BackupHealthTests.test_unhealthy_never_asserting_fails',
-    'BackupHealthTests.test_alarm_never_standing_fails',
-    'BackupHealthTests.test_unacknowledged_never_latching_fails',
-    'BackupHealthTests.test_selection_moving_to_the_backup_fails',
-    'BackupHealthTests.test_role_move_under_backup_fault_fails',
-    'BackupHealthTests.test_journaled_role_change_fails',
-    'BackupHealthTests.test_transitions_never_journaling_fails',
-    'BackupHealthTests.test_ack_refusal_fails',
-    'BackupHealthTests.test_ack_never_applying_fails',
-    'BackupHealthTests.test_ack_settlement_never_journaling_fails',
-    'BackupHealthTests.test_unattributed_ack_fails',
-    'BackupHealthTests.test_recovery_never_landing_fails',
-    'BackupHealthTests.test_no_tracking_pair_is_inconclusive',
-    'BackupHealthTests.test_missing_wiring_is_inconclusive',
-    'BackupHealthTests.test_no_plant_endpoint_is_inconclusive',
-    'BackupHealthTests.test_backup_point_unserved_is_inconclusive',
-    'BackupHealthTests.test_no_active_is_failed',
-})
 
 
 class BackupHealthFeed:

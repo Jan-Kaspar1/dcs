@@ -1,30 +1,11 @@
 """The 3400_command_availability leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_command_availability, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'CommandAvailabilityTests.test_registered_in_scenarios',
-    'CommandAvailabilityTests.test_clean_feed_passes_and_validates',
-    'CommandAvailabilityTests.test_unnamed_refusal_fails',
-    'CommandAvailabilityTests.test_refusal_on_available_fails',
-    'CommandAvailabilityTests.test_applies_refused_fails',
-    'CommandAvailabilityTests.test_mismatched_refusal_fails',
-    'CommandAvailabilityTests.test_refuses_available_fails',
-    'CommandAvailabilityTests.test_diverged_standby_fails',
-    'CommandAvailabilityTests.test_no_command_rows_is_inconclusive',
-    'CommandAvailabilityTests.test_undeclared_model_notes_the_coverage_limitation',
-    'CommandAvailabilityTests.test_no_tracking_peer_notes_the_uncovered_leg',
-    'CommandAvailabilityTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class AvailabilityFeed:

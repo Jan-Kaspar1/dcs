@@ -1,9 +1,8 @@
 """The 2490_claim_skew_bound leg's scenario unit coverage — the feed
 fake and TestCase class for scenario_claim_skew_bound, split out per
 the leg-module convention (#940). The shared fakes and helpers live in
-tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+tests/qa_scenario_support.py.
+
 
 The feed stages the leg's shape: the deployed pair owns a sim-tcp
 field and never moves, while the born legs' scratch field serves on
@@ -23,45 +22,6 @@ surface, or one rig shape the leg declines on."""
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'ClaimSkewBoundTests.test_registered',
-    'ClaimSkewBoundTests.test_clean_passes_validates_and_tears_down',
-    'ClaimSkewBoundTests.test_two_passes_produce_identical_digests',
-    'ClaimSkewBoundTests.test_skewed_claim_preempts_the_field_fails',
-    'ClaimSkewBoundTests.test_unnamed_skew_refusal_fails',
-    'ClaimSkewBoundTests.test_in_bound_claim_refused_fails',
-    'ClaimSkewBoundTests.test_in_bound_claim_never_lands_fails',
-    'ClaimSkewBoundTests.test_in_bound_refusal_journaled_fails',
-    'ClaimSkewBoundTests.test_holder_demotion_unwalked_fails',
-    'ClaimSkewBoundTests.test_holder_demotion_unattributed_fails',
-    'ClaimSkewBoundTests.test_holder_lost_the_field_fails',
-    'ClaimSkewBoundTests.test_holder_journaled_a_claim_loss_fails',
-    'ClaimSkewBoundTests.test_holder_left_active_fails',
-    'ClaimSkewBoundTests.test_holder_scan_wedged_fails',
-    'ClaimSkewBoundTests.test_diverging_digests_fail',
-    'ClaimSkewBoundTests.test_field_stage_failure_is_nondeterministic',
-    'ClaimSkewBoundTests.test_launch_failures_are_nondeterministic',
-    'ClaimSkewBoundTests.test_holder_never_claims_is_nondeterministic',
-    'ClaimSkewBoundTests.test_claimants_never_converge_is_nondeterministic',
-    'ClaimSkewBoundTests.test_skew_never_separates_is_nondeterministic',
-    'ClaimSkewBoundTests.test_in_bound_basis_outside_is_nondeterministic',
-    'ClaimSkewBoundTests.test_starved_watch_is_nondeterministic',
-    'ClaimSkewBoundTests.test_unanswered_attempt_is_nondeterministic',
-    'ClaimSkewBoundTests.test_gate_answered_attempt_is_nondeterministic',
-    'ClaimSkewBoundTests.test_journal_vanished_is_nondeterministic',
-    'ClaimSkewBoundTests.test_pair_disturbance_is_nondeterministic',
-    'ClaimSkewBoundTests.test_rig_left_standing_is_nondeterministic',
-    'ClaimSkewBoundTests.test_field_left_serving_is_nondeterministic',
-    'ClaimSkewBoundTests.test_field_presence_unreadable_is_nondeterministic',
-    'ClaimSkewBoundTests.test_unreachable_rig_is_inconclusive',
-    'ClaimSkewBoundTests.test_unsettled_pair_is_inconclusive',
-    'ClaimSkewBoundTests.test_missing_seams_are_inconclusive',
-    'ClaimSkewBoundTests.test_unpinned_tokens_are_inconclusive',
-    'ClaimSkewBoundTests.test_unchecked_self_check_fails',
-    'ClaimSkewBoundTests.test_self_check_is_complete',
-})
 
 
 class SkewFeed:

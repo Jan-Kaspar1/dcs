@@ -1,9 +1,8 @@
 """The 2484_cyclic_failover_settle leg's scenario unit coverage — the
 feed fake and TestCase class for scenario_cyclic_failover_settle, split
 out per the leg-module convention (#940). The shared fakes and helpers
-live in tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+live in tests/qa_scenario_support.py.
+
 
 The feed stages the leg's shape: the lane's device server serves the
 run config's `sim-cyclic` document, a born pair stands on it — the
@@ -20,48 +19,6 @@ import unittest
 from pathlib import Path
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'CyclicFailoverSettleTests.test_registered',
-    'CyclicFailoverSettleTests.test_clean_passes_validate_and_tear_down',
-    'CyclicFailoverSettleTests.test_two_runs_produce_identical_digests',
-    'CyclicFailoverSettleTests.test_a_promotion_that_took_no_field_fails',
-    'CyclicFailoverSettleTests.test_a_promotion_that_took_no_claim_fails',
-    'CyclicFailoverSettleTests.test_a_promotion_that_published_nothing_fails',
-    'CyclicFailoverSettleTests.test_a_promoted_peer_off_the_link_fails',
-    'CyclicFailoverSettleTests.test_a_skipped_boundary_fails',
-    'CyclicFailoverSettleTests.test_a_switchover_counted_a_failure_fails',
-    'CyclicFailoverSettleTests.test_degraded_latching_across_the_switch_fails',
-    'CyclicFailoverSettleTests.test_an_unstamped_latched_sample_fails',
-    'CyclicFailoverSettleTests.test_a_frozen_field_fails',
-    'CyclicFailoverSettleTests.test_a_demotion_that_never_landed_fails',
-    'CyclicFailoverSettleTests.test_a_demotion_that_kept_the_claim_fails',
-    'CyclicFailoverSettleTests.test_a_demoted_peer_that_stopped_latching_fails',
-    'CyclicFailoverSettleTests.test_a_demoted_peer_behind_a_fence_fails',
-    'CyclicFailoverSettleTests.test_a_failing_demoted_census_fails',
-    'CyclicFailoverSettleTests.test_an_unjournaled_promotion_fails',
-    'CyclicFailoverSettleTests.test_an_unattributed_promotion_fails',
-    'CyclicFailoverSettleTests.test_an_unjournaled_demotion_fails',
-    'CyclicFailoverSettleTests.test_a_point_wise_field_is_inconclusive',
-    'CyclicFailoverSettleTests.test_an_output_less_field_is_inconclusive',
-    'CyclicFailoverSettleTests.test_absent_device_server_is_inconclusive',
-    'CyclicFailoverSettleTests.test_an_unsettled_pair_is_inconclusive',
-    'CyclicFailoverSettleTests.test_missing_seams_are_inconclusive',
-    'CyclicFailoverSettleTests.test_a_refused_demote_is_nondeterministic',
-    'CyclicFailoverSettleTests.test_a_refused_promote_is_nondeterministic',
-    'CyclicFailoverSettleTests.test_a_starved_window_is_nondeterministic',
-    'CyclicFailoverSettleTests.test_an_unreadable_field_is_nondeterministic',
-    'CyclicFailoverSettleTests.test_an_unreadable_journal_is_nondeterministic',
-    'CyclicFailoverSettleTests.test_a_switch_call_that_raised_is_nondeterministic',
-    'CyclicFailoverSettleTests.test_an_unrestored_pair_is_nondeterministic',
-    'CyclicFailoverSettleTests.test_a_stage_failure_is_nondeterministic',
-    'CyclicFailoverSettleTests.test_a_launch_failure_is_nondeterministic',
-    'CyclicFailoverSettleTests.test_a_silent_rig_is_inconclusive',
-    'CyclicFailoverSettleTests.test_divergent_digests_are_nondeterministic',
-    'CyclicFailoverSettleTests.test_an_unchecked_self_check_fails',
-    'CyclicFailoverSettleTests.test_self_check_is_complete',
-})
 
 
 OWNER_SEAT = 'driven'

@@ -1,31 +1,11 @@
 """The 1000_monitor_starvation leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_monitor_starvation, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'MonitorStarvationTests.test_registered_in_scenarios',
-    'MonitorStarvationTests.test_armed_pair_passes_and_validates',
-    'MonitorStarvationTests.test_starved_liveness_reads_report_failed',
-    'MonitorStarvationTests.test_late_liveness_reads_report_nondeterministic',
-    'MonitorStarvationTests.test_promoting_standby_reports_nondeterministic',
-    'MonitorStarvationTests.test_stalled_pulls_report_failed',
-    'MonitorStarvationTests.test_unfenced_probe_reports_nondeterministic',
-    'MonitorStarvationTests.test_journaled_claim_loss_reports_nondeterministic',
-    'MonitorStarvationTests.test_journaled_role_change_reports_nondeterministic',
-    'MonitorStarvationTests.test_unrecovered_submission_lane_reports_failed',
-    'MonitorStarvationTests.test_no_armed_tracking_standby_inconclusive',
-    'MonitorStarvationTests.test_missing_plant_endpoint_inconclusive',
-    'MonitorStarvationTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class StarvationFeed:

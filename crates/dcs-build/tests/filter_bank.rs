@@ -1289,7 +1289,7 @@ fn the_field_points_carry_their_declared_engineering_units() {
 }
 
 #[test]
-fn the_declared_signals_render_the_bank_without_a_second_configuration() {
+fn declared_signals_carry_descriptions_groups_and_units() {
     let model = fixture_model();
     for signal in &model.signals {
         assert!(

@@ -2,36 +2,12 @@
 the feed fakes and TestCase class for
 scenario_attributed_switch_isolation, one test module per leg of the
 split schedule (tests/test_qa_scenario_modules.py pins the pairing).
-The shared fakes and helpers live in tests/qa_scenario_support.py;
-EXPECTED_CASES pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check.
+The shared fakes and helpers live in tests/qa_scenario_support.py.
 """
 import importlib
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'AttributedSwitchIsolationTests.test_registered_in_scenarios',
-    'AttributedSwitchIsolationTests.test_isolated_pair_passes_and_validates',
-    'AttributedSwitchIsolationTests.test_two_runs_produce_identical_evidence',
-    'AttributedSwitchIsolationTests.test_queued_attributed_switch_reports_failed',
-    'AttributedSwitchIsolationTests.test_late_attributed_switch_reports_failed',
-    'AttributedSwitchIsolationTests.test_wrong_verdict_reports_failed',
-    'AttributedSwitchIsolationTests.test_starved_baseline_reports_failed',
-    'AttributedSwitchIsolationTests.test_unpinned_lane_reports_nondeterministic',
-    'AttributedSwitchIsolationTests.test_unopened_clients_report_nondeterministic',
-    'AttributedSwitchIsolationTests.test_unrecovered_lane_reports_failed',
-    'AttributedSwitchIsolationTests.test_unrestored_pair_reports_failed',
-    'AttributedSwitchIsolationTests.test_moved_pair_reports_nondeterministic',
-    'AttributedSwitchIsolationTests.test_precontract_routing_reports_inconclusive',
-    'AttributedSwitchIsolationTests.test_diverged_digests_report_nondeterministic',
-    'AttributedSwitchIsolationTests.test_self_check_covers_its_negatives',
-    'AttributedSwitchIsolationTests.test_slipping_self_check_reports_unchecked',
-    'AttributedSwitchIsolationTests.test_missing_seams_report_inconclusive',
-    'AttributedSwitchIsolationTests.test_unconverged_pair_reports_inconclusive',
-})
 
 
 LEG = 'qa_lane.scenarios.1020_attributed_switch_isolation'

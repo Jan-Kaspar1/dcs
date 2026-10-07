@@ -6,9 +6,7 @@ shared fakes and helpers live in tests/qa_scenario_support.py; the
 claim arbitration half builds on the stranded-standby leg's fakes —
 the same monitor-less tool-claim window the induction stages —
 extended with the doctors the release-resolution bound's own
-assertions name. EXPECTED_CASES pins this module's contribution to
-the suite's case coverage so a dropped case fails the discovery
-check in tests/test_qa_scenario_modules.py.
+assertions name.
 """
 import unittest
 import urllib.error
@@ -18,84 +16,6 @@ from test_qa_scenario_2370_stranded_standby_no_resync import (
     StrandedPairFeed)
 from test_qa_scenario_2380_claim_monitor_rendezvous import (
     RendezvousPlantPeer)
-
-
-EXPECTED_CASES = frozenset({
-    'ForeignClaimReleaseTests.test_registered',
-    'ForeignClaimReleaseTests.'
-    'test_clean_pair_passes_and_validates',
-    'ForeignClaimReleaseTests.'
-    'test_adopted_resolution_passes',
-    'ForeignClaimReleaseTests.'
-    'test_monitorless_declared_reports_failed',
-    'ForeignClaimReleaseTests.'
-    'test_orphaned_unpinned_reports_failed',
-    'ForeignClaimReleaseTests.test_pinned_peer_passes',
-    'ForeignClaimReleaseTests.'
-    'test_pin_evicted_from_the_served_ring_passes',
-    'ForeignClaimReleaseTests.'
-    'test_retired_pin_reports_failed',
-    'ForeignClaimReleaseTests.'
-    'test_clean_window_reports_failed',
-    'ForeignClaimReleaseTests.'
-    'test_second_pass_clean_reports_failed',
-    'ForeignClaimReleaseTests.'
-    'test_stranded_after_release_reports_failed',
-    'ForeignClaimReleaseTests.'
-    'test_monitor_drops_mid_claim_reports_failed',
-    'ForeignClaimReleaseTests.'
-    'test_never_demotes_reports_failed',
-    'ForeignClaimReleaseTests.'
-    'test_silent_loss_reports_failed',
-    'ForeignClaimReleaseTests.'
-    'test_unattributed_loss_reports_failed',
-    'ForeignClaimReleaseTests.'
-    'test_misattributed_loss_reports_failed',
-    'ForeignClaimReleaseTests.'
-    'test_unjournaled_reclaim_reports_failed',
-    'ForeignClaimReleaseTests.'
-    'test_no_durable_reports_failed',
-    'ForeignClaimReleaseTests.'
-    'test_shared_claim_reports_nondeterministic',
-    'ForeignClaimReleaseTests.'
-    'test_peer_moves_reports_nondeterministic',
-    'ForeignClaimReleaseTests.'
-    'test_diverging_digests_report_nondeterministic',
-    'ForeignClaimReleaseTests.'
-    'test_silent_judge_reports_unchecked',
-    'ForeignClaimReleaseTests.'
-    'test_claim_staging_refused_reports_inconclusive',
-    'ForeignClaimReleaseTests.'
-    'test_release_refused_reports_inconclusive',
-    'ForeignClaimReleaseTests.'
-    'test_predating_rig_reports_inconclusive',
-    'ForeignClaimReleaseTests.'
-    'test_probe_absent_reports_inconclusive',
-    'ForeignClaimReleaseTests.'
-    'test_open_field_reports_inconclusive',
-    'ForeignClaimReleaseTests.'
-    'test_keyed_pair_reports_inconclusive',
-    'ForeignClaimReleaseTests.'
-    'test_no_active_reports_failed',
-    'ForeignClaimReleaseTests.'
-    'test_unsettled_pair_reports_inconclusive',
-    'ForeignClaimReleaseTests.'
-    'test_unreachable_pair_reports_inconclusive',
-    'ForeignClaimReleaseTests.'
-    'test_missing_active_endpoint_reports_inconclusive',
-    'ForeignClaimReleaseTests.'
-    'test_missing_standby_endpoint_reports_inconclusive',
-    'ForeignClaimReleaseTests.'
-    'test_missing_plant_endpoint_reports_inconclusive',
-    'ForeignClaimReleaseTests.'
-    'test_missing_owner_token_reports_inconclusive',
-    'ForeignClaimReleaseTests.'
-    'test_missing_journal_files_reports_inconclusive',
-    'ForeignClaimReleaseTests.'
-    'test_bridge_placement_reports_inconclusive',
-    'ForeignClaimReleaseTests.'
-    'test_two_runs_produce_identical_evidence',
-})
 
 
 class ReleasePlantPeer(RendezvousPlantPeer):

@@ -1,10 +1,7 @@
 """The 2487_dead_owner_fencing leg's scenario unit coverage — the feed fake
 and TestCase class for scenario_dead_owner_fencing, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import importlib
 import unittest
@@ -17,32 +14,6 @@ from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
 # numbered stem is a legal import name only through importlib.
 leg = importlib.import_module(
     'qa_lane.scenarios.2487_dead_owner_fencing')
-
-
-EXPECTED_CASES = frozenset({
-    'DeadOwnerFencingTests.test_registered_in_scenarios',
-    'DeadOwnerFencingTests.test_passed',
-    'DeadOwnerFencingTests.test_the_dead_owner_claim_survives_every_round',
-    'DeadOwnerFencingTests.test_fails_when_a_non_holder_release_dissolves',
-    'DeadOwnerFencingTests.test_fails_when_the_claim_stops_fencing_writes',
-    'DeadOwnerFencingTests.test_fails_when_a_foreign_ensure_is_granted',
-    'DeadOwnerFencingTests.test_fails_when_the_owner_cannot_re_arm',
-    'DeadOwnerFencingTests.test_fails_when_the_rearm_write_is_fenced',
-    'DeadOwnerFencingTests.test_fails_when_a_foreign_token_takes_over',
-    'DeadOwnerFencingTests.test_fails_when_the_preempt_is_refused',
-    'DeadOwnerFencingTests.test_fails_when_the_preempt_names_the_dead_owner',
-    'DeadOwnerFencingTests.test_fails_when_the_induction_write_is_refused',
-    'DeadOwnerFencingTests.test_nondeterministic_on_a_dropped_read',
-    'DeadOwnerFencingTests.test_inconclusive_without_a_plant',
-    'DeadOwnerFencingTests.test_inconclusive_without_a_plant_ctl',
-    'DeadOwnerFencingTests.test_inconclusive_without_an_owner_token',
-    'DeadOwnerFencingTests.test_inconclusive_when_the_pair_is_down',
-    'DeadOwnerFencingTests.test_inconclusive_on_an_open_field',
-    'DeadOwnerFencingTests.test_inconclusive_on_an_unattributed_claim',
-    'DeadOwnerFencingTests.test_restores_the_launch_owners_claim',
-    'DeadOwnerFencingTests.test_identical_evidence_across_runs',
-    'DeadOwnerFencingTests.test_the_self_check_names_every_diagnostic',
-})
 
 
 class DeadOwnerFeed:

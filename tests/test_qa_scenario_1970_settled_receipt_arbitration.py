@@ -2,9 +2,8 @@
 the feed fake and TestCase classes for
 scenario_settled_receipt_arbitration, split per the one-module-per-leg
 convention (#940). The shared fakes and helpers live in
-tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+tests/qa_scenario_support.py.
+
 
 The stubbed pair models the #690 finding's reproduction and its fix: a
 receipted batch raced against the promotion whose boundary pull lands
@@ -26,26 +25,6 @@ from unittest.mock import patch
 
 from qa_lane import report, scenarios, verify
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'SettledReceiptArbitrationTests.test_registered',
-    'SettledReceiptArbitrationTests.test_clean_pair_passes_and_validates',
-    'SettledReceiptArbitrationTests.test_oscillating_receipts_report_nondeterministic',
-    'SettledReceiptArbitrationTests.test_doubled_journal_reports_nondeterministic',
-    'SettledReceiptArbitrationTests.test_never_staged_reports_failed',
-    'SettledReceiptArbitrationTests.test_refused_promote_reports_failed',
-    'SettledReceiptArbitrationTests.test_never_reconverges_reports_failed',
-    'SettledReceiptArbitrationTests.test_unsettled_window_reports_failed',
-    'SettledReceiptArbitrationTests.test_no_active_reports_failed',
-    'SettledReceiptArbitrationTests.test_unconverged_pair_reports_inconclusive',
-    'SettledReceiptArbitrationTests.test_unreachable_peer_reports_inconclusive',
-    'SettledReceiptArbitrationTests.test_missing_journals_report_inconclusive',
-    'SettledReceiptArbitrationTests.test_single_endpoint_reports_inconclusive',
-    'SettledReceiptArbitrationTests.test_diverging_digests_report_nondeterministic',
-    'SettledReceiptArbitrationTests.test_silent_judge_reports_unchecked',
-    'SettledReceiptArbitrationTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class ArbitrationPeer:

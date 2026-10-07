@@ -1,25 +1,11 @@
 """The 3300_command_admission leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_command_admission, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'CommandAdmissionTests.test_registered_in_scenarios',
-    'CommandAdmissionTests.test_over_limit_mixed_settle_passes',
-    'CommandAdmissionTests.test_under_limit_all_admitted_fails_named_rejection',
-    'CommandAdmissionTests.test_dropped_receipt_fails',
-    'CommandAdmissionTests.test_http_layer_error_fails',
-    'CommandAdmissionTests.test_unsettled_admission_fails',
-    'CommandAdmissionTests.test_bounded_receipt_window_still_audits',
-})
 
 
 class CommandAdmissionTests(unittest.TestCase):

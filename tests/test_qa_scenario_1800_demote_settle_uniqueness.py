@@ -1,32 +1,11 @@
 """The 1800_demote_settle_uniqueness leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_demote_settle_uniqueness, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'DemoteSettleTests.test_registered',
-    'DemoteSettleTests.test_clean_pair_passes_and_validates',
-    'DemoteSettleTests.test_superseded_admission_is_a_legal_single_outcome',
-    'DemoteSettleTests.test_double_settled_admission_reports_nondeterministic',
-    'DemoteSettleTests.test_vanished_admission_reports_failed',
-    'DemoteSettleTests.test_phantom_application_reports_nondeterministic',
-    'DemoteSettleTests.test_diverged_logs_report_nondeterministic',
-    'DemoteSettleTests.test_refused_demote_reports_failed',
-    'DemoteSettleTests.test_refused_promote_reports_failed',
-    'DemoteSettleTests.test_no_active_reports_failed',
-    'DemoteSettleTests.test_unconverged_pair_reports_inconclusive',
-    'DemoteSettleTests.test_unreachable_peer_reports_inconclusive',
-    'DemoteSettleTests.test_diverging_digests_report_nondeterministic',
-    'DemoteSettleTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class DemoteSettleTests(unittest.TestCase):

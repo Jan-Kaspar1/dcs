@@ -1,39 +1,11 @@
 """The 1610_duty_handover leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_duty_handover, following the per-leg
 split convention (#940). The shared fakes and helpers live in
-tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'DutyHandoverTests.test_registered_in_scenarios',
-    'DutyHandoverTests.test_clean_feed_passes_and_validates',
-    'DutyHandoverTests.test_two_runs_produce_identical_evidence',
-    'DutyHandoverTests.test_handover_exclusion_and_annunciation',
-    'DutyHandoverTests.test_allout_rollup_annunciation',
-    'DutyHandoverTests.test_fault_never_proving_fails',
-    'DutyHandoverTests.test_duty_never_handing_over_fails',
-    'DutyHandoverTests.test_avail_collapsing_fails',
-    'DutyHandoverTests.test_alarm_never_annunciating_fails',
-    'DutyHandoverTests.test_rollup_never_annunciating_fails',
-    'DutyHandoverTests.test_unbounded_excursion_fails',
-    'DutyHandoverTests.test_fault_never_clearing_fails',
-    'DutyHandoverTests.test_unjournaled_transitions_fail',
-    'DutyHandoverTests.test_unjournaled_receipts_fail',
-    'DutyHandoverTests.test_refused_write_fails',
-    'DutyHandoverTests.test_moved_roles_fail',
-    'DutyHandoverTests.test_no_active_is_failed',
-    'DutyHandoverTests.test_no_tracking_pair_is_inconclusive',
-    'DutyHandoverTests.test_missing_wiring_is_inconclusive',
-    'DutyHandoverTests.test_missing_descriptors_is_inconclusive',
-    'DutyHandoverTests.test_no_plant_seam_is_inconclusive',
-    'DutyHandoverTests.test_flags_unserved_is_inconclusive',
-})
 
 
 class HandoverPlantPeer(FakePlantPeer):

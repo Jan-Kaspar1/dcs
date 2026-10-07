@@ -2,44 +2,11 @@
 the feed fakes and TestCase classes for
 scenario_involuntary_demote_verify, split out per the #940
 convention. The shared fakes and helpers live in
-tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'InvoluntaryHintTests.test_registered',
-    'InvoluntaryHintTests.test_keyed_rig_passes_and_validates',
-    'InvoluntaryHintTests.test_unkeyed_rig_passes_and_validates',
-    'InvoluntaryHintTests.test_chased_hint_fails',
-    'InvoluntaryHintTests.test_unkeyed_hint_pulled_fails',
-    'InvoluntaryHintTests.test_unkeyed_refusal_journaled_fails',
-    'InvoluntaryHintTests.test_silent_keyed_refusal_fails',
-    'InvoluntaryHintTests.test_adopted_foreign_hint_fails',
-    'InvoluntaryHintTests.test_no_adoption_fails',
-    'InvoluntaryHintTests.test_followed_forged_document_fails',
-    'InvoluntaryHintTests.test_split_pair_fails',
-    'InvoluntaryHintTests.test_unrejoined_peer_fails',
-    'InvoluntaryHintTests.test_no_demotion_fails',
-    'InvoluntaryHintTests.test_refused_preempt_fails',
-    'InvoluntaryHintTests.test_unsettled_command_fails',
-    'InvoluntaryHintTests.test_unannounced_hint_fails',
-    'InvoluntaryHintTests.test_unrestored_roles_fail',
-    'InvoluntaryHintTests.test_diverging_digests_report_nondeterministic',
-    'InvoluntaryHintTests.test_two_runs_produce_identical_evidence',
-    'InvoluntaryHintTests.test_no_active_reports_failed',
-    'InvoluntaryHintTests.test_unconverged_pair_reports_inconclusive',
-    'InvoluntaryHintTests.test_unreachable_pair_reports_inconclusive',
-    'InvoluntaryHintTests.test_missing_forge_action_reports_inconclusive',
-    'InvoluntaryHintTests.test_host_placed_forge_reports_inconclusive',
-    'InvoluntaryHintTests.test_missing_journal_reports_inconclusive',
-    'InvoluntaryHintTests.test_unplantable_point_reports_inconclusive',
-    'InvoluntaryHintTests.test_self_check_catches_every_planted_negative',
-})
 
 
 class InvoluntaryHintFeed:

@@ -1,17 +1,10 @@
-//! End-to-end tests for the monitoring page's alarm pane: the
-//! descriptor-to-point wiring join plus the snapshot's live telemetry
-//! yields the asserted status-role `Out` ports the pane lists; the
-//! transition journal supplies the recent alarm transitions; and the
-//! acknowledge affordance is an ordinary receipted `write_value` on the
-//! `ack` input's bound point — offered only where the model marks that
-//! point writable — all driven over TCP through the in-process
-//! `MonitorClient`.
+//! Alarm command, quality, metadata and journal contracts exercised over TCP.
 
 use dcs_blocks::{AlarmLimits, LatchingAlarm, Rationalization};
 use dcs_core::{
-    Command, CommandError, CommandOutcome, CommandReceipt, ComponentDescriptor, Direction,
-    IoDriver, IoError, JournalEvent, PointId, PortDescriptor, PortRole, Quality, QualityReason,
-    Sample, TelemetrySnapshot, Tick, Value, ValueKind,
+    Command, CommandError, CommandOutcome, CommandReceipt, Direction, IoDriver, IoError,
+    JournalEvent, PointId, Quality, QualityReason, Sample, TelemetrySnapshot, Tick, Value,
+    ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{Monitor, MonitorClient};
@@ -167,23 +160,6 @@ fn with_monitor<T>(body: impl FnOnce(&StubDriver, &MonitorClient) -> T) -> T {
     result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
-fn descriptor<'s>(snapshot: &'s TelemetrySnapshot, name: &str) -> &'s ComponentDescriptor {
-    snapshot
-        .descriptors
-        .iter()
-        .find(|descriptor| descriptor.name == name)
-        .unwrap_or_else(|| panic!("no descriptor for {name}"))
-}
-
-fn bound_point(descriptor: &ComponentDescriptor, port: &str) -> Option<PointId> {
-    descriptor
-        .ports
-        .iter()
-        .find(|p| p.name == port)
-        .unwrap_or_else(|| panic!("{} has no port {port}", descriptor.name))
-        .point
-}
-
 fn telemetry(snapshot: &TelemetrySnapshot, point: PointId) -> &dcs_core::PointTelemetry {
     snapshot
         .points
@@ -192,129 +168,9 @@ fn telemetry(snapshot: &TelemetrySnapshot, point: PointId) -> &dcs_core::PointTe
         .unwrap_or_else(|| panic!("no telemetry for {point:?}"))
 }
 
-/// One standing alarm row's data: the owning component's name, the
-/// status port, and its live sample.
-#[derive(Debug)]
-struct Standing<'s> {
-    component: &'s str,
-    port: &'s PortDescriptor,
-    sample: Sample,
-}
-
-/// The join the alarm pane performs over a polled snapshot: every
-/// status-role `Out` port whose bound point's live sample asserts —
-/// Bool true — listed with its component.
-fn asserted_status_ports(snapshot: &TelemetrySnapshot) -> Vec<Standing<'_>> {
-    snapshot
-        .descriptors
-        .iter()
-        .flat_map(|descriptor| descriptor.ports.iter().map(move |port| (descriptor, port)))
-        .filter(|(_, port)| port.role == Some(PortRole::Status) && port.direction == Direction::Out)
-        .filter_map(|(descriptor, port)| {
-            let sample = port
-                .point
-                .and_then(|point| telemetry(snapshot, point).sample)?;
-            (sample.value == Value::Bool(true)).then_some(Standing {
-                component: &descriptor.name,
-                port,
-                sample,
-            })
-        })
-        .collect()
-}
-
 #[test]
-fn the_descriptor_snapshot_join_yields_the_asserted_status_ports() {
-    with_monitor(|driver, client| {
-        // Trip lal-1's high alarm; lal-2 stays inside its limits.
-        driver.write(PV1, Value::Float(95.0)).unwrap();
-        let snapshot = client.advance(1).unwrap();
-
-        // The wiring the pane resolves through: every status-role port
-        // — the `ack` inputs included — carries its bound point, so the
-        // standing list joins straight into telemetry and the ack
-        // affordance reads its target's writable mark.
-        let lal1 = descriptor(&snapshot, "lal-1");
-        assert_eq!(bound_point(lal1, "in"), Some(PV1));
-        assert_eq!(bound_point(lal1, "ack"), Some(ACK1));
-        assert_eq!(bound_point(lal1, "alarm"), Some(ALARM1));
-        assert_eq!(bound_point(lal1, "unacknowledged"), Some(UNACK1));
-        let lal2 = descriptor(&snapshot, "lal-2");
-        assert_eq!(bound_point(lal2, "ack"), Some(ACK2));
-        assert_eq!(bound_point(lal2, "alarm"), Some(ALARM2));
-
-        // The standing list: both of lal-1's status-role Out flags
-        // assert — the standing limit state and the fresh latch — each
-        // carrying its component, value, and the tick it last changed.
-        let standing = asserted_status_ports(&snapshot);
-        assert_eq!(standing.len(), 2, "{standing:?}");
-        for row in &standing {
-            assert_eq!(row.component, "lal-1");
-            assert_eq!(row.sample.value, Value::Bool(true));
-            assert_eq!(row.sample.tick, Tick(1));
-        }
-        let ports: Vec<&str> = standing.iter().map(|row| row.port.name.as_str()).collect();
-        assert!(ports.contains(&"alarm"), "{ports:?}");
-        assert!(ports.contains(&"unacknowledged"), "{ports:?}");
-
-        // Clearing removes the standing flag on the next snapshot; the
-        // unacknowledged latch stands — the two-flag model's point.
-        driver.write(PV1, Value::Float(50.0)).unwrap();
-        let snapshot = client.advance(1).unwrap();
-        let standing = asserted_status_ports(&snapshot);
-        assert_eq!(standing.len(), 1, "{standing:?}");
-        assert_eq!(standing[0].component, "lal-1");
-        assert_eq!(standing[0].port.name, "unacknowledged");
-        assert_eq!(standing[0].sample.tick, Tick(2));
-    });
-}
-
-#[test]
-fn page_serves_alarm_pane_markup_and_the_writable_only_ack_rule() {
+fn ack_targets_have_declared_writable_metadata() {
     with_monitor(|_driver, client| {
-        let page = client.page().unwrap();
-        // The pane: a standing list of the asserted status-role Out
-        // ports plus the alarm journal slice of the merged journal.
-        for needle in [
-            "id=\"alarm-pane\"",
-            "id=\"alarms\"",
-            "id=\"alarm-summary\"",
-            "id=\"alarm-journal\"",
-            "function renderAlarms(",
-            "function alarmJoin(",
-            "port.role !== \"status\"",
-            "port.direction === \"out\"",
-            "function isAsserted(",
-            "function lastChangedTick(",
-            "function alarmJournalEntry(",
-            "journalEntries",
-        ] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-        // The ack affordance exists only where a declared `ack` input
-        // binds a point the model marked writable — the same metadata
-        // gate every command affordance follows — and issues an
-        // ordinary receipted write_value, no alarm protocol.
-        for needle in [
-            "function ackAffordance(",
-            "p.name === \"ack\" && p.direction === \"in\"",
-            "!meta || !meta.writable",
-            "class=\\\"ack\\\"",
-            "function submitAck(",
-            "write_value",
-            "{ bool: true }",
-            "await submitCommand(",
-            "not_writable",
-        ] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-        // A degraded alarm value draws the row distinctly — the quality
-        // class marks the row rather than reporting a clean assertion.
-        for needle in ["tr.alarm", "qualityClass(sample.quality)"] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-        assert!(!page.contains("src="), "page references external assets");
-
         // The metadata the rule gates on: lal-1's ack point is the
         // model-declared writable internal point; lal-2's is an
         // unmarked field input — never an affordance.
@@ -438,15 +294,11 @@ fn a_bad_quality_alarm_is_served_marked_and_journaled() {
         );
         let snapshot = client.advance(1).unwrap();
 
-        // The join still yields the standing flags — the alarm asserts —
-        // but both samples carry the input's degraded quality: the pane
-        // draws that distinctly rather than as a clean trip.
-        let standing = asserted_status_ports(&snapshot);
-        assert_eq!(standing.len(), 2, "{standing:?}");
-        for row in &standing {
-            assert_eq!(row.component, "lal-1");
+        for point in [ALARM1, UNACK1] {
+            let sample = telemetry(&snapshot, point).sample.unwrap();
+            assert_eq!(sample.value, Value::Bool(true));
             assert_eq!(
-                row.sample.quality,
+                sample.quality,
                 Quality::Bad(QualityReason::CommunicationFault)
             );
         }

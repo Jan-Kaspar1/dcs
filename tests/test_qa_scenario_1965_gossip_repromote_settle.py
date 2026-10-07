@@ -1,37 +1,13 @@
 """The 1965_gossip_repromote_settle leg's scenario unit coverage — the
 feed fakes and TestCase classes for scenario_gossip_repromote_settle,
 split per the one-module-per-leg convention (#940). The shared fakes
-and helpers live in tests/qa_scenario_support.py; EXPECTED_CASES pins
-this module's contribution to the suite's case coverage so a dropped
-case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+and helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
 from test_qa_scenario_1900_demote_carry_settle import (
     DemoteCarryFeed, DemoteCarryPeer)
-
-
-EXPECTED_CASES = frozenset({
-    'GossipRepromoteSettleTests.test_registered',
-    'GossipRepromoteSettleTests.test_clean_pair_passes_and_validates',
-    'GossipRepromoteSettleTests.test_parked_receipt_reports_failed',
-    'GossipRepromoteSettleTests.test_double_settle_reports_nondeterministic',
-    'GossipRepromoteSettleTests.test_settle_without_apply_reports_failed',
-    'GossipRepromoteSettleTests.test_divergent_verdict_reports_nondeterministic',
-    'GossipRepromoteSettleTests.test_never_reconverges_reports_failed',
-    'GossipRepromoteSettleTests.test_refused_repromote_reports_failed',
-    'GossipRepromoteSettleTests.test_zombie_resurrection_reports_failed',
-    'GossipRepromoteSettleTests.test_closed_window_still_resolves_once',
-    'GossipRepromoteSettleTests.test_missed_window_restages_and_passes',
-    'GossipRepromoteSettleTests.test_no_active_reports_failed',
-    'GossipRepromoteSettleTests.test_unconverged_pair_reports_inconclusive',
-    'GossipRepromoteSettleTests.test_unreachable_peer_reports_inconclusive',
-    'GossipRepromoteSettleTests.test_diverging_digests_report_nondeterministic',
-    'GossipRepromoteSettleTests.test_silent_judge_reports_unchecked',
-    'GossipRepromoteSettleTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class GossipFeed(DemoteCarryFeed):

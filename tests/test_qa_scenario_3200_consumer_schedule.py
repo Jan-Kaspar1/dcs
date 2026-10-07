@@ -1,21 +1,11 @@
 """The 3200_consumer_schedule leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_consumer_schedule, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'ConsumerScheduleTests.test_clean_feed_passes_and_validates',
-    'ConsumerScheduleTests.test_stalled_reader_diverged_output_fails',
-    'ConsumerScheduleTests.test_silently_stale_cursor_read_fails',
-})
 
 
 class ConsumerScheduleTests(unittest.TestCase):

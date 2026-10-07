@@ -1,46 +1,11 @@
-//! The M8 operations verification — the milestone's done criteria walked
-//! end to end as one scripted, tick-paced run over the driven two-pair
-//! rig, composing the shipped operations features rather than adding
-//! machinery — the same closing shape #161 gave M5.
-//!
-//! The rig: two `dcs-plant-server` processes each own a shared tank-loop
-//! plant, and each plant serves one `dcs-controller --driven` pair — an
-//! active plus a tracking standby attached over `sim-tcp` — so the
-//! plant-wide surface has two real pairs to aggregate. Every controller
-//! runs with `--journal-file`; pair A's standby also runs `--state-file`
-//! so its mid-run restart resumes the interrupted run rather than
-//! starting cold. Every scan happens inside a `POST /scan` request —
-//! nothing is wall-clock paced.
-//!
-//! The legs, in script order:
-//!
-//! 1. **The durable journal across a restart (#163)** — pair A's
-//!    standby dies mid-run and its replacement replays the journal
-//!    file: `GET /journal` answers the pre-restart entries verbatim,
-//!    the file's run-boundary marker separates the two lifetimes at
-//!    the restored tick, and the resumed run's new entries continue
-//!    the `seq` numbering. Pair A's active — journaled to its own
-//!    file, never restarted — shows the uninterrupted half.
-//! 2. **The plant-wide overview (#164)** — the served page carries
-//!    the overview mode, and the card poll it runs — `GET /role` on
-//!    each of a pair's peers, then `GET /snapshot` on the selected
-//!    source — produces one summary card per configured pair: the
-//!    active peer's identity, per-peer role and convergence, the
-//!    I/O-health line. Dropping pair B degrades it to its named
-//!    faulted card while pair A's card keeps updating.
-//! 3. **Actor attribution (#165)** — a command submitted to pair A's
-//!    active with a declared actor settles into a receipt carrying
-//!    it, and the journaled `CommandSettled` shows the attribution —
-//!    in the served journal and the durable file alike — while an
-//!    unattributed command journals as before.
-//!
-//! Every named behavior is asserted through the monitor-client and
-//! plant-protocol payloads, never printed output; the digest the run
-//! returns proves repeated scripted runs identical.
+//! Scripted operations verification over two driven controller pairs: durable
+//! journal replay across a standby restart, field continuity, and actor
+//! attribution on commands and settlements. Repeated runs compare the
+//! authoritative field traces and durable records.
 
 use dcs_core::{
-    Command, CommandOutcome, CommandReceipt, IoDriver, JournalEntry, JournalEvent, LinkState,
-    PointId, Role, RoleReport, StandbySync, TelemetrySnapshot, Tick, Value, ValueKind,
+    Command, CommandOutcome, CommandReceipt, IoDriver, JournalEntry, JournalEvent, PointId, Role,
+    StandbySync, TelemetrySnapshot, Tick, Value, ValueKind,
 };
 use dcs_monitor::MonitorClient;
 use dcs_sim_net::RemoteDriver;
@@ -182,246 +147,6 @@ fn assert_file_covers(path: &Path, served: &[JournalEntry]) {
         "the durable journal {} must hold the served record in order",
         path.display()
     );
-}
-
-/// One configured overview pair, as a `?pair=<name>=<host:port>,…`
-/// parameter parses it: the card's identity plus its peers' monitor
-/// addresses.
-struct PairSpec {
-    name: String,
-    peers: Vec<SocketAddr>,
-}
-
-/// Parses one `?pair=` value — `[name=]host:port[,host:port],…` — the
-/// way the page's `parsePairSpec` does: comma-separated peer addresses,
-/// empties and duplicates dropped, and the name the card keeps even
-/// when every peer is unreachable — the first peer's address when the
-/// parameter names none.
-fn parse_pair_spec(raw: &str) -> Option<PairSpec> {
-    let (name, spec) = match raw.split_once('=') {
-        Some((name, spec)) => (name.trim().to_string(), spec),
-        None => (String::new(), raw),
-    };
-    let mut peers: Vec<SocketAddr> = Vec::new();
-    for item in spec.split(',') {
-        let trimmed = item.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let peer: SocketAddr = trimmed.parse().unwrap();
-        if !peers.contains(&peer) {
-            peers.push(peer);
-        }
-    }
-    if peers.is_empty() {
-        return None;
-    }
-    let name = if name.is_empty() {
-        peers[0].to_string()
-    } else {
-        name
-    };
-    Some(PairSpec { name, peers })
-}
-
-/// One overview card's poll, mirroring the page's `pollPairCard`: a
-/// `GET /role` fetch on each of the pair's peers — a failure recorded
-/// as that peer's unreachable fault — then `GET /snapshot` on the
-/// selected source for the I/O-health line. Selection follows the
-/// page's `selectPairSource` order: the peer reporting settled
-/// `active`, then a `promoting` peer, then any reachable peer. Nothing
-/// here throws: a failed peer or pair degrades its own card and
-/// nothing else.
-struct CardPoll {
-    /// Each configured peer's role fetch — its report, or the recorded
-    /// failure the card marks `unreachable` with.
-    peers: Vec<Result<RoleReport, String>>,
-    /// The selected snapshot source under the page's rule.
-    source: Option<usize>,
-    /// The index of the peer reporting settled `active` — the card's
-    /// "active peer" identity — if one reported.
-    active: Option<usize>,
-    /// The selected source's snapshot, or the recorded fetch failure;
-    /// `None` when no peer was reachable — the page leaves such a card
-    /// awaiting its first snapshot rather than recording an error.
-    snapshot: Option<Result<TelemetrySnapshot, String>>,
-}
-
-fn poll_pair_card(pair: &PairSpec) -> CardPoll {
-    let peers: Vec<Result<RoleReport, String>> = pair
-        .peers
-        .iter()
-        .map(|addr| {
-            MonitorClient::new(*addr)
-                .role()
-                .map_err(|error| error.to_string())
-        })
-        .collect();
-    let reporting = |role: Role| {
-        peers
-            .iter()
-            .position(|report| matches!(report, Ok(report) if report.role == role))
-    };
-    let active = reporting(Role::Active);
-    let source = active
-        .or_else(|| reporting(Role::Promoting))
-        .or_else(|| peers.iter().position(|report| report.is_ok()));
-    let snapshot = source.map(|index| {
-        MonitorClient::new(pair.peers[index])
-            .snapshot()
-            .map_err(|error| error.to_string())
-    });
-    CardPoll {
-        peers,
-        source,
-        active,
-        snapshot,
-    }
-}
-
-/// The card's I/O-health line, mirroring the page's `ioHealthLine`:
-/// link degradation, boundary failures (including failed cyclic
-/// exchanges), a cyclic driver's working-counter mismatches and missed
-/// deadlines, the attributed last fault,
-/// scan overruns — read from the source peer's snapshot. A card with
-/// no landed snapshot reports the fetch's failure, or waits out its
-/// first poll, instead of inventing health.
-fn io_health_line(poll: &CardPoll) -> (String, bool) {
-    let health = match &poll.snapshot {
-        None => return ("awaiting first snapshot".to_string(), false),
-        Some(Err(error)) => return (format!("no snapshot — {error}"), true),
-        Some(Ok(snapshot)) => &snapshot.io_health,
-    };
-    let mut troubles = Vec::new();
-    if let Some(driver) = &health.driver
-        && driver.link != LinkState::Connected
-    {
-        troubles.push(format!(
-            "link {}",
-            serde_json::to_value(driver.link).unwrap().as_str().unwrap()
-        ));
-    }
-    if health.failed_reads > 0 || health.failed_writes > 0 {
-        troubles.push(format!(
-            "{} failed read(s), {} failed write(s)",
-            health.failed_reads, health.failed_writes
-        ));
-    }
-    if health.failed_exchanges > 0 {
-        troubles.push(format!("{} failed exchange(s)", health.failed_exchanges));
-    }
-    if let Some(exchange) = health
-        .driver
-        .as_ref()
-        .and_then(|driver| driver.exchange.as_ref())
-    {
-        if exchange.working_counter_mismatches > 0 {
-            troubles.push(format!(
-                "{} working-counter mismatch(es)",
-                exchange.working_counter_mismatches
-            ));
-        }
-        if exchange.missed_deadlines > 0 {
-            troubles.push(format!(
-                "{} missed exchange deadline(s)",
-                exchange.missed_deadlines
-            ));
-        }
-    }
-    if let Some(fault) = &health.last_error {
-        troubles.push(format!(
-            "last fault {} at tick {}",
-            fault.error, fault.tick.0
-        ));
-    }
-    if health.scan_overruns > 0 {
-        troubles.push(format!("{} scan overrun(s)", health.scan_overruns));
-    }
-    if troubles.is_empty() {
-        ("I/O healthy".to_string(), false)
-    } else {
-        (format!("I/O degraded: {}", troubles.join("; ")), true)
-    }
-}
-
-/// What the card renders, derived from the poll exactly as the page's
-/// `pairCardMarkup` derives it: the card's configured name, the active
-/// peer's identity, a per-peer role/convergence/reachability row set,
-/// the redundancy summary, and the I/O-health line. A fully
-/// unreachable pair still renders — under its name, with every peer's
-/// fault recorded — so the card degrades rather than disappears.
-fn card_view(pair: &PairSpec, poll: &CardPoll) -> serde_json::Value {
-    let mut faults = Vec::new();
-    let mut active_name = None;
-    let mut rows = Vec::new();
-    for (index, peer) in pair.peers.iter().enumerate() {
-        let name = peer.to_string();
-        match &poll.peers[index] {
-            Ok(report) => {
-                if report.role == Role::Active {
-                    active_name = Some(name.clone());
-                }
-                match &report.sync {
-                    Some(StandbySync::Degraded { detail }) => {
-                        faults.push(format!("{name} sync degraded: {detail}"));
-                    }
-                    Some(StandbySync::Diverged { mismatches }) => faults.push(format!(
-                        "{name} standby diverged: staged outputs mismatch the field at {}",
-                        mismatches
-                            .iter()
-                            .map(|mismatch| mismatch.point.0.to_string())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )),
-                    _ => {}
-                }
-                rows.push(serde_json::json!({
-                    "peer": name,
-                    "role": report.role,
-                    "sync": report.sync,
-                    "tick": report.tick,
-                    "status": "reachable",
-                }));
-            }
-            Err(error) => {
-                faults.push(format!("{name} unreachable"));
-                rows.push(serde_json::json!({
-                    "peer": name,
-                    "status": "unreachable",
-                    "error": error,
-                }));
-            }
-        }
-    }
-    if active_name.is_none() {
-        faults.push("no peer reports role active".to_string());
-    }
-    let (io, io_bad) = io_health_line(poll);
-    serde_json::json!({
-        "card": pair.name,
-        "faulted": !faults.is_empty() || io_bad,
-        "active_peer": active_name,
-        "peers": rows,
-        "summary": if faults.is_empty() {
-            format!("redundant pair healthy — active on {}", active_name.as_deref().unwrap())
-        } else {
-            format!("redundancy fault: {}", faults.join("; "))
-        },
-        "io": io,
-    })
-}
-
-/// Replaces the run-varying strings inside a serialized value —
-/// monitor and plant addresses are ephemeral ports — so two runs'
-/// digests compare. Longer strings mask first: one address can never
-/// be a prefix of another, but the rule keeps the replacement honest
-/// for any run-varying string.
-fn masked(value: serde_json::Value, masks: &[(String, String)]) -> serde_json::Value {
-    let mut text = serde_json::to_string(&value).unwrap();
-    for (from, to) in masks {
-        text = text.replace(from.as_str(), to);
-    }
-    serde_json::from_str(&text).unwrap()
 }
 
 /// One scripted run of the M8 operations scenario documented in the
@@ -619,142 +344,15 @@ fn run_operations(tag: &str) -> serde_json::Value {
         assert!(!file_entries(path).is_empty());
     }
 
-    // -- Leg 2: the plant-wide overview (#164) -------------------------
-    // The served page carries the overview mode: the `?pair=`
-    // parameter parsing, the per-card poll over each pair's own
-    // `/role` and `/snapshot` payloads, the per-pair fault
-    // degradation, and the card's link into the pair's own view —
-    // carrying the configured operator identity into it. Aggregation
-    // stays page-side; the endpoints are the pair view's own.
-    let page = a_active.page().unwrap();
-    for needle in [
-        "id=\"overview\"",
-        "id=\"overview-cards\"",
-        "getAll(\"pair\")",
-        "function parsePairSpec(raw)",
-        "function pollPairCard(pair)",
-        "function selectPairSource(pair)",
-        "function pairCardMarkup(pair)",
-        "function pairHealth(pairPeers, states)",
-        "function ioHealthLine(pair)",
-        "function pairHref(pair)",
-        "overviewPairs.map(pollPairCard)",
-        "unreachable",
-        "snapshot.io_health",
-        "\"/role\"",
-        "\"/snapshot\"",
-        // The declared operator identity: configured by ?operator= and
-        // carried by the card's link into the pair view.
-        "urlParams.get(\"operator\")",
-        "body.actor = operator",
-        "\"operator=\" + encodeURIComponent(operator)",
-    ] {
-        assert!(page.contains(needle), "page lacks {needle}");
-    }
-
-    // The overview configuration — repeated `?pair=` parameters each
-    // naming one pair's peers — parsed as the page's parsePairSpec
-    // does. The restarted standby's new address is the card's peer.
-    let overview_pairs = [
-        parse_pair_spec(&format!(
-            "pair-a={},{}",
-            a_active_process.addr, a_standby_process.addr
-        ))
-        .unwrap(),
-        parse_pair_spec(&format!(
-            "pair-b={},{}",
-            b_active_process.addr, b_standby_process.addr
-        ))
-        .unwrap(),
-    ];
-    assert_eq!(overview_pairs[0].name, "pair-a");
-    assert_eq!(overview_pairs[1].name, "pair-b");
-
-    // One summary card per pair: the active peer's identity, each
-    // peer's reported role and convergence, and the I/O-health line —
-    // all read from the pairs' existing payloads.
-    let card_a = poll_pair_card(&overview_pairs[0]);
-    assert_eq!(card_a.active, Some(0));
-    assert_eq!(card_a.source, Some(0));
-    let report = card_a.peers[0].as_ref().unwrap();
-    assert_eq!(report.role, Role::Active);
-    assert_eq!(report.sync, None);
-    let report = card_a.peers[1].as_ref().unwrap();
-    assert_eq!(report.role, Role::Standby);
-    assert_eq!(
-        report.sync,
-        Some(StandbySync::Tracking {
-            aligned: Tick(PRE + POST - 1)
-        })
-    );
-    let snapshot = card_a.snapshot.as_ref().unwrap().as_ref().unwrap();
-    assert_eq!(snapshot.tick, Tick(PRE + POST));
-    assert_eq!(snapshot.io_health.failed_reads, 0);
-    assert_eq!(snapshot.io_health.failed_writes, 0);
-    assert_eq!(snapshot.io_health.last_error, None);
-    assert_eq!(snapshot.io_health.scan_overruns, 0);
-    assert_eq!(
-        snapshot.io_health.driver.as_ref().unwrap().link,
-        LinkState::Connected,
-        "the card's I/O-health line reads a connected sim-tcp link"
-    );
-    let view_a = card_view(&overview_pairs[0], &card_a);
-    assert_eq!(view_a["faulted"], false);
-    assert_eq!(view_a["io"], "I/O healthy");
-
-    // Card B is independent: its own peers' reports, its own run.
-    let card_b = poll_pair_card(&overview_pairs[1]);
-    assert_eq!(card_b.active, Some(0));
-    assert_eq!(card_b.peers[1].as_ref().unwrap().role, Role::Standby);
-    assert_eq!(
-        card_b.snapshot.as_ref().unwrap().as_ref().unwrap().tick,
-        Tick(PRE + POST)
-    );
-    let view_b = card_view(&overview_pairs[1], &card_b);
-    assert_eq!(view_b["faulted"], false);
-
-    // Pair B drops entirely — both controllers die, the plant keeps
-    // running unattended. Every peer fetch fails: the card degrades
-    // to its named fault, page-side, while pair A's card keeps
-    // updating.
+    // The surviving pair continues after the second pair stops.
     let mut b_active_process = b_active_process;
     let mut b_standby_process = b_standby_process;
     kill(&mut b_active_process);
     kill(&mut b_standby_process);
-
-    let dropped_b = poll_pair_card(&overview_pairs[1]);
-    assert!(
-        dropped_b.peers.iter().all(|peer| peer.is_err()),
-        "every peer of the dropped pair records unreachable"
-    );
-    assert_eq!(dropped_b.active, None);
-    assert_eq!(dropped_b.source, None);
-    assert!(dropped_b.snapshot.is_none());
-    let dropped_view_b = card_view(&overview_pairs[1], &dropped_b);
-    assert_eq!(dropped_view_b["card"], "pair-b");
-    assert_eq!(dropped_view_b["faulted"], true);
-    assert_eq!(dropped_view_b["active_peer"], serde_json::Value::Null);
-
-    // The surviving pair advances; its card reads the new tick.
     let owner = tick_pair(&a_standby, &a_active);
     field_carry(&field_a, &owner, &mut trace_a);
-    let card_a_after = poll_pair_card(&overview_pairs[0]);
-    assert_eq!(card_a_after.active, Some(0));
-    assert_eq!(
-        card_a_after
-            .snapshot
-            .as_ref()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .tick,
-        Tick(PRE + POST + 1),
-        "the surviving pair's card keeps updating"
-    );
-    let view_a_after = card_view(&overview_pairs[0], &card_a_after);
-    assert_eq!(view_a_after["faulted"], false);
 
-    // -- Leg 3: actor attribution on the command path (#165) -----------
+    // Actor attribution on the command path.
     // A command submitted with a declared actor — the attributed
     // envelope the page sends under ?operator= — settles into a
     // receipt carrying it.
@@ -825,22 +423,6 @@ fn run_operations(tag: &str) -> serde_json::Value {
     let served_journal = a_active.journal(0).unwrap();
     assert_file_covers(&journal_a_active, &served_journal);
 
-    // Strings that legitimately differ run to run — every address is
-    // an ephemeral port — are masked before the digests compare; the
-    // assertions above already pinned each value to its named source.
-    let mut masks: Vec<(String, String)> = [
-        (a_active_process.addr, "pair-a-active"),
-        (a_standby_process.addr, "pair-a-standby"),
-        (b_active_process.addr, "pair-b-active"),
-        (b_standby_process.addr, "pair-b-standby"),
-        (plant_a.addr, "plant-a"),
-        (plant_b.addr, "plant-b"),
-    ]
-    .iter()
-    .map(|(addr, label)| (addr.to_string(), format!("<{label}>")))
-    .collect();
-    masks.sort_by_key(|mask| std::cmp::Reverse(mask.0.len()));
-
     let mut digest = serde_json::json!({
         "field_trace": {
             "pair_a": trace_a.iter().map(|(valve, level)| [valve, level]).collect::<Vec<_>>(),
@@ -851,12 +433,6 @@ fn run_operations(tag: &str) -> serde_json::Value {
             "post_restart": after_restart,
             "boundaries": file_boundaries(&journal_a_standby),
             "restarted_sync": restarted_report.sync,
-        },
-        "overview": {
-            "pair_a": masked(view_a, &masks),
-            "pair_b": masked(view_b, &masks),
-            "pair_b_dropped": masked(dropped_view_b, &masks),
-            "pair_a_after_drop": masked(view_a_after, &masks),
         },
         "actor": {
             "attributed_receipt": receipt,

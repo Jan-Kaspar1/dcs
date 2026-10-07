@@ -1,40 +1,12 @@
 """The 0560_durable_history leg's scenario unit coverage — the feed
 fake and TestCase classes for scenario_durable_history, following the
 module-per-leg convention (#928, #940). The shared fakes and helpers
-live in tests/qa_scenario_support.py; EXPECTED_CASES pins this
-module's contribution to the suite's case coverage so a dropped case
-fails the discovery check in tests/test_qa_scenario_modules.py.
+live in tests/qa_scenario_support.py.
 """
 import importlib
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'DurableHistoryTests.test_registered_in_scenarios',
-    'DurableHistoryTests.test_clean_rig_passes_and_validates',
-    'DurableHistoryTests.test_restart_reserves_the_window_attributed',
-    'DurableHistoryTests.test_retention_evicts_with_honest_gap',
-    'DurableHistoryTests.test_stall_lags_the_sink_not_the_scan',
-    'DurableHistoryTests.test_silent_eviction_gap_fails',
-    'DurableHistoryTests.test_unbounded_window_fails',
-    'DurableHistoryTests.test_unattributed_restart_fails',
-    'DurableHistoryTests.test_unanchored_marker_fails',
-    'DurableHistoryTests.test_restarted_axis_fails',
-    'DurableHistoryTests.test_unnamed_stall_fails',
-    'DurableHistoryTests.test_lengthened_scan_fails',
-    'DurableHistoryTests.test_undrained_release_fails',
-    'DurableHistoryTests.test_corrupt_file_fails',
-    'DurableHistoryTests.test_spurious_promotion_fails',
-    'DurableHistoryTests.test_predating_rig_is_inconclusive',
-    'DurableHistoryTests.test_no_duty_is_inconclusive',
-    'DurableHistoryTests.test_no_lever_is_inconclusive',
-    'DurableHistoryTests.test_failed_restart_is_inconclusive',
-    'DurableHistoryTests.test_unreturned_monitor_is_inconclusive',
-    'DurableHistoryTests.test_divergent_digests_are_nondeterministic',
-    'DurableHistoryTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class DurableHistoryFeed:

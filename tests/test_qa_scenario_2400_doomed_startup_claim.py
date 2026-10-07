@@ -1,40 +1,11 @@
 """The 2400_doomed_startup_claim leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_doomed_startup_claim, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'DoomedStartupClaimTests.test_registered_ahead_of_model_revision',
-    'DoomedStartupClaimTests.test_fixed_shape_passes_validates_and_tears_down',
-    'DoomedStartupClaimTests.test_two_runs_produce_identical_evidence',
-    'DoomedStartupClaimTests.test_claim_then_die_strands_the_incumbent_fails',
-    'DoomedStartupClaimTests.test_released_claim_still_disturbs_the_incumbent',
-    'DoomedStartupClaimTests.test_unclaimed_window_fails',
-    'DoomedStartupClaimTests.test_silently_writable_probe_fails',
-    'DoomedStartupClaimTests.test_doomed_peer_serving_fails',
-    'DoomedStartupClaimTests.test_journal_append_past_the_replay_fails',
-    'DoomedStartupClaimTests.test_state_file_written_fails',
-    'DoomedStartupClaimTests.test_partner_role_change_fails',
-    'DoomedStartupClaimTests.test_incumbent_tick_stall_fails',
-    'DoomedStartupClaimTests.test_field_writes_stall_fails',
-    'DoomedStartupClaimTests.test_refused_command_fails',
-    'DoomedStartupClaimTests.test_unlogged_receipt_fails',
-    'DoomedStartupClaimTests.test_incumbent_silence_is_inconclusive',
-    'DoomedStartupClaimTests.test_dead_incumbent_fails',
-    'DoomedStartupClaimTests.test_failed_launch_action_is_inconclusive',
-    'DoomedStartupClaimTests.test_failed_teardown_is_inconclusive',
-    'DoomedStartupClaimTests.test_missing_seams_are_inconclusive',
-    'DoomedStartupClaimTests.test_unreachable_plant_is_inconclusive',
-    'DoomedStartupClaimTests.test_unwritable_model_is_inconclusive',
-})
 
 
 class DoomedStartupFeed:

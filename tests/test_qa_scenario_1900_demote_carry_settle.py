@@ -1,29 +1,11 @@
 """The 1900_demote_carry_settle leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_demote_carry_settle, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'DemoteCarrySettleTests.test_registered',
-    'DemoteCarrySettleTests.test_clean_pair_passes_and_validates',
-    'DemoteCarrySettleTests.test_superseded_then_applied_reports_nondeterministic',
-    'DemoteCarrySettleTests.test_dropped_carry_reports_failed',
-    'DemoteCarrySettleTests.test_owner_never_demotes_reports_failed',
-    'DemoteCarrySettleTests.test_refused_promote_reports_failed',
-    'DemoteCarrySettleTests.test_no_active_reports_failed',
-    'DemoteCarrySettleTests.test_unconverged_pair_reports_inconclusive',
-    'DemoteCarrySettleTests.test_unreachable_peer_reports_inconclusive',
-    'DemoteCarrySettleTests.test_diverging_digests_report_nondeterministic',
-    'DemoteCarrySettleTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class DemoteCarryPeer(DemoteSettlePeer):

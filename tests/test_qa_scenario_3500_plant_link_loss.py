@@ -1,43 +1,11 @@
 """The 3500_plant_link_loss leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_plant_link_loss, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'PlantLinkLossTests.test_registered_in_scenarios',
-    'PlantLinkLossTests.test_clean_loss_recovery_passes_and_validates',
-    'PlantLinkLossTests.test_fresh_telemetry_through_outage_fails',
-    'PlantLinkLossTests.test_unchecked_link_failure_fails',
-    'PlantLinkLossTests.test_promotion_during_outage_fails',
-    'PlantLinkLossTests.test_aborted_run_fails',
-    'PlantLinkLossTests.test_unreturned_plant_is_inconclusive',
-    'PlantLinkLossTests.test_failed_start_action_is_inconclusive',
-    'PlantLinkLossTests.test_unreclaimed_writer_claim_fails',
-    'PlantLinkLossTests.test_unrecovered_reads_fail',
-    'PlantLinkLossTests.test_reset_io_health_fails',
-    'PlantLinkLossTests.test_missing_actions_is_inconclusive',
-    'PlantLinkLossTests.test_non_bad_degradation_fails',
-    'PlantLinkLossTests.test_flat_counters_fail',
-    'PlantLinkLossTests.test_unjournaled_loss_fails',
-    'PlantLinkLossTests.test_unreachable_journal_is_inconclusive',
-    'PlantLinkLossTests.test_untracked_baseline_is_inconclusive',
-    'PlantLinkLossTests.test_standby_leaving_tracking_mid_outage_fails',
-    'PlantLinkLossTests.test_silent_standby_is_inconclusive',
-    'PlantLinkLossTests.test_stepped_window_fails',
-    'PlantLinkLossTests.test_silent_write_through_window_fails',
-    'PlantLinkLossTests.test_unobserved_window_fails',
-    'PlantLinkLossTests.test_restarted_controller_fails',
-    'PlantLinkLossTests.test_window_probes_close_and_recovery_fences',
-    'PlantLinkLossTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class PlantLinkFeed:

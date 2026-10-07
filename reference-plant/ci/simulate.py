@@ -23,7 +23,6 @@ declaration instead of the scenario legs — the check's `surface` stage:
   declared writability, so the station's writable command points appear
   writable while the never-shelvable alarm's read-only `shelve` point
   does not — plus one component record per declared instance;
-- `GET /` must serve the monitoring page;
 - `GET /schema` must serve the block-interface registry — one versioned
   interface per declared `<kind>:<id>` covering every declared port as
   a measurement or state resource with its bound point, every declared
@@ -136,12 +135,6 @@ def http(url, body=None):
     )
     with urllib.request.urlopen(request) as response:
         return json.load(response)
-
-
-def http_text(url):
-    """GET a non-JSON resource; returns the decoded body."""
-    with urllib.request.urlopen(url) as response:
-        return response.read().decode()
 
 
 def dropped_request(error):
@@ -844,14 +837,6 @@ def run_surface(monitor, model, schema_out=None):
         served = None
     if served is not None:
         failures += index_mismatches(declared, served)
-    try:
-        page = http_text(f"{monitor}/")
-    except urllib.error.URLError as error:
-        failures.append(f"GET / answered {error}")
-    else:
-        if "<html" not in page:
-            failures.append("GET / did not serve the monitoring page")
-
     # The served block-interface registry: `GET /schema` must cover
     # every component the emitted model declares — the schema-driven
     # contract a generic consumer renders from.

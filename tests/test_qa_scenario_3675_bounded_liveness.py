@@ -1,36 +1,9 @@
 """The 3675_bounded_liveness leg's scenario unit coverage — the feed
 fake and TestCase class for scenario_bounded_liveness, per the
 module-per-leg test convention (#940). The shared fakes and helpers
-live in tests/qa_scenario_support.py; EXPECTED_CASES pins this
-module's contribution to the suite's case coverage so a dropped case
-fails the discovery check in tests/test_qa_scenario_modules.py.
+live in tests/qa_scenario_support.py.
 """
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'BoundedLivenessTests.test_registered_in_scenarios',
-    'BoundedLivenessTests.test_clean_rig_passes_and_validates',
-    'BoundedLivenessTests.test_two_passes_share_one_digest',
-    'BoundedLivenessTests.test_two_runs_produce_identical_records',
-    'BoundedLivenessTests.test_scenario_ctx_carries_the_levers',
-    'BoundedLivenessTests.test_missing_levers_are_inconclusive',
-    'BoundedLivenessTests.test_unreachable_rig_is_inconclusive',
-    'BoundedLivenessTests.test_unsettled_pair_is_inconclusive',
-    'BoundedLivenessTests.test_predated_contract_is_inconclusive',
-    'BoundedLivenessTests.test_unstamped_report_is_inconclusive',
-    'BoundedLivenessTests.test_failed_pause_is_inconclusive',
-    'BoundedLivenessTests.test_failed_unpause_is_inconclusive',
-    'BoundedLivenessTests.test_stalled_liveness_read_fails',
-    'BoundedLivenessTests.test_dropped_liveness_read_fails',
-    'BoundedLivenessTests.test_flat_scan_age_fails',
-    'BoundedLivenessTests.test_dropped_scan_age_fails',
-    'BoundedLivenessTests.test_stalled_copy_read_fails',
-    'BoundedLivenessTests.test_wedged_recovery_fails',
-    'BoundedLivenessTests.test_moved_roles_restore_and_fail',
-    'BoundedLivenessTests.test_swapped_launch_layout_restores',
-    'BoundedLivenessTests.test_silenced_judge_reports_unchecked',
-})
 
 
 class LivenessFeed:

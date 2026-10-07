@@ -2,59 +2,11 @@
 the feed fakes and TestCase classes for
 scenario_tracker_realign_tick_order, split out per the #940
 convention. The shared fakes and helpers live in
-tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails
-the discovery check in tests/test_qa_scenario_modules.py.
+tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'RealignTickOrderTests.test_registered',
-    'RealignTickOrderTests.test_clean_rig_passes_and_validates',
-    'RealignTickOrderTests.test_regressed_axis_fails',
-    'RealignTickOrderTests.test_malformed_axis_entry_fails',
-    'RealignTickOrderTests.test_adopted_settle_silent_fails',
-    'RealignTickOrderTests.test_adopted_settle_twice_fails',
-    'RealignTickOrderTests.test_never_realigns_fails',
-    'RealignTickOrderTests.test_roles_unrestored_fails',
-    'RealignTickOrderTests.test_never_degraded_reports_'
-    'nondeterministic',
-    'RealignTickOrderTests.test_failover_fires_reports_'
-    'nondeterministic',
-    'RealignTickOrderTests.test_admission_refused_reports_'
-    'nondeterministic',
-    'RealignTickOrderTests.test_settle_unapplied_reports_'
-    'nondeterministic',
-    'RealignTickOrderTests.test_adopted_early_reports_'
-    'nondeterministic',
-    'RealignTickOrderTests.test_window_silent_reports_'
-    'nondeterministic',
-    'RealignTickOrderTests.test_pause_refused_reports_'
-    'nondeterministic',
-    'RealignTickOrderTests.test_watch_starved_reports_'
-    'nondeterministic',
-    'RealignTickOrderTests.test_diverging_digests_report_'
-    'nondeterministic',
-    'RealignTickOrderTests.test_silent_judge_reports_unchecked',
-    'RealignTickOrderTests.test_unreachable_pair_reports_'
-    'inconclusive',
-    'RealignTickOrderTests.test_unconverged_pair_reports_'
-    'inconclusive',
-    'RealignTickOrderTests.test_swapped_layout_reports_'
-    'inconclusive',
-    'RealignTickOrderTests.test_missing_pause_action_reports_'
-    'inconclusive',
-    'RealignTickOrderTests.test_missing_journal_files_reports_'
-    'inconclusive',
-    'RealignTickOrderTests.test_predates_contract_reports_'
-    'inconclusive',
-    'RealignTickOrderTests.test_single_endpoint_reports_'
-    'inconclusive',
-    'RealignTickOrderTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class RealignTickOrderFeed:

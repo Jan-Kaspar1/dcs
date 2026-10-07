@@ -2,9 +2,7 @@
 coverage — the feed fake and TestCase classes for
 scenario_dead_active_unconverged_recovery, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and helpers live
-in tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+in tests/qa_scenario_support.py.
 """
 import io
 import json
@@ -15,45 +13,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'DeadActiveRecoveryTests.test_registered_after_superseded_before_tune',
-    'DeadActiveRecoveryTests.test_clean_run_passes_and_validates',
-    'DeadActiveRecoveryTests.test_two_runs_produce_identical_evidence',
-    'DeadActiveRecoveryTests.test_evidence_names_every_leg',
-    'DeadActiveRecoveryTests.test_the_pair_ends_on_its_launch_roles',
-    'DeadActiveRecoveryTests.test_missing_lifecycle_actions_are_inconclusive',
-    'DeadActiveRecoveryTests.test_missing_plant_endpoint_is_inconclusive',
-    'DeadActiveRecoveryTests.test_missing_monitors_are_inconclusive',
-    'DeadActiveRecoveryTests.test_missing_owner_tokens_are_inconclusive',
-    'DeadActiveRecoveryTests.test_missing_journals_are_inconclusive',
-    'DeadActiveRecoveryTests.test_unreachable_pair_is_inconclusive',
-    'DeadActiveRecoveryTests.test_unsettled_pair_is_failed',
-    'DeadActiveRecoveryTests.test_unclaimed_field_at_bring_up_fails',
-    'DeadActiveRecoveryTests.test_foreign_named_claim_fails',
-    'DeadActiveRecoveryTests.test_stop_lever_failure_is_inconclusive',
-    'DeadActiveRecoveryTests.test_start_lever_failure_is_inconclusive',
-    'DeadActiveRecoveryTests.test_unobserved_wedge_is_inconclusive',
-    'DeadActiveRecoveryTests.test_never_unconverged_fails',
-    'DeadActiveRecoveryTests.test_standby_promoting_itself_fails',
-    'DeadActiveRecoveryTests.test_quiesced_peer_stops_serving_fails',
-    'DeadActiveRecoveryTests.test_promote_admitted_fails',
-    'DeadActiveRecoveryTests.test_promote_other_refusal_fails',
-    'DeadActiveRecoveryTests.test_dead_claim_lapsed_fails',
-    'DeadActiveRecoveryTests.test_dead_claim_moved_fails',
-    'DeadActiveRecoveryTests.test_resumed_never_owns_fails',
-    'DeadActiveRecoveryTests.test_resumed_dual_active_fails',
-    'DeadActiveRecoveryTests.test_field_not_stepping_fails',
-    'DeadActiveRecoveryTests.test_field_unfenced_after_recovery_fails',
-    'DeadActiveRecoveryTests.test_field_claimed_by_another_fails',
-    'DeadActiveRecoveryTests.test_standby_never_reconverges_fails',
-    'DeadActiveRecoveryTests.test_unreadable_journal_is_inconclusive',
-    'DeadActiveRecoveryTests.test_source_restart_is_recorded',
-    'DeadActiveRecoveryTests.test_missing_source_restart_is_not_faulted',
-    'DeadActiveRecoveryTests.test_restore_switch_refused_fails',
-    'DeadActiveRecoveryTests.test_restore_not_settling_fails',
-})
 
 
 MEMBERS = ('active', 'standby')

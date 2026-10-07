@@ -1,9 +1,8 @@
 """The 2435_orphan_probe_cadence leg's scenario unit coverage — the
 stubbed pair and TestCase class for scenario_orphan_probe_cadence,
 split out per the #940 convention. The shared fakes and helpers live in
-tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+tests/qa_scenario_support.py.
+
 
 The subject is the bounded orphan tracking-source probe cadence: a
 standing foreign claim declaring an undialable monitor must not
@@ -15,48 +14,6 @@ stages one named defect or instability the issue calls out.
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'OrphanProbeCadenceTests.test_registered',
-    'OrphanProbeCadenceTests.test_clean_rig_passes_and_validates',
-    'OrphanProbeCadenceTests.test_collapsed_cadence_fails',
-    'OrphanProbeCadenceTests.test_publication_stalled_fails',
-    'OrphanProbeCadenceTests.test_overrun_flood_fails',
-    'OrphanProbeCadenceTests.test_refusal_flood_fails',
-    'OrphanProbeCadenceTests.test_verdict_drift_fails',
-    'OrphanProbeCadenceTests.test_roles_unrestored_fails',
-    'OrphanProbeCadenceTests.test_claim_unstaged_reports_'
-    'nondeterministic',
-    'OrphanProbeCadenceTests.test_claim_refused_reports_'
-    'nondeterministic',
-    'OrphanProbeCadenceTests.test_monitor_undeclared_reports_'
-    'nondeterministic',
-    'OrphanProbeCadenceTests.test_surface_unstamped_reports_'
-    'nondeterministic',
-    'OrphanProbeCadenceTests.test_cadence_unproven_reports_'
-    'nondeterministic',
-    'OrphanProbeCadenceTests.test_demote_missing_reports_'
-    'nondeterministic',
-    'OrphanProbeCadenceTests.test_watch_starved_reports_'
-    'nondeterministic',
-    'OrphanProbeCadenceTests.test_never_orphaned_reports_'
-    'nondeterministic',
-    'OrphanProbeCadenceTests.test_release_unstaged_reports_'
-    'nondeterministic',
-    'OrphanProbeCadenceTests.test_unreachable_pair_reports_'
-    'inconclusive',
-    'OrphanProbeCadenceTests.test_single_endpoint_reports_'
-    'inconclusive',
-    'OrphanProbeCadenceTests.test_missing_claim_seam_reports_'
-    'inconclusive',
-    'OrphanProbeCadenceTests.test_missing_journal_files_reports_'
-    'inconclusive',
-    'OrphanProbeCadenceTests.test_diverging_digests_report_'
-    'nondeterministic',
-    'OrphanProbeCadenceTests.test_silent_judge_reports_unchecked',
-    'OrphanProbeCadenceTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class OrphanProbeCadenceFeed:

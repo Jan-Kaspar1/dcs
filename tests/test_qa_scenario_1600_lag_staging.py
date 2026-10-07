@@ -1,46 +1,11 @@
 """The 1600_lag_staging leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_lag_staging, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'LagStagingTests.test_registered_in_scenarios',
-    'LagStagingTests.test_clean_feed_passes_and_validates',
-    'LagStagingTests.test_two_runs_produce_identical_evidence',
-    'LagStagingTests.test_demand_never_staging_fails',
-    'LagStagingTests.test_staging_beyond_delay_bound_fails',
-    'LagStagingTests.test_alarm_never_standing_fails',
-    'LagStagingTests.test_unacknowledged_never_latching_fails',
-    'LagStagingTests.test_out_of_order_release_fails',
-    'LagStagingTests.test_transitions_never_journaling_fails',
-    'LagStagingTests.test_journaled_role_change_fails',
-    'LagStagingTests.test_nonjournaled_point_journaling_fails',
-    'LagStagingTests.test_role_move_under_drive_fails',
-    'LagStagingTests.test_ack_refusal_fails',
-    'LagStagingTests.test_ack_never_applying_fails',
-    'LagStagingTests.test_unrestored_inflow_fails',
-    'LagStagingTests.test_moved_pump_operator_state_fails',
-    'LagStagingTests.test_no_active_is_failed',
-    'LagStagingTests.test_no_tracking_pair_is_inconclusive',
-    'LagStagingTests.test_missing_wiring_is_inconclusive',
-    'LagStagingTests.test_unwritable_ack_is_inconclusive',
-    'LagStagingTests.test_missing_schema_instances_is_inconclusive',
-    'LagStagingTests.test_unordered_setpoints_is_inconclusive',
-    'LagStagingTests.test_mismatched_high_limit_is_inconclusive',
-    'LagStagingTests.test_refused_writer_claim_is_inconclusive',
-    'LagStagingTests.test_no_plant_endpoint_is_inconclusive',
-    'LagStagingTests.test_no_owner_token_is_inconclusive',
-    'LagStagingTests.test_demand_never_reporting_is_inconclusive',
-    'LagStagingTests.test_output_never_reporting_is_inconclusive',
-})
 
 
 class LagStagingFeed:

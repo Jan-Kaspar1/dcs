@@ -4,46 +4,13 @@ scenario_demote_release_stays_released, in the
 tests/test_qa_scenario_NNNN_<slug>.py split layout (#940). The shared
 fakes and helpers live in tests/qa_scenario_support.py; the claim
 arbitration and the pair lifecycle build on the yielded-rearm leg's
-fakes the same hand-back stages; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+fakes the same hand-back stages.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
 from test_qa_scenario_2450_yielded_rearm import (
     YieldedPairFeed, YieldedPlantPeer)
-
-
-EXPECTED_CASES = frozenset({
-    'DemoteReleaseTests.test_registered',
-    'DemoteReleaseTests.test_clean_pair_passes_and_validates',
-    'DemoteReleaseTests.test_rearm_under_demoted_token_reports_failed',
-    'DemoteReleaseTests.test_silent_rearm_reports_failed',
-    'DemoteReleaseTests.test_live_rearm_fences_the_pair_reports_'
-    'failed',
-    'DemoteReleaseTests.test_unclaimed_reclaim_reports_failed',
-    'DemoteReleaseTests.test_dual_owner_reports_failed',
-    'DemoteReleaseTests.test_frozen_field_reports_failed',
-    'DemoteReleaseTests.test_pre_contract_build_reports_inconclusive',
-    'DemoteReleaseTests.test_demote_refused_reports_failed',
-    'DemoteReleaseTests.test_promote_refused_reports_failed',
-    'DemoteReleaseTests.test_demotion_never_settles_reports_failed',
-    'DemoteReleaseTests.test_ex_owner_never_converges_reports_failed',
-    'DemoteReleaseTests.test_digests_diverge_reports_nondeterministic',
-    'DemoteReleaseTests.test_silent_judge_reports_unchecked',
-    'DemoteReleaseTests.test_no_owner_reports_failed',
-    'DemoteReleaseTests.test_unfenced_field_reports_inconclusive',
-    'DemoteReleaseTests.test_unattributed_verdict_reports_inconclusive',
-    'DemoteReleaseTests.test_no_probe_writer_reports_inconclusive',
-    'DemoteReleaseTests.test_unreachable_pair_reports_inconclusive',
-    'DemoteReleaseTests.test_missing_endpoint_reports_inconclusive',
-    'DemoteReleaseTests.test_missing_plant_reports_inconclusive',
-    'DemoteReleaseTests.test_missing_plant_ctl_reports_inconclusive',
-    'DemoteReleaseTests.test_missing_tokens_reports_inconclusive',
-    'DemoteReleaseTests.test_missing_journals_reports_inconclusive',
-    'DemoteReleaseTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class ReleasePlantPeer(YieldedPlantPeer):

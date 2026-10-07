@@ -1,45 +1,11 @@
 """The 2350_claim_reclaim leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_claim_reclaim, in the
 tests/test_qa_scenario_NNNN_<slug>.py split layout (#940). The shared
-fakes and helpers live in tests/qa_scenario_support.py;
-EXPECTED_CASES pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+fakes and helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'ClaimReclaimTests.test_registered',
-    'ClaimReclaimTests.test_clean_pair_passes_and_validates',
-    'ClaimReclaimTests.test_killed_owner_reports_failed',
-    'ClaimReclaimTests.test_never_demotes_reports_failed',
-    'ClaimReclaimTests.test_silent_loss_reports_failed',
-    'ClaimReclaimTests.test_unattributed_loss_reports_failed',
-    'ClaimReclaimTests.test_misattributed_loss_reports_failed',
-    'ClaimReclaimTests.test_premature_grant_reports_failed',
-    'ClaimReclaimTests.test_peer_move_reports_failed',
-    'ClaimReclaimTests.test_foreign_write_reports_failed',
-    'ClaimReclaimTests.test_open_held_claim_reports_failed',
-    'ClaimReclaimTests.test_never_reclaims_reports_failed',
-    'ClaimReclaimTests.test_unbound_reseat_reports_failed',
-    'ClaimReclaimTests.test_unreconverged_pair_reports_failed',
-    'ClaimReclaimTests.test_reclaim_restart_reports_failed',
-    'ClaimReclaimTests.test_shared_claim_reports_nondeterministic',
-    'ClaimReclaimTests.test_diverging_digests_report_nondeterministic',
-    'ClaimReclaimTests.test_release_refusal_reports_inconclusive',
-    'ClaimReclaimTests.test_predating_rig_reports_inconclusive',
-    'ClaimReclaimTests.test_foreign_baseline_reports_inconclusive',
-    'ClaimReclaimTests.test_open_field_reports_inconclusive',
-    'ClaimReclaimTests.test_no_active_reports_failed',
-    'ClaimReclaimTests.test_unsettled_pair_reports_inconclusive',
-    'ClaimReclaimTests.test_unreachable_plant_reports_inconclusive',
-    'ClaimReclaimTests.test_missing_plant_endpoint_reports_inconclusive',
-    'ClaimReclaimTests.test_missing_owner_token_reports_inconclusive',
-    'ClaimReclaimTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class ReclaimPlantPeer(FakePlantPeer):

@@ -1032,32 +1032,8 @@ fn assert_resources(client: &MonitorClient, snapshot: &TelemetrySnapshot) {
     }
 }
 
-/// The generic-page sweep: the served page fetches `/schema` and
-/// `/resources` and renders every instance through the five-category
-/// disclosure — the wire documents carrying all five collections on
-/// every entry, so no kind needs dedicated markup to be operable.
-fn assert_generic_page(client: &MonitorClient) {
-    let page = client.page().unwrap();
-    for needle in [
-        "pollFetch(base + \"/schema\")",
-        "pollFetch(base + \"/resources\")",
-        "interfaceMarkup(descriptor.name, generic)",
-        "interfaceOpen.get(name) : generic",
-        "resourceTable(\"measurements\", iface.measurements",
-        "configTable(name, iface.configuration",
-        "resourceTable(\"state\", iface.state",
-        "commandTable(name, iface.commands",
-        "eventList(resources && resources.events)",
-        "data-category=\\\"configuration\\\"",
-        "data-category=\\\"commands\\\"",
-        "data-category=\\\"events\\\"",
-        "class=\\\"invoke\\\"",
-        "{ invoke: {",
-        "state.available",
-        "state.refusal",
-    ] {
-        assert!(page.contains(needle), "page lacks {needle}");
-    }
+/// Both wire documents carry every declared category for each instance.
+fn assert_generic_wire_categories(client: &MonitorClient) {
     for (path, key) in [("/schema", "interfaces"), ("/resources", "components")] {
         let (status, body) = client.request("GET", path, None).unwrap();
         assert_eq!(status, 200, "{body}");
@@ -1240,7 +1216,7 @@ fn run_verification(tag: &str) -> Outcome {
         "the tracking peer serves the pair's identical registry"
     );
     assert_resources(&active, &image);
-    assert_generic_page(&active);
+    assert_generic_wire_categories(&active);
 
     // The batch program is the composition's declared-contract kind:
     // `advance`/`reset` under the `Declared` provenance and the

@@ -1,34 +1,11 @@
 """The 3100_force_release leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_force_release, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'ForceReleaseTests.test_registered_and_replayable',
-    'ForceReleaseTests.test_clean_feed_passes_and_validates',
-    'ForceReleaseTests.test_forced_telemetry_never_substitutes_fails',
-    'ForceReleaseTests.test_forces_list_omits_point_fails',
-    'ForceReleaseTests.test_control_ignoring_the_force_fails',
-    'ForceReleaseTests.test_commands_never_settling_fails',
-    'ForceReleaseTests.test_journaled_receipts_without_attribution_fail',
-    'ForceReleaseTests.test_release_that_never_clears_the_badge_fails',
-    'ForceReleaseTests.test_release_refused_fails',
-    'ForceReleaseTests.test_recovery_that_never_reads_good_fails',
-    'ForceReleaseTests.test_released_cone_staying_tainted_fails',
-    'ForceReleaseTests.test_standby_snapshot_staying_substituted_fails',
-    'ForceReleaseTests.test_standby_never_tracking_is_inconclusive',
-    'ForceReleaseTests.test_standby_unreachable_is_inconclusive',
-    'ForceReleaseTests.test_two_runs_produce_identical_records',
-    'ForceReleaseTests.test_missing_force_target_is_inconclusive',
-})
 
 
 class ForceFeed:

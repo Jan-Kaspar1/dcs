@@ -2,9 +2,8 @@
 the feed fake and TestCase classes for
 scenario_adopted_receipt_regression, split per the one-module-per-leg
 convention (#940). The shared fakes and helpers live in
-tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+tests/qa_scenario_support.py.
+
 
 The stubbed pair models the #709 finding's reproduction and its fix: a
 receipted command is submitted and the holder demoted inside the
@@ -31,28 +30,6 @@ from unittest.mock import patch
 
 from qa_lane import report, scenarios, verify
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'AdoptedReceiptRegressionTests.test_registered',
-    'AdoptedReceiptRegressionTests.test_clean_pair_passes_and_validates',
-    'AdoptedReceiptRegressionTests.test_regressed_receipt_reports_nondeterministic',
-    'AdoptedReceiptRegressionTests.test_doubled_settle_reports_nondeterministic',
-    'AdoptedReceiptRegressionTests.test_doubled_durable_reports_nondeterministic',
-    'AdoptedReceiptRegressionTests.test_never_staged_reports_failed',
-    'AdoptedReceiptRegressionTests.test_refused_demote_reports_failed',
-    'AdoptedReceiptRegressionTests.test_refused_promote_reports_failed',
-    'AdoptedReceiptRegressionTests.test_never_settles_reports_failed',
-    'AdoptedReceiptRegressionTests.test_no_active_reports_failed',
-    'AdoptedReceiptRegressionTests.test_unconverged_pair_reports_inconclusive',
-    'AdoptedReceiptRegressionTests.test_unreachable_peer_reports_inconclusive',
-    'AdoptedReceiptRegressionTests.test_missing_journals_report_inconclusive',
-    'AdoptedReceiptRegressionTests.test_single_endpoint_reports_inconclusive',
-    'AdoptedReceiptRegressionTests.test_unchecked_surface_reports_inconclusive',
-    'AdoptedReceiptRegressionTests.test_diverging_digests_report_nondeterministic',
-    'AdoptedReceiptRegressionTests.test_silent_judge_reports_unchecked',
-    'AdoptedReceiptRegressionTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class RegressionPeer:

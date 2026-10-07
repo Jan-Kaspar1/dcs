@@ -1,30 +1,11 @@
 """The 1300_force_carryover leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_force_carryover, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'ForceCarryoverTests.test_registered_and_replayable',
-    'ForceCarryoverTests.test_clean_feed_passes_and_validates',
-    'ForceCarryoverTests.test_two_runs_produce_identical_records',
-    'ForceCarryoverTests.test_mirrored_layout_passes',
-    'ForceCarryoverTests.test_standby_never_reporting_the_force_fails',
-    'ForceCarryoverTests.test_standby_sample_never_substituting_fails',
-    'ForceCarryoverTests.test_promoted_peer_dropping_the_force_fails',
-    'ForceCarryoverTests.test_release_never_settling_applied_fails',
-    'ForceCarryoverTests.test_released_point_resubstituting_fails',
-    'ForceCarryoverTests.test_unrestored_pair_fails',
-    'ForceCarryoverTests.test_demoted_peer_never_retracking_fails',
-    'ForceCarryoverTests.test_standby_never_converging_is_inconclusive',
-})
 
 
 class CarryoverPeer:

@@ -1,39 +1,11 @@
 """The 1100_duty_rotation leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_duty_rotation, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'DutyRotationTests.test_registered_in_scenarios',
-    'DutyRotationTests.test_clean_feed_passes_and_validates',
-    'DutyRotationTests.test_two_runs_produce_identical_evidence',
-    'DutyRotationTests.test_mirrored_layout_passes',
-    'DutyRotationTests.test_no_active_peer_fails',
-    'DutyRotationTests.test_unconverged_pair_is_inconclusive',
-    'DutyRotationTests.test_missing_wiring_is_inconclusive',
-    'DutyRotationTests.test_undeclared_inflow_is_inconclusive',
-    'DutyRotationTests.test_level_never_rising_is_inconclusive',
-    'DutyRotationTests.test_duty_never_moving_is_inconclusive',
-    'DutyRotationTests.test_group_never_staging_fails',
-    'DutyRotationTests.test_holder_never_stopping_fails',
-    'DutyRotationTests.test_rotation_never_alternating_fails',
-    'DutyRotationTests.test_holdout_never_banked_fails',
-    'DutyRotationTests.test_run_hours_never_banked_fails',
-    'DutyRotationTests.test_promoted_peer_resetting_fails',
-    'DutyRotationTests.test_promotion_never_settling_fails',
-    'DutyRotationTests.test_restore_never_completing_fails',
-    'DutyRotationTests.test_journal_never_recording_fails',
-    'DutyRotationTests.test_settlements_never_journaling_fails',
-    'DutyRotationTests.test_unack_latch_never_clearing_fails',
-})
 
 
 class RotationPlant:

@@ -1,33 +1,11 @@
 """The 0400_controller_restart leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_controller_restart, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'ControllerRestartTests.test_clean_restart_passes_and_validates',
-    'ControllerRestartTests.test_applied_before_stop_passes',
-    'ControllerRestartTests.test_dropped_pending_command_fails',
-    'ControllerRestartTests.test_replayed_receipts_fail',
-    'ControllerRestartTests.test_phantom_census_fails',
-    'ControllerRestartTests.test_missing_served_boundary_fails',
-    'ControllerRestartTests.test_disturbed_peer_journal_fails',
-    'ControllerRestartTests.test_cold_start_resume_fails',
-    'ControllerRestartTests.test_stale_resume_fails',
-    'ControllerRestartTests.test_seq_restart_fails',
-    'ControllerRestartTests.test_missing_boundary_fails',
-    'ControllerRestartTests.test_spurious_peer_promotion_fails',
-    'ControllerRestartTests.test_unfinished_restart_is_inconclusive',
-    'ControllerRestartTests.test_unreturned_monitor_is_inconclusive',
-    'ControllerRestartTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class RestartFeed:

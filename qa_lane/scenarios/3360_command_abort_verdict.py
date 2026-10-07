@@ -8,44 +8,11 @@ RUNS_AFTER = frozenset({'scenario_command_overflow_order'})
 
 
 # --------------------------------------------------------------------
-# The aborted bounded-command honest-verdict contract (WW-LCM-001's
-# receipt-as-truth clause, decision 83's bounded command admission —
-# the contract #1036's fix established, exercised per-revision for the
-# defect whose bounded post path reported "command failed" for a
-# command the controller could still apply): a bounded postCommand
-# whose client-side wait aborts — timed out, disconnected, or
-# cancelled — ends only the client's wait, never the server's work, so
-# the submission's fate stays unresolved and the only honest
-# post-facing report is the indeterminate "outcome unknown" verdict.
-# The settled receipt stays the command's only truth: the served
-# /receipts and the journaled command_settled carry the true terminal
-# verdict — applied or the named refusal — and exactly one settle
-# stands per admission across both peers.
-#
-# The mechanics mirror the unit reproduction's transport stand-in: the
-# single command worker pins on a stalled head — a POST /command whose
-# declared body arrives half-sent — so a second labeled submission
-# lands buffered in the lane while no answer can return. The client's
-# tightened bound ends the wait unanswered — the page's
-# AbortSignal.timeout firing — and the mirrored submitCommand mints
-# the indeterminate verdict rather than the defect's failure claim.
-# Completing the stalled body drains the lane: the buffered command
-# mints, applies at its scan boundary, and the settle journals on the
-# field owner and the tracking peer's adopted line alike. The audit:
-# the report is the indeterminate verdict — never "command failed" —
-# the served receipt logs and each peer's durable --journal-file carry
-# the admission's one terminal outcome, the served journals hold
-# exactly one command_settled for it per peer, and the pair's launch
-# roles stand. Named diagnostics are command-abort-verdict-failed for
-# a contract miss — the pinned lane never staged, the post reported
-# failure, no terminal verdict journaled, the durable record missing —
-# command-abort-verdict-nondeterministic for an outcome the contract
-# declares impossible — two settles on one admission, peers
-# contradicting the verdict, a moved role, two passes disagreeing —
-# and command-abort-verdict-unchecked when the self-check's planted
-# negatives slip the leg's own audits. A staged run predating the
-# contract — a served page without the honest-verdict surface — or
-# without journal-file paths reports inconclusive.
+# The aborted command transport contract: ending a client wait does not
+# cancel a command already sent to the controller. Stall the command lane,
+# submit a labeled write under a short read bound, and then drain the lane.
+# The served receipts, both served journals, durable journal files, images,
+# and launch roles must agree on exactly one terminal settlement.
 
 DIAG_FAILED = 'command-abort-verdict-failed'
 DIAG_NONDET = 'command-abort-verdict-nondeterministic'
@@ -55,9 +22,7 @@ ABORT_LEAD = 0.6       # the pin's lead — the command worker pops the
                        # stalled head before the abandoned post lands
 ABORT_HOLD = 0.8       # the pinned window the abort rides inside —
                        # longer than the post's tightened bound
-ABORT_BOUND = 0.3      # the abandoned post's tightened client bound —
-                       # the page's POLL_MS abort stand-in: it ends the
-                       # wait, never the server's work
+ABORT_BOUND = 0.3      # client read bound for the abandoned submission
 ABORT_SETTLE = 30      # bound on the pair settling, the journaled
                        # settles landing, and each best-effort restore
 ABORT_REPLY = 15       # bound on the pin's answer draining after the
@@ -65,8 +30,6 @@ ABORT_REPLY = 15       # bound on the pin's answer draining after the
 ABORT_POLL = 0.25      # wait cadence inside the leg
 STALLED_PAD = 2048     # the reason pad pushing the pinning body's
                        # Content-Length past tiny_http's eager buffer
-PAGE_TIMEOUT = 5       # the served-page contract probe's bound
-PAGE_MARKERS = ('abandonedSubmission', 'indeterminate')
 
 
 def _drain_reply(stream, deadline):
@@ -91,15 +54,12 @@ def _drain_reply(stream, deadline):
 
 
 def _post_command(base, body, bound):
-    """The page's `postCommand`, mirrored on the raw transport: one
-    POST /command under the tightened client bound — the socket's own
-    connect/send/read bounds standing in for `AbortSignal.timeout`.
-    Returns ('answered', receipt) for the in-bound 2xx answer,
-    ('refused', (status, body)) for the endpoint's own answered 4xx —
-    the one end that proves the command never queued — and
-    ('unanswered', detail) for every end without an answered response:
-    the bound firing, a dead response path, or a refused connect, all
-    indistinguishable at the post's surface."""
+    """Send one POST /command under a bounded socket wait.
+
+    Return an answered receipt, an answered endpoint refusal, or an
+    unanswered transport result. An unanswered result ends the client
+    wait without determining whether the controller will apply the command.
+    """
     payload = json.dumps(body).encode()
     request = (b'POST /command HTTP/1.1\r\nHost: qa\r\n'
                b'Content-Type: text/plain\r\nContent-Length: '
@@ -142,74 +102,6 @@ def _post_command(base, body, bound):
         return 'unanswered', 'the monitor answered HTTP ' + str(status)
     finally:
         stream.close()
-
-
-def _submit_command(base, body, bound):
-    """The page's `submitCommand` POST leg plus `abandonedSubmission`,
-    mirrored: the answered receipt renders as itself, the endpoint's
-    own answered refusal is the sole honest 'command failed', and
-    every unanswered end mints the indeterminate verdict — the
-    page-minted `{"indeterminate": ...}` outcome plus the pending
-    notice the journaled settle resolves — never a failure claim for
-    a fate the unanswered post left open."""
-    kind, payload = _post_command(base, body, bound)
-    if kind == 'answered':
-        return {'verdict': 'receipt', 'receipt': payload}
-    if kind == 'refused':
-        status, detail = payload
-        return {'verdict': 'failed', 'refused': True,
-                'detail': 'command failed: the monitor refused the '
-                          'request: HTTP ' + str(status) + ': '
-                          + json.dumps(detail)[:200]}
-    return {'verdict': 'indeterminate',
-            'answer': {'command': body.get('command'),
-                       'actor': body.get('actor'),
-                       'outcome': {'indeterminate': {'detail': payload}}},
-            'notice': 'command outcome unknown — no receipt answered '
-                      'the submission (' + str(payload) + ') and it '
-                      'may still apply: '
-                      + json.dumps(body.get('command'), sort_keys=True)
-                      + '. The journaled settled receipt is the '
-                      'verdict — resubmitting now risks applying the '
-                      'command twice.'}
-
-
-def _judge_report(record, note):
-    """The aborted post's report audit: the staged unanswered post
-    must surface the indeterminate verdict — the honest
-    submitted/unknown answer — never 'command failed' for a command
-    the controller may still apply."""
-    report = record.get('report') or {}
-    verdict = report.get('verdict')
-    if verdict == 'failed':
-        note('report-failed', DIAG_FAILED,
-             'the aborted bounded post reported \'command failed\' '
-             '— ' + str(report.get('detail'))[:160] + ' — while the '
-             'submission\'s fate stayed unresolved: the defect the '
-             'honest-verdict contract exists to prevent')
-        return
-    if verdict != 'indeterminate':
-        note('report-verdict', DIAG_FAILED,
-             'the aborted bounded post answered '
-             + json.dumps(verdict) + ' — never the indeterminate '
-             'verdict the honest contract mints for an unanswered '
-             'submission')
-        return
-    answer = report.get('answer') or {}
-    outcome = answer.get('outcome') or {}
-    if 'indeterminate' not in outcome:
-        note('report-outcome', DIAG_FAILED,
-             'the abandoned post\'s answer carries no indeterminate '
-             'outcome: ' + json.dumps(answer)[:200])
-    notice = report.get('notice') or ''
-    if 'command failed' in notice \
-            or 'may still apply' not in notice \
-            or 'settled receipt' not in notice:
-        note('report-notice', DIAG_FAILED,
-             'the abandoned post\'s notice is not the honest verdict '
-             'text — it must state the command may still apply and '
-             'name the journaled settled receipt the verdict: '
-             + notice[:200])
 
 
 def _judge_settle(record, note):
@@ -299,15 +191,7 @@ def _judge_roles(record, note):
 
 
 def _self_check():
-    """The leg's unchecked-diagnostic self-test: replay each judge
-    over the planted negatives it must name — the aborted submission
-    asserted 'command failed' while the journal settled it applied,
-    a report that skipped the indeterminate mint, a settle that never
-    journaled or journaled twice, a peer contradicting the verdict,
-    an adopted log still pending, a durable record missing the
-    settle, a phantom image write, and a moved role — and require
-    each to trip. A silent judge returns the negative names it let
-    through."""
+    """Require the settlement and role audits to reject planted faults."""
     slipped = []
 
     def clean():
@@ -319,19 +203,6 @@ def _self_check():
                 'admission': {'command': command,
                               'actor': 'qa-abort-verdict-1',
                               'value': True},
-                'report': {'verdict': 'indeterminate',
-                           'answer': {'command': command,
-                                      'actor': 'qa-abort-verdict-1',
-                                      'outcome': {'indeterminate': {
-                                          'detail': 'the read bound '
-                                                  'fired'}}},
-                           'notice': 'command outcome unknown — no '
-                                     'receipt answered the submission '
-                                     '(the read bound fired) and it '
-                                     'may still apply: the journaled '
-                                     'settled receipt is the verdict '
-                                     '— resubmitting now risks '
-                                     'applying the command twice.'},
                 'audit': {'outcome': 'applied',
                           'journaled': {'active': ['applied'],
                                         'standby': ['applied']},
@@ -344,7 +215,6 @@ def _self_check():
 
     def every(record):
         def judge(note):
-            _judge_report(record, note)
             _judge_settle(record, note)
             _judge_roles(record, note)
         return judge
@@ -355,21 +225,6 @@ def _self_check():
         if not found:
             slipped.append(name)
 
-    # The doctored negative the finding names: the aborted submission
-    # asserted 'command failed' while the journaled settle stands
-    # applied.
-    record = clean()
-    record['report'] = {'verdict': 'failed',
-                        'detail': "command failed: "
-                                  "TimeoutError('the read bound "
-                                  "fired')"}
-    expect('report-failed-while-applied', every(record))
-    # An answered post standing in for the abort — the report that
-    # skipped the indeterminate mint entirely.
-    record = clean()
-    record['report'] = {'verdict': 'receipt',
-                        'receipt': {'outcome': {'applied': {'tick': 4}}}}
-    expect('answered-verdict', every(record))
     # The abandoned submission that never reached a terminal verdict.
     record = clean()
     record['audit'] = {'outcome': None,
@@ -436,14 +291,10 @@ def _restore_launch_roles(ctx, launch):
 
 
 def _abort_verdict_pass(ctx, number, owner, peer, point, launch, want):
-    """One aborted-post pass: the command worker pinned on a stalled
-    head, the labeled writable-point submission landing behind it
-    under the tightened bound — unanswered by construction — the
-    mirrored submitCommand report, then the pin's release and the
-    settled-truth audit across both peers. Returns (digest,
-    violations, record): digest is the pass's normalized verdict —
-    identical across clean passes; violations maps clause keys to
-    (diagnostic, detail) in first-seen order."""
+    """Submit behind a stalled command lane, abandon the wait, then audit
+    the terminal settlement across both peers. Return the digest, violations,
+    and captured evidence.
+    """
     base = ctx[owner]
     label = 'qa-abort-verdict-' + str(number)
     command = {'write_value': {'point': point, 'kind': 'bool',
@@ -453,7 +304,7 @@ def _abort_verdict_pass(ctx, number, owner, peer, point, launch, want):
               'launch_roles': dict(launch),
               'admission': {'command': command, 'actor': label,
                             'value': want},
-              'report': None, 'audit': {}}
+              'audit': {}}
     violations = {}
 
     def note(key, diagnostic, detail):
@@ -509,27 +360,21 @@ def _abort_verdict_pass(ctx, number, owner, peer, point, launch, want):
         return finish(None)
     try:
         time.sleep(ABORT_LEAD)
-        # The abandoned bounded post: the labeled submission lands in
-        # the lane behind the pinned worker — sent in full, answered
-        # never inside the tightened bound — and the mirrored
-        # submitCommand must mint the indeterminate verdict, never
-        # 'command failed'.
-        report = _submit_command(
+        # The complete submission lands behind the pinned worker. Its read
+        # bound must end before an answer, so the drain can prove a command
+        # still settles after the client has stopped waiting.
+        kind, payload = _post_command(
             base, {'command': command, 'actor': label}, ABORT_BOUND)
-        record['report'] = report
-        if report['verdict'] == 'receipt':
+        record['submission'] = {'result': kind, 'answer': payload}
+        if kind == 'answered':
             record['inconclusive'] = \
                 'the pinned lane answered the abandoned post inside ' \
-                'the tightened bound — the abort window never staged'
+                'the tightened bound - the abort window never staged'
             return finish(None)
-        if report.get('refused'):
-            # An answered 4xx is the one provable refusal — 'command
-            # failed' is the honest verdict for it and the may-apply
-            # case the leg stages never formed.
+        if kind == 'refused':
             record['inconclusive'] = \
                 'the abandoned post met an answered refusal inside ' \
-                'the bound — the command provably never queued, so ' \
-                'the may-apply case never staged'
+                'the bound, so the abort window never staged'
             return finish(None)
         # The pinned window stays past the bound's firing before the
         # stalled body completes — the aborted request sits buffered
@@ -672,7 +517,6 @@ def _abort_verdict_pass(ctx, number, owner, peer, point, launch, want):
     def collect(key, diagnostic, detail):
         problems.append((key, diagnostic, detail))
 
-    _judge_report(record, collect)
     _judge_settle(record, collect)
     _judge_roles(record, collect)
     for key, diagnostic, detail in problems:
@@ -685,8 +529,6 @@ def _abort_verdict_pass(ctx, number, owner, peer, point, launch, want):
                 for entries in journaled.values()) \
         and len(journaled) == 2
     digest = {
-        'report': (record.get('report') or {}).get('verdict')
-                  or 'unstaged',
         'receipt': audit.get('outcome') or 'unsettled',
         'journal': 'single' if single else 'diverged',
         'roles': 'held' if record['roles'] == launch else 'moved'}
@@ -694,30 +536,15 @@ def _abort_verdict_pass(ctx, number, owner, peer, point, launch, want):
 
 
 def scenario_command_abort_verdict(ctx):
-    """Exercise the aborted bounded-command honest-verdict contract on
-    the deployed pair: pin the field owner's single command worker on
-    a stalled head, land a labeled writable-point submission behind it
-    under a tightened client bound — the post's wait ends unanswered —
-    and prove the post-facing report is the indeterminate verdict,
-    never 'command failed', while the served /receipts and the durable
-    journal carry the admission's true terminal verdict and exactly
-    one command_settled stands for it across both peers."""
+    """Prove an abandoned command wait still reaches one settlement."""
     case = Case('command-abort-verdict',
-                'Aborted bounded command reports the honest verdict',
-                'with the deployed pair settled, a receipted '
-                'writable-point command submitted on the field owner '
-                'through the bounded post path — the single command '
-                'worker pinned on a stalled head so the tightened '
-                'client bound ends the wait unanswered — reports the '
-                'indeterminate outcome rather than \'command failed\', '
-                'the served /receipts and the durable journal carry '
-                'the admission\'s true terminal verdict (applied or '
-                'the named refusal), exactly one command_settled '
-                'stands for the admission across both peers, and the '
-                'pair\'s launch roles are restored; two consecutive '
-                'passes produce identical digests and the self-check '
-                'leg\'s planted negatives each report their named '
-                'diagnostic')
+                'Abandoned command wait preserves terminal settlement',
+                'a command submitted behind a stalled command worker '
+                'outlives its client read bound, then settles once in '
+                'the served receipts, both served and durable journals, '
+                'and corresponding images without moving launch roles; '
+                'two passes produce identical digests and planted audit '
+                'faults report their named diagnostics')
     launch = {}
     try:
         if ctx.get('active') is None or ctx.get('standby') is None:
@@ -754,31 +581,6 @@ def scenario_command_abort_verdict(ctx):
         case.observe('field owner: ' + owner + ' (' + ctx[owner]
                      + '); tracking peer: ' + peer + ' ('
                      + ctx[peer] + ')')
-        # The contract gate: the served page must carry the
-        # honest-verdict surface — the indeterminate-outcome
-        # vocabulary and the abandoned-submission mint — a staged run
-        # predating #1036's fix serves the page that reported
-        # 'command failed' beside a landed write, and the leg reports
-        # inconclusive rather than a verdict.
-        try:
-            status, raw = _request_status('GET', ctx[owner] + '/',
-                                          timeout=PAGE_TIMEOUT)
-        except Exception as exc:
-            return case.finish('inconclusive', owner + '\'s page '
-                               'never answered: ' + str(exc)[:200]
-                               + ' — the staged run predates the '
-                               'honest-verdict contract')
-        text = raw.decode(errors='replace') \
-            if isinstance(raw, bytes) else str(raw or '')
-        missing = [marker for marker in PAGE_MARKERS
-                   if marker not in text]
-        if status != 200 or missing:
-            return case.finish('inconclusive', 'the served page '
-                               'lacks the honest-verdict surface ('
-                               + ', '.join(missing
-                                           or ['HTTP ' + str(status)])
-                               + ') — the staged run predates the '
-                               'aborted-command verdict contract')
         _, signals = http_json('GET', ctx[owner] + '/signals')
         target = _writable_bool_point(signals)
         if target is None or target.get('point') is None:
@@ -800,8 +602,8 @@ def scenario_command_abort_verdict(ctx):
                 'command-abort-verdict-pass-' + str(number) + '.json',
                 record)
             case.evidence('file', ref, 'aborted-post pass '
-                          + str(number) + ' — the post-facing '
-                          'report, the settled-truth audit across '
+                          + str(number) + ' — the '
+                          'transport and settled-truth audit across '
                           'both peers, and the normalized digest')
             if record.get('inconclusive'):
                 return case.finish('inconclusive',

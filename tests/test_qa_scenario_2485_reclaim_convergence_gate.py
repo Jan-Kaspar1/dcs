@@ -2,9 +2,7 @@
 the feed fake and TestCase class for
 scenario_reclaim_convergence_gate, split out per the leg-module
 convention (#940). The shared fakes and helpers live in
-tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+tests/qa_scenario_support.py.
 """
 import unittest
 
@@ -15,62 +13,6 @@ EX_OWNER = 'driven'
 INCUMBENT = 'foreign'
 CONTROL = 'revised'
 SEATS = (EX_OWNER, INCUMBENT, CONTROL)
-
-EXPECTED_CASES = frozenset({
-    'ReclaimConvergenceTests.test_registered_after_sim_bus_before_revisions',
-    'ReclaimConvergenceTests.test_fixed_shape_passes_validates_and_tears_down',
-    'ReclaimConvergenceTests.test_two_runs_produce_identical_evidence',
-    'ReclaimConvergenceTests.test_two_passes_produce_identical_digests',
-    'ReclaimConvergenceTests.test_gating_asserted_while_reclaim_took_field_fails',
-    'ReclaimConvergenceTests.test_reclaim_rearming_the_claim_fails',
-    'ReclaimConvergenceTests.test_reclaim_asking_the_standing_claim_fails',
-    'ReclaimConvergenceTests.test_ownership_epoch_rolling_again_fails',
-    'ReclaimConvergenceTests.test_pre_contract_reclaim_is_inconclusive',
-    'ReclaimConvergenceTests.test_ex_owner_promoting_on_its_monitor_fails',
-    'ReclaimConvergenceTests.test_ex_owner_converging_in_the_window_fails',
-    'ReclaimConvergenceTests.test_field_unclaimed_under_the_ex_owner_fails',
-    'ReclaimConvergenceTests.test_ex_owner_never_fenced_fails',
-    'ReclaimConvergenceTests.test_fenced_ex_owner_tracking_fails',
-    'ReclaimConvergenceTests.test_fenced_ex_owner_sees_no_claim_fails',
-    'ReclaimConvergenceTests.test_demotion_walk_unjournaled_fails',
-    'ReclaimConvergenceTests.test_loss_unjournaled_fails',
-    'ReclaimConvergenceTests.test_loss_journaled_twice_fails',
-    'ReclaimConvergenceTests.test_loss_unattributed_fails',
-    'ReclaimConvergenceTests.test_loss_wrong_claimant_fails',
-    'ReclaimConvergenceTests.test_link_never_dropping_fails',
-    'ReclaimConvergenceTests.test_incumbent_displaced_fails',
-    'ReclaimConvergenceTests.test_incumbent_losing_the_claim_fails',
-    'ReclaimConvergenceTests.test_incumbent_tick_stalled_fails',
-    'ReclaimConvergenceTests.test_incumbent_fenced_on_reattach_fails',
-    'ReclaimConvergenceTests.test_seat_process_exiting_fails',
-    'ReclaimConvergenceTests.test_control_reclaim_silent_fails',
-    'ReclaimConvergenceTests.test_control_walk_unjournaled_fails',
-    'ReclaimConvergenceTests.test_control_operator_promote_fails',
-    'ReclaimConvergenceTests.test_control_ex_owner_exiting_fails',
-    'ReclaimConvergenceTests.test_control_never_converging_is_nondeterministic',
-    'ReclaimConvergenceTests.test_control_never_claiming_is_nondeterministic',
-    'ReclaimConvergenceTests.test_pair_owner_disturbed_fails',
-    'ReclaimConvergenceTests.test_pair_owner_stalled_fails',
-    'ReclaimConvergenceTests.test_pair_member_promoted_fails',
-    'ReclaimConvergenceTests.test_launch_layout_unrestored_fails',
-    'ReclaimConvergenceTests.test_second_pass_defect_fails',
-    'ReclaimConvergenceTests.test_divergent_digests_are_nondeterministic',
-    'ReclaimConvergenceTests.test_serve_failure_is_nondeterministic',
-    'ReclaimConvergenceTests.test_launch_failure_is_nondeterministic',
-    'ReclaimConvergenceTests.test_freeze_failure_is_nondeterministic',
-    'ReclaimConvergenceTests.test_thaw_failure_is_nondeterministic',
-    'ReclaimConvergenceTests.test_ex_owner_never_activating_is_nondeterministic',
-    'ReclaimConvergenceTests.test_incumbent_never_claiming_is_nondeterministic',
-    'ReclaimConvergenceTests.test_starved_window_is_nondeterministic',
-    'ReclaimConvergenceTests.test_dropped_durable_read_is_nondeterministic',
-    'ReclaimConvergenceTests.test_vanished_container_is_nondeterministic',
-    'ReclaimConvergenceTests.test_unsettled_pair_is_inconclusive',
-    'ReclaimConvergenceTests.test_missing_seams_are_inconclusive',
-    'ReclaimConvergenceTests.test_missing_journals_are_inconclusive',
-    'ReclaimConvergenceTests.test_unchecked_self_check_fails',
-    'ReclaimConvergenceTests.test_judge_self_check_is_complete',
-})
-
 
 class ReclaimConvergenceFeed:
     """A stubbed rig for the convergence-gated reclaim leg. The

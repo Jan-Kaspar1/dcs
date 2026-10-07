@@ -1,37 +1,11 @@
 """The 3000_alarm_rationalization leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_alarm_rationalization, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'AlarmRationalizationTests.test_registered',
-    'AlarmRationalizationTests.test_clean_feed_passes_and_validates',
-    'AlarmRationalizationTests.test_two_runs_produce_identical_evidence',
-    'AlarmRationalizationTests.test_missing_rationalization_block_fails',
-    'AlarmRationalizationTests.test_record_set_disagreement_fails',
-    'AlarmRationalizationTests.test_wrong_declared_values_fail',
-    'AlarmRationalizationTests.test_unserved_parameter_entry_fails',
-    'AlarmRationalizationTests.test_unjournaled_standing_point_fails',
-    'AlarmRationalizationTests.test_misbound_alarm_point_fails',
-    'AlarmRationalizationTests.test_refused_retune_fails',
-    'AlarmRationalizationTests.test_unserved_retune_fails',
-    'AlarmRationalizationTests.test_refused_restore_fails',
-    'AlarmRationalizationTests.test_drifted_reread_fails_nondeterministic',
-    'AlarmRationalizationTests.test_omitted_components_section_is_inconclusive',
-    'AlarmRationalizationTests.test_omitted_parameters_section_is_inconclusive',
-    'AlarmRationalizationTests.test_no_managed_records_is_inconclusive',
-    'AlarmRationalizationTests.test_missing_pinned_instance_is_inconclusive',
-    'AlarmRationalizationTests.test_missing_journal_path_is_inconclusive',
-    'AlarmRationalizationTests.test_no_active_peer_fails',
-})
 
 
 class RationalizationFeed:

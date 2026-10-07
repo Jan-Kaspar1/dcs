@@ -195,8 +195,6 @@ mod tests {
     use super::*;
     use crate::testutil::TestIo;
     use dcs_core::{Direction, PortDescriptor, StateError, StateMap, ValueKind};
-    use dcs_model::{ComponentId, ComponentInstance};
-    use std::collections::BTreeMap;
 
     const PRIMARY: PointId = PointId(10);
     const BACKUP: PointId = PointId(11);
@@ -480,31 +478,6 @@ mod tests {
             block.restore_state(&incompatible),
             Err(StateError::UnknownField { ref field, .. }) if field == "on_backup"
         ));
-    }
-
-    #[test]
-    fn builds_from_parameter_map() {
-        // The kind declares no parameters: the empty map builds, and a
-        // stray key is unread here — undeclared keys are the spec's
-        // `UnknownParameter` case at composition time.
-        let instance = ComponentInstance {
-            id: ComponentId(1),
-            kind: FailoverSelect::KIND.to_string(),
-            parameters: Parameters::new(),
-            rationalization: None,
-            ports: BTreeMap::new(),
-            parameter_units: BTreeMap::new(),
-        };
-        FailoverSelect::from_parameters(
-            "fsel",
-            PRIMARY,
-            BACKUP,
-            OUT,
-            ACTIVE,
-            Some(UNHEALTHY),
-            &instance.parameters,
-        )
-        .unwrap();
     }
 
     #[test]

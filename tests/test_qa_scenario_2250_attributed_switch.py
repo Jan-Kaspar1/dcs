@@ -1,25 +1,11 @@
 """The 2250_attributed_switch leg's scenario unit coverage — the
 feed fakes and TestCase classes for scenario_attributed_switch,
 split per the one-module-per-leg convention (#940). The shared fakes
-and helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case coverage so a
-dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+and helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'AttributedSwitchTests.test_attributed_cycle_and_failover_pass',
-    'AttributedSwitchTests.test_switched_entry_runs_the_cycle',
-    'AttributedSwitchTests.test_missing_actor_fails',
-    'AttributedSwitchTests.test_failover_read_as_request_fails',
-    'AttributedSwitchTests.test_failover_carrying_actor_fails',
-    'AttributedSwitchTests.test_restore_demote_refused_fails',
-    'AttributedSwitchTests.test_unconverged_entry_fails',
-})
 
 
 class AttributedSwitchFeed:

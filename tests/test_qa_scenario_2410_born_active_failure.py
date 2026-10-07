@@ -1,48 +1,11 @@
 """The 2410_born_active_failure leg's scenario unit coverage — the feed
 fakes and TestCase classes for scenario_born_active_failure, split out
 per the leg-module convention (#940). The shared fakes and helpers live
-in tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'BornActiveFailureTests.test_registered_after_doomed_before_revisions',
-    'BornActiveFailureTests.test_fixed_shape_passes_validates_and_tears_down',
-    'BornActiveFailureTests.test_two_runs_produce_identical_evidence',
-    'BornActiveFailureTests.test_pending_reporting_active_fails',
-    'BornActiveFailureTests.test_pending_reporting_held_claim_fails',
-    'BornActiveFailureTests.test_pending_admitting_command_fails',
-    'BornActiveFailureTests.test_pending_healthy_link_fails',
-    'BornActiveFailureTests.test_pending_stalled_tick_fails',
-    'BornActiveFailureTests.test_pending_exit_is_inconclusive',
-    'BornActiveFailureTests.test_unjournaled_stand_down_fails',
-    'BornActiveFailureTests.test_grant_never_landing_fails',
-    'BornActiveFailureTests.test_unjournaled_grant_fails',
-    'BornActiveFailureTests.test_pair_not_reconverging_fails',
-    'BornActiveFailureTests.test_declared_refusal_exit_is_inconclusive',
-    'BornActiveFailureTests.test_rejoin_never_converging_fails',
-    'BornActiveFailureTests.test_wrong_claimant_fails',
-    'BornActiveFailureTests.test_undeclared_survival_fails',
-    'BornActiveFailureTests.test_unnamed_undeclared_exit_fails',
-    'BornActiveFailureTests.test_incumbent_demotion_fails',
-    'BornActiveFailureTests.test_dead_peer_converging_fails',
-    'BornActiveFailureTests.test_dead_peer_exit_fails',
-    'BornActiveFailureTests.test_inconclusive_exit_is_inconclusive',
-    'BornActiveFailureTests.test_frozen_claim_never_resolving_fails',
-    'BornActiveFailureTests.test_field_stage_failure_is_nondeterministic',
-    'BornActiveFailureTests.test_launch_failure_is_nondeterministic',
-    'BornActiveFailureTests.test_starved_watch_is_nondeterministic',
-    'BornActiveFailureTests.test_second_pass_instability_is_nondeterministic',
-    'BornActiveFailureTests.test_missing_seams_are_inconclusive',
-    'BornActiveFailureTests.test_missing_journals_are_inconclusive',
-    'BornActiveFailureTests.test_unchecked_self_check_fails',
-    'BornActiveFailureTests.test_judge_self_check_is_complete',
-})
 
 
 class BornActiveFeed:

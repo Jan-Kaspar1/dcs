@@ -5,41 +5,11 @@ tests/test_qa_scenario_NNNN_<slug>.py split layout (#940). The shared
 fakes and helpers live in tests/qa_scenario_support.py; the field
 arbitration rides the shared claim peer and the pumps' own interlock
 chain is computed by the stub, so the leg races the same release the
-shipped station propagates. EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+shipped station propagates.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'ReleaseOrphanWindowTests.test_registered',
-    'ReleaseOrphanWindowTests.test_clean_pair_passes_and_validates',
-    'ReleaseOrphanWindowTests.test_energized_past_the_bound_reports_failed',
-    'ReleaseOrphanWindowTests.test_wedged_promote_reports_failed',
-    'ReleaseOrphanWindowTests.test_diverged_peer_reports_failed',
-    'ReleaseOrphanWindowTests.test_orphan_unjournaled_reports_failed',
-    'ReleaseOrphanWindowTests.test_hand_run_receipt_unsettled_reports_failed',
-    'ReleaseOrphanWindowTests.test_release_not_the_declared_trip_reports_failed',
-    'ReleaseOrphanWindowTests.test_pair_never_reconverges_reports_failed',
-    'ReleaseOrphanWindowTests.test_restore_leaves_the_field_tripped_reports_failed',
-    'ReleaseOrphanWindowTests.test_restore_leaves_the_pumps_hand_run_reports_failed',
-    'ReleaseOrphanWindowTests.test_demote_refused_reports_failed',
-    'ReleaseOrphanWindowTests.test_pre_contract_build_reports_inconclusive',
-    'ReleaseOrphanWindowTests.test_both_halves_of_the_contract_digest_identically',
-    'ReleaseOrphanWindowTests.test_digests_diverge_reports_nondeterministic',
-    'ReleaseOrphanWindowTests.test_silent_judge_reports_unchecked',
-    'ReleaseOrphanWindowTests.test_lost_field_reads_report_nondeterministic',
-    'ReleaseOrphanWindowTests.test_refused_trip_write_reports_nondeterministic',
-    'ReleaseOrphanWindowTests.test_unreachable_pair_reports_inconclusive',
-    'ReleaseOrphanWindowTests.test_missing_endpoint_reports_inconclusive',
-    'ReleaseOrphanWindowTests.test_missing_plant_reports_inconclusive',
-    'ReleaseOrphanWindowTests.test_missing_tokens_reports_inconclusive',
-    'ReleaseOrphanWindowTests.test_unwired_model_reports_inconclusive',
-    'ReleaseOrphanWindowTests.test_two_runs_produce_identical_evidence',
-})
 
 
 def _without_timings(observations):

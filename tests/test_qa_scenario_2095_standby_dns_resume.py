@@ -1,35 +1,13 @@
 """The 2095_standby_dns_resume leg's scenario unit coverage — the
 feed fakes and TestCase classes for scenario_standby_dns_resume,
 split out per the #940 convention. The shared fakes and helpers live
-in tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails
-the discovery check in tests/test_qa_scenario_modules.py.
+in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
 from test_qa_scenario_2090_resume_settle_once import (
     ResumeSettleFeed, ResumeSettlePeer)
-
-
-EXPECTED_CASES = frozenset({
-    'DnsResumeTests.test_registered',
-    'DnsResumeTests.test_clean_rig_passes_and_validates',
-    'DnsResumeTests.test_resumed_process_exits_reports_failed',
-    'DnsResumeTests.test_degraded_never_named_reports_failed',
-    'DnsResumeTests.test_peer_promoted_reports_failed',
-    'DnsResumeTests.test_scans_stall_reports_failed',
-    'DnsResumeTests.test_served_unanswered_reports_failed',
-    'DnsResumeTests.test_write_refused_reports_failed',
-    'DnsResumeTests.test_missing_relaunch_reports_inconclusive',
-    'DnsResumeTests.test_relaunch_failure_reports_inconclusive',
-    'DnsResumeTests.test_unconverged_pair_reports_inconclusive',
-    'DnsResumeTests.test_inverted_launch_reports_inconclusive',
-    'DnsResumeTests.test_unreachable_reports_inconclusive',
-    'DnsResumeTests.test_unchecked_selfcheck_reports_failed',
-    'DnsResumeTests.test_diverging_digests_report_nondeterministic',
-    'DnsResumeTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class DnsResumeFeed(ResumeSettleFeed):

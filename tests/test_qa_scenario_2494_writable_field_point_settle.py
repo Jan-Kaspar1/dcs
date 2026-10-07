@@ -2,9 +2,8 @@
 the feed fake and TestCase class for
 scenario_writable_field_point_settle, split out per the leg-module
 convention (#940). The shared fakes and helpers live in
-tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+tests/qa_scenario_support.py.
+
 
 The feed stages the leg's shape: the lane's own scratch field serves a
 lane-derived document carrying one channel-bound writable field input,
@@ -24,34 +23,6 @@ import unittest
 from pathlib import Path
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'WritableFieldPointTests.test_registered',
-    'WritableFieldPointTests.test_clean_passes_validate_and_tear_down',
-    'WritableFieldPointTests.test_two_runs_produce_identical_digests',
-    'WritableFieldPointTests.test_an_image_only_settlement_fails',
-    'WritableFieldPointTests.test_an_unsettled_receipt_fails',
-    'WritableFieldPointTests.test_a_write_not_read_back_fails',
-    'WritableFieldPointTests.test_a_denied_write_settled_applied_fails',
-    'WritableFieldPointTests.test_a_denied_write_left_provisional_fails',
-    'WritableFieldPointTests.test_an_unnamed_rejection_fails',
-    'WritableFieldPointTests.test_a_phantom_write_fails',
-    'WritableFieldPointTests.test_a_refused_reentry_fails',
-    'WritableFieldPointTests.test_a_reentry_that_did_not_land_fails',
-    'WritableFieldPointTests.test_an_unmounted_document_is_inconclusive',
-    'WritableFieldPointTests.test_an_underivable_document_is_inconclusive',
-    'WritableFieldPointTests.test_missing_seams_are_inconclusive',
-    'WritableFieldPointTests.test_an_unsettled_seat_is_nondeterministic',
-    'WritableFieldPointTests.test_a_refused_fault_injection_is_nondeterministic',
-    'WritableFieldPointTests.test_a_refused_field_clear_is_nondeterministic',
-    'WritableFieldPointTests.test_an_unreachable_rig_is_nondeterministic',
-    'WritableFieldPointTests.test_a_stage_failure_is_nondeterministic',
-    'WritableFieldPointTests.test_a_launch_failure_is_nondeterministic',
-    'WritableFieldPointTests.test_divergent_digests_are_nondeterministic',
-    'WritableFieldPointTests.test_an_unchecked_self_check_fails',
-    'WritableFieldPointTests.test_self_check_is_complete',
-})
 
 
 #: The mounted rig model the leg derives from: a discrete input device

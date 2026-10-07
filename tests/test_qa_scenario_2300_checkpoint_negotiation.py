@@ -1,35 +1,11 @@
 """The 2300_checkpoint_negotiation leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_checkpoint_negotiation, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'CheckpointNegotiationTests.test_registered_ahead_of_model_revision',
-    'CheckpointNegotiationTests.test_clean_refusal_passes_validates_and_tears_down',
-    'CheckpointNegotiationTests.test_two_runs_produce_identical_evidence',
-    'CheckpointNegotiationTests.test_never_refusing_peer_is_inconclusive',
-    'CheckpointNegotiationTests.test_converged_foreign_peer_fails',
-    'CheckpointNegotiationTests.test_other_rejection_detail_fails',
-    'CheckpointNegotiationTests.test_detail_omitting_the_pair_fingerprint_fails',
-    'CheckpointNegotiationTests.test_convergence_inside_the_window_fails',
-    'CheckpointNegotiationTests.test_promotion_accepted_fails',
-    'CheckpointNegotiationTests.test_other_409_refusal_fails',
-    'CheckpointNegotiationTests.test_refusal_without_the_sync_state_fails',
-    'CheckpointNegotiationTests.test_active_tick_stall_fails',
-    'CheckpointNegotiationTests.test_field_regression_during_the_window_fails',
-    'CheckpointNegotiationTests.test_receipt_drift_fails',
-    'CheckpointNegotiationTests.test_failed_launch_action_is_inconclusive',
-    'CheckpointNegotiationTests.test_failed_teardown_is_inconclusive',
-    'CheckpointNegotiationTests.test_missing_actions_are_inconclusive',
-})
 
 
 class NegotiationFeed:

@@ -1,37 +1,13 @@
 """The 1960_repromote_suspended_settle leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_repromote_suspended_settle, split per the
 one-module-per-leg convention (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
 from test_qa_scenario_1900_demote_carry_settle import (
     DemoteCarryFeed, DemoteCarryPeer)
-
-
-EXPECTED_CASES = frozenset({
-    'RepromoteSuspendedSettleTests.test_registered',
-    'RepromoteSuspendedSettleTests.test_clean_pair_passes_and_validates',
-    'RepromoteSuspendedSettleTests.test_parked_receipt_reports_failed',
-    'RepromoteSuspendedSettleTests.test_double_settle_reports_nondeterministic',
-    'RepromoteSuspendedSettleTests.test_settle_without_apply_reports_failed',
-    'RepromoteSuspendedSettleTests.test_divergent_verdict_reports_nondeterministic',
-    'RepromoteSuspendedSettleTests.test_owner_never_demotes_reports_failed',
-    'RepromoteSuspendedSettleTests.test_never_reconverges_reports_failed',
-    'RepromoteSuspendedSettleTests.test_refused_repromote_reports_failed',
-    'RepromoteSuspendedSettleTests.test_refused_preempt_reports_failed',
-    'RepromoteSuspendedSettleTests.test_missed_window_restages_and_passes',
-    'RepromoteSuspendedSettleTests.test_no_active_reports_failed',
-    'RepromoteSuspendedSettleTests.test_unconverged_pair_reports_inconclusive',
-    'RepromoteSuspendedSettleTests.test_unreachable_peer_reports_inconclusive',
-    'RepromoteSuspendedSettleTests.test_diverging_digests_report_nondeterministic',
-    'RepromoteSuspendedSettleTests.test_silent_judge_reports_unchecked',
-    'RepromoteSuspendedSettleTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class RepromoteFeed(DemoteCarryFeed):

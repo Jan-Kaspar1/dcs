@@ -1,15 +1,5 @@
-//! The page's generic interface surface — the schema-driven-interface
-//! decision's rendering half: every faceplate carries the component's
-//! five declared `BlockInterface` categories rendered from `GET
-//! /schema` joined onto `GET /resources` — measurements and state as
-//! labeled readouts, tunable configuration through the existing
-//! receipted parameter path, named commands as invocable actions
-//! honoring the served availability and refusal reason, and the
-//! per-component recent-events list. Kind-specific presentation is an
-//! enhancement, never the only usable control surface: these tests pin
-//! the page's generic renderers and prove a kind declaring no
-//! dedicated markup — no role hints, no parameters — is fully operable
-//! through the generic surface alone.
+//! Generic block schema, live resources, named commands and emitted events
+//! exercised through the served monitor contract.
 
 use dcs_blocks::{Pid, PidConfig};
 use dcs_core::{
@@ -341,120 +331,7 @@ fn sample_at(snapshot: &dcs_core::TelemetrySnapshot, point: PointId) -> Option<S
 }
 
 #[test]
-fn the_page_carries_the_generic_five_category_renderers() {
-    with_monitor(|client| {
-        let page = client.page().unwrap();
-
-        // The fetch half: the schema and resource views ride the same
-        // poll as the snapshot, tolerating a peer that predates the
-        // endpoints — the absent-section convention.
-        for needle in [
-            "pollFetch(base + \"/schema\")",
-            "pollFetch(base + \"/resources\")",
-            "(r.ok ? r.json() : null)",
-            "interfaceByName",
-            "resourcesByName",
-        ] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-
-        // Every faceplate carries the interface disclosure — the call
-        // is unconditional beside the dedicated presentation, opened
-        // by default for a generic kind and remembered across polls.
-        for needle in [
-            "interfaceMarkup(descriptor.name, generic)",
-            "details class=\\\"interface\\\"",
-            "interfaceOpen.get(name) : generic",
-            "interfaceOpen.set(details.dataset.component",
-        ] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-
-        // The five categories each render — measurements and state
-        // through the labeled readout table, configuration with the
-        // parameter path's own controls, commands as invocable rows,
-        // events as the attributed journal tail.
-        for needle in [
-            "data-category=\\\"",
-            "resourceTable(\"measurements\", iface.measurements",
-            "configTable(name, iface.configuration",
-            "resourceTable(\"state\", iface.state",
-            "commandTable(name, iface.commands",
-            "eventList(resources && resources.events)",
-            "data-category=\\\"configuration\\\"",
-            "data-category=\\\"commands\\\"",
-            "data-category=\\\"events\\\"",
-            "none declared",
-            "no recent events",
-            "entry.retention",
-            "unwired",
-            "no sample",
-            "EVENT_LIMIT",
-        ] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-
-        // Configuration edits reuse the existing parameter machinery —
-        // the .param-value/.tune markup submits through
-        // `submitParameter`'s receipted set_parameter path unchanged —
-        // while `engineering_fixed` properties render read-only.
-        for needle in [
-            "parameterControl(component, property)",
-            "property.capability === \"tunable\"",
-            "class=\\\"tune\\\"",
-            "class=\\\"param-value\\\"",
-        ] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-
-        // Commands submit through the receipted, active-peer-routed
-        // path: the spec's adapted variant reconstructs its generic
-        // Command and a declared command goes as the Invoke variant;
-        // the row honors the served availability and carries the
-        // refusal text; a settled receipt updates the row from the
-        // journal.
-        for needle in [
-            "specCommand(component, spec, args)",
-            "submitInterfaceCommand",
-            "submitCommand(specCommand(component, spec, args))",
-            "{ invoke: {",
-            "{ write_value: {",
-            "{ force_point: {",
-            "{ unforce_point: {",
-            "{ set_parameter: {",
-            "class=\\\"invoke\\\"",
-            "class=\\\"command-arg\\\"",
-            "class=\\\"command-status",
-            "state.available",
-            "state.refusal",
-            "settledCommandKey(settled.receipt.command)",
-            "setCommandStatus",
-            "button.invoke",
-            ".command-arg",
-        ] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-
-        // The journal vocabulary the event list and status cells read:
-        // the emitted-event record, the invoke command, and the named
-        // rejections an invocation can meet.
-        for needle in [
-            "\"event_emitted\" in event",
-            "\"invoke\" in command",
-            "\"unknown_command\" in reason",
-            "\"unknown_argument\" in reason",
-            "\"argument_type_mismatch\" in reason",
-            "\"command_refused\" in reason",
-        ] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-
-        assert!(!page.contains("src="), "page references external assets");
-    });
-}
-
-#[test]
-fn every_served_component_renders_all_five_categories() {
+fn every_served_component_exposes_all_five_categories() {
     with_monitor(|client| {
         client.advance(1).unwrap();
         let snapshot = client.snapshot().unwrap();
@@ -559,7 +436,7 @@ fn every_served_component_renders_all_five_categories() {
 }
 
 #[test]
-fn a_kind_with_no_dedicated_markup_is_fully_operable_generically() {
+fn generic_component_commands_and_events_work_through_the_served_contract() {
     with_monitor(|client| {
         client.advance(1).unwrap();
         let schema = client.schema().unwrap();

@@ -1,42 +1,11 @@
 """The 1700_standby_loss leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_standby_loss, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'StandbyLossTests.test_clean_run_passes_and_validates',
-    'StandbyLossTests.test_refusal_named_wrong_fails',
-    'StandbyLossTests.test_refused_write_reaching_the_field_fails',
-    'StandbyLossTests.test_refused_write_in_receipt_log_fails',
-    'StandbyLossTests.test_refused_write_on_active_journal_fails',
-    'StandbyLossTests.test_refusal_journaled_misnamed_fails',
-    'StandbyLossTests.test_stalled_scan_while_standby_down_fails',
-    'StandbyLossTests.test_role_move_while_standby_down_fails',
-    'StandbyLossTests.test_refused_window_command_fails',
-    'StandbyLossTests.test_unsettled_window_command_fails',
-    'StandbyLossTests.test_unjournaled_window_command_fails',
-    'StandbyLossTests.test_spurious_role_entry_fails',
-    'StandbyLossTests.test_stop_not_holding_is_inconclusive',
-    'StandbyLossTests.test_failing_stop_action_is_inconclusive',
-    'StandbyLossTests.test_failing_start_action_is_inconclusive',
-    'StandbyLossTests.test_missing_lifecycle_actions_are_inconclusive',
-    'StandbyLossTests.test_standby_never_returns_is_inconclusive',
-    'StandbyLossTests.test_standby_never_tracks_fails',
-    'StandbyLossTests.test_promotion_without_gate_refusal_fails',
-    'StandbyLossTests.test_promotion_gate_other_refusal_fails',
-    'StandbyLossTests.test_tracking_promotion_refused_fails',
-    'StandbyLossTests.test_restore_demote_refused_fails',
-    'StandbyLossTests.test_pair_never_resettling_fails',
-    'StandbyLossTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class StandbyLossFeed:

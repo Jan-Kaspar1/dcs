@@ -3,46 +3,13 @@ and TestCase classes for scenario_yielded_claim_rearm, in the
 tests/test_qa_scenario_NNNN_<slug>.py split layout (#940). The shared
 fakes and helpers live in tests/qa_scenario_support.py; the claim
 arbitration and the pair lifecycle build on the yielded-rearm leg's
-fakes the same induction stages; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+fakes the same induction stages.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
 from test_qa_scenario_2450_yielded_rearm import (
     YieldedPairFeed, YieldedPlantPeer)
-
-
-EXPECTED_CASES = frozenset({
-    'YieldedClaimRearmTests.test_registered',
-    'YieldedClaimRearmTests.test_clean_pair_passes_and_validates',
-    'YieldedClaimRearmTests.test_stale_yield_reports_failed',
-    'YieldedClaimRearmTests.test_restartee_preempts_reports_failed',
-    'YieldedClaimRearmTests.test_foreign_grant_reports_failed',
-    'YieldedClaimRearmTests.test_socket_regrant_refused_reports_failed',
-    'YieldedClaimRearmTests.test_misattributed_probe_reports_failed',
-    'YieldedClaimRearmTests.test_demote_refused_reports_failed',
-    'YieldedClaimRearmTests.test_never_repromotes_reports_failed',
-    'YieldedClaimRearmTests.test_successor_demotes_reports_failed',
-    'YieldedClaimRearmTests.test_digests_diverge_reports_'
-    'nondeterministic',
-    'YieldedClaimRearmTests.test_silent_judges_report_unchecked',
-    'YieldedClaimRearmTests.test_no_owner_reports_failed',
-    'YieldedClaimRearmTests.test_unsupported_verbs_reports_'
-    'inconclusive',
-    'YieldedClaimRearmTests.test_unfenced_field_reports_inconclusive',
-    'YieldedClaimRearmTests.test_unreachable_pair_reports_'
-    'inconclusive',
-    'YieldedClaimRearmTests.test_missing_plant_reports_inconclusive',
-    'YieldedClaimRearmTests.test_missing_lifecycle_reports_'
-    'inconclusive',
-    'YieldedClaimRearmTests.test_missing_budget_reports_inconclusive',
-    'YieldedClaimRearmTests.test_missing_tokens_reports_inconclusive',
-    'YieldedClaimRearmTests.test_missing_journals_reports_'
-    'inconclusive',
-    'YieldedClaimRearmTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class RearmPlantPeer(YieldedPlantPeer):

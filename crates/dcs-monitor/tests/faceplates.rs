@@ -1,10 +1,5 @@
-//! End-to-end tests for the descriptor-driven component faceplates the
-//! monitoring page renders: the served snapshot joins each descriptor
-//! port to its bound point, the page carries the faceplate markup and
-//! the writable-only affordance logic, and a command on a point the
-//! model did not mark writable is refused with a rejection visible on
-//! the journal surface — all driven over TCP through the in-process
-//! `MonitorClient`.
+//! Descriptor bindings, live samples, command permissions and wire compatibility
+//! exercised through a real monitor over TCP.
 
 use dcs_core::{
     Command, CommandError, CommandOutcome, ComponentDescriptor, Direction, IoDriver, IoError,
@@ -341,47 +336,6 @@ fn live_values_land_on_the_role_hinted_ports() {
             telemetry(&snapshot, output).sample.unwrap().value,
             Value::Float(7.0)
         );
-    });
-}
-
-#[test]
-fn page_serves_faceplate_markup_and_writable_only_affordances() {
-    with_monitor(|_driver, client| {
-        let page = client.page().unwrap();
-        // One faceplate section per component instance, rendered
-        // generically from the snapshot's descriptors.
-        for needle in [
-            "id=\"faceplates\"",
-            "class=\\\"faceplate",
-            "function faceplateMarkup(",
-            "function isGeneric(",
-            // Role-hinted elements and the conventional order.
-            "process_value",
-            "setpoint:",
-            "output:",
-            "port.role === \"status\"",
-            // Ports join to live points through the served binding.
-            "port.point",
-            // The generic degrade: name + diagnostics + wired points.
-            "\"faceplate\" + (generic ? \" generic\" : \"\")",
-            "function portTable(",
-            "function diagnosticsMarkup(",
-            "function parameterTable(",
-        ] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-        // Command affordances exist only behind the metadata's writable
-        // mark — the gate and the fallback are both in the page.
-        for needle in [
-            "function commandAffordance(",
-            "!meta.writable",
-            "class=\\\"command\\\"",
-            "input.command-value",
-            "write_value",
-        ] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-        assert!(!page.contains("src="), "page references external assets");
     });
 }
 

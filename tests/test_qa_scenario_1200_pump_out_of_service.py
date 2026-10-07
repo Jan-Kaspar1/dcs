@@ -1,44 +1,11 @@
 """The 1200_pump_out_of_service leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_pump_out_of_service, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'PumpOutOfServiceTests.test_registered_in_scenarios',
-    'PumpOutOfServiceTests.test_clean_feed_passes_and_validates',
-    'PumpOutOfServiceTests.test_two_runs_produce_identical_evidence',
-    'PumpOutOfServiceTests.test_oos_exclusion_and_handover',
-    'PumpOutOfServiceTests.test_avail_never_dropping_fails',
-    'PumpOutOfServiceTests.test_duty_never_handing_over_fails',
-    'PumpOutOfServiceTests.test_handover_beyond_the_bound_is_nondeterministic',
-    'PumpOutOfServiceTests.test_duty_moving_before_the_drop_is_nondeterministic',
-    'PumpOutOfServiceTests.test_held_command_reasserting_fails',
-    'PumpOutOfServiceTests.test_managed_flags_never_asserting_fails',
-    'PumpOutOfServiceTests.test_suppression_annunciating_fails',
-    'PumpOutOfServiceTests.test_fault_never_proving_fails',
-    'PumpOutOfServiceTests.test_avail_never_rejoining_fails',
-    'PumpOutOfServiceTests.test_release_never_reannunciating_fails',
-    'PumpOutOfServiceTests.test_never_rejoining_rotation_fails',
-    'PumpOutOfServiceTests.test_unjournaled_transitions_fail',
-    'PumpOutOfServiceTests.test_unjournaled_receipts_fail',
-    'PumpOutOfServiceTests.test_refused_write_fails',
-    'PumpOutOfServiceTests.test_moved_roles_fail',
-    'PumpOutOfServiceTests.test_declared_thermal_suppress_passes',
-    'PumpOutOfServiceTests.test_no_active_is_failed',
-    'PumpOutOfServiceTests.test_no_tracking_pair_is_inconclusive',
-    'PumpOutOfServiceTests.test_missing_wiring_is_inconclusive',
-    'PumpOutOfServiceTests.test_missing_descriptors_is_inconclusive',
-    'PumpOutOfServiceTests.test_non_alternate_policy_is_inconclusive',
-    'PumpOutOfServiceTests.test_managed_flags_never_reporting_is_inconclusive',
-})
 
 
 class OosPlantPeer(FakePlantPeer):

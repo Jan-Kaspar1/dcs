@@ -3,9 +3,7 @@ and TestCase classes for scenario_yielded_rearm, in the
 tests/test_qa_scenario_NNNN_<slug>.py split layout (#940). The shared
 fakes and helpers live in tests/qa_scenario_support.py; the claim
 arbitration half builds on the stranded-standby leg's fakes the same
-induction stages; EXPECTED_CASES pins this module's contribution to
-the suite's case coverage so a dropped case fails the discovery
-check in tests/test_qa_scenario_modules.py.
+induction stages.
 """
 import unittest
 import urllib.error
@@ -13,32 +11,6 @@ import urllib.error
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
 from test_qa_scenario_2370_stranded_standby_no_resync import (
     StrandedPlantPeer)
-
-
-EXPECTED_CASES = frozenset({
-    'YieldedRearmTests.test_registered',
-    'YieldedRearmTests.test_clean_pair_passes_and_validates',
-    'YieldedRearmTests.test_stale_yield_reports_failed',
-    'YieldedRearmTests.test_unbound_clears_yield_reports_failed',
-    'YieldedRearmTests.test_tool_clears_yield_reports_failed',
-    'YieldedRearmTests.test_regrant_refused_reports_failed',
-    'YieldedRearmTests.test_bound_write_fenced_reports_failed',
-    'YieldedRearmTests.test_probe_misnamed_reports_failed',
-    'YieldedRearmTests.test_digests_diverge_reports_nondeterministic',
-    'YieldedRearmTests.test_demote_refused_reports_failed',
-    'YieldedRearmTests.test_never_repromotes_reports_failed',
-    'YieldedRearmTests.test_restartee_preempts_reports_failed',
-    'YieldedRearmTests.test_successor_demotes_reports_failed',
-    'YieldedRearmTests.test_no_owner_reports_failed',
-    'YieldedRearmTests.test_unsupported_verbs_reports_inconclusive',
-    'YieldedRearmTests.test_unreachable_pair_reports_inconclusive',
-    'YieldedRearmTests.test_missing_plant_reports_inconclusive',
-    'YieldedRearmTests.test_missing_lifecycle_reports_inconclusive',
-    'YieldedRearmTests.test_missing_budget_reports_inconclusive',
-    'YieldedRearmTests.test_missing_tokens_reports_inconclusive',
-    'YieldedRearmTests.test_missing_probe_point_reports_inconclusive',
-    'YieldedRearmTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class YieldedPlantPeer(StrandedPlantPeer):

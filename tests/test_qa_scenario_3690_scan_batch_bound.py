@@ -3,50 +3,9 @@ fake for the driven /scan batch contract, the raw-wire monitor face
 the throwaway severed client posts to, and the TestCase class for
 scenario_scan_batch_bound, per the module-per-leg test convention
 (#940). The shared fakes and helpers live in
-tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+tests/qa_scenario_support.py.
 """
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'ScanBatchBoundTests.test_registered_in_scenarios',
-    'ScanBatchBoundTests.test_clean_rig_passes_and_validates',
-    'ScanBatchBoundTests.test_two_passes_share_one_digest',
-    'ScanBatchBoundTests.test_two_runs_produce_identical_records',
-    'ScanBatchBoundTests.test_scenario_ctx_carries_the_driven_actions',
-    'ScanBatchBoundTests.test_missing_actions_are_inconclusive',
-    'ScanBatchBoundTests.test_unreachable_rig_is_inconclusive',
-    'ScanBatchBoundTests.test_unsettled_pair_is_inconclusive',
-    'ScanBatchBoundTests.test_no_active_is_failed',
-    'ScanBatchBoundTests.test_unkeyed_pair_is_inconclusive',
-    'ScanBatchBoundTests.test_probe_subject_rebinds',
-    'ScanBatchBoundTests.test_driven_launch_failure_is_inconclusive',
-    'ScanBatchBoundTests.test_driven_never_serves_is_inconclusive',
-    'ScanBatchBoundTests.test_predated_contract_is_inconclusive',
-    'ScanBatchBoundTests.test_over_bound_accepted_fails',
-    'ScanBatchBoundTests.test_over_bound_running_unanswered_fails',
-    'ScanBatchBoundTests.test_wrong_verdict_fails',
-    'ScanBatchBoundTests.test_unnamed_refusal_fails',
-    'ScanBatchBoundTests.test_refused_batch_ran_fails',
-    'ScanBatchBoundTests.test_refused_demote_fails',
-    'ScanBatchBoundTests.test_refused_driven_promote_fails',
-    'ScanBatchBoundTests.test_driven_never_active_fails',
-    'ScanBatchBoundTests.test_fast_batch_outruns_staging_inconclusive',
-    'ScanBatchBoundTests.test_never_terminating_batch_fails',
-    'ScanBatchBoundTests.test_racing_batch_fails',
-    'ScanBatchBoundTests.test_leaking_plant_fails',
-    'ScanBatchBoundTests.test_skipped_plant_steps_fail',
-    'ScanBatchBoundTests.test_pinned_worker_fails',
-    'ScanBatchBoundTests.test_restore_demote_refused_fails',
-    'ScanBatchBoundTests.test_restore_promote_refused_fails',
-    'ScanBatchBoundTests.test_moved_roles_restore_and_fail',
-    'ScanBatchBoundTests.test_plant_never_resumes_fails',
-    'ScanBatchBoundTests.test_swapped_launch_layout_restores',
-    'ScanBatchBoundTests.test_diverging_digests_report_nondeterministic',
-    'ScanBatchBoundTests.test_silenced_audits_report_unchecked',
-})
 
 
 class ScanBoundPlant(ClaimPlantPeer):

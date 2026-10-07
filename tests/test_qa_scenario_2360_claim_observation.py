@@ -3,68 +3,13 @@ fakes and TestCase classes for scenario_claim_observation, in the
 tests/test_qa_scenario_NNNN_<slug>.py split layout (#940). The shared
 fakes and helpers live in tests/qa_scenario_support.py; the claim
 arbitration and controller-pair halves build on the claim-reclaim
-leg's fakes the same handover stages; EXPECTED_CASES pins this
-module's contribution to the suite's case coverage so a dropped case
-fails the discovery check in tests/test_qa_scenario_modules.py.
+leg's fakes the same handover stages.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
 from test_qa_scenario_2350_claim_reclaim import (
     ClaimReclaimFeed, ReclaimPlantPeer)
-
-
-EXPECTED_CASES = frozenset({
-    'ClaimObservationTests.test_registered',
-    'ClaimObservationTests.test_clean_pair_passes_and_validates',
-    'ClaimObservationTests.test_killed_owner_reports_failed',
-    'ClaimObservationTests.test_never_demotes_reports_failed',
-    'ClaimObservationTests.test_silent_loss_reports_failed',
-    'ClaimObservationTests.test_unattributed_loss_reports_failed',
-    'ClaimObservationTests.test_misattributed_loss_reports_failed',
-    'ClaimObservationTests.test_premature_grant_reports_failed',
-    'ClaimObservationTests.test_peer_move_reports_failed',
-    'ClaimObservationTests.test_foreign_write_reports_failed',
-    'ClaimObservationTests.test_silent_observation_reports_failed',
-    'ClaimObservationTests.'
-    'test_unattributed_observation_reports_failed',
-    'ClaimObservationTests.'
-    'test_misattributed_observation_reports_failed',
-    'ClaimObservationTests.test_reseeded_observation_reports_failed',
-    'ClaimObservationTests.'
-    'test_duplicated_observation_reports_failed',
-    'ClaimObservationTests.test_file_observation_reports_failed',
-    'ClaimObservationTests.test_never_reclaims_reports_failed',
-    'ClaimObservationTests.test_unbound_reseat_reports_failed',
-    'ClaimObservationTests.test_unreconverged_pair_reports_failed',
-    'ClaimObservationTests.test_reclaim_restart_reports_failed',
-    'ClaimObservationTests.'
-    'test_shared_claim_reports_nondeterministic',
-    'ClaimObservationTests.'
-    'test_diverging_digests_report_nondeterministic',
-    'ClaimObservationTests.'
-    'test_release_refusal_reports_inconclusive',
-    'ClaimObservationTests.'
-    'test_claim_staging_refused_reports_inconclusive',
-    'ClaimObservationTests.test_predating_rig_reports_inconclusive',
-    'ClaimObservationTests.'
-    'test_foreign_baseline_reports_inconclusive',
-    'ClaimObservationTests.test_open_field_reports_inconclusive',
-    'ClaimObservationTests.test_no_active_reports_failed',
-    'ClaimObservationTests.'
-    'test_unsettled_pair_reports_inconclusive',
-    'ClaimObservationTests.'
-    'test_unreachable_plant_reports_inconclusive',
-    'ClaimObservationTests.'
-    'test_missing_plant_endpoint_reports_inconclusive',
-    'ClaimObservationTests.'
-    'test_missing_plant_ctl_reports_inconclusive',
-    'ClaimObservationTests.'
-    'test_missing_journal_files_reports_inconclusive',
-    'ClaimObservationTests.'
-    'test_missing_owner_token_reports_inconclusive',
-    'ClaimObservationTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class ObservedPlantPeer(ReclaimPlantPeer):

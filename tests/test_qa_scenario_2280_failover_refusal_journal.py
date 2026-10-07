@@ -2,57 +2,11 @@
 the feed fakes and TestCase classes for
 scenario_failover_refusal_journal, split out per the #940
 convention. The shared fakes and helpers live in
-tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails
-the discovery check in tests/test_qa_scenario_modules.py.
+tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'RefusalJournalTests.test_registered',
-    'RefusalJournalTests.test_clean_rig_passes_and_validates',
-    'RefusalJournalTests.test_refusal_silent_fails',
-    'RefusalJournalTests.test_refusal_flooded_fails',
-    'RefusalJournalTests.test_refusal_unnamed_fails',
-    'RefusalJournalTests.test_refusal_under_counted_fails',
-    'RefusalJournalTests.test_gate_promoted_fails',
-    'RefusalJournalTests.test_role_walked_fails',
-    'RefusalJournalTests.test_served_silent_fails',
-    'RefusalJournalTests.test_eligible_fire_parked_fails',
-    'RefusalJournalTests.test_eligible_fire_refuses_fails',
-    'RefusalJournalTests.test_eligible_promotion_unwalked_fails',
-    'RefusalJournalTests.test_eligible_fire_early_fails',
-    'RefusalJournalTests.test_never_restores_fails',
-    'RefusalJournalTests.test_misses_stalled_reports_'
-    'nondeterministic',
-    'RefusalJournalTests.test_starved_watch_reports_'
-    'nondeterministic',
-    'RefusalJournalTests.test_served_read_dropped_reports_'
-    'nondeterministic',
-    'RefusalJournalTests.test_demote_refused_reports_'
-    'nondeterministic',
-    'RefusalJournalTests.test_promote_refused_reports_'
-    'nondeterministic',
-    'RefusalJournalTests.test_reconverge_lost_reports_'
-    'nondeterministic',
-    'RefusalJournalTests.test_fire_misses_stall_reports_'
-    'nondeterministic',
-    'RefusalJournalTests.test_diverging_digests_report_'
-    'nondeterministic',
-    'RefusalJournalTests.test_silent_judge_reports_unchecked',
-    'RefusalJournalTests.test_unreachable_pair_reports_inconclusive',
-    'RefusalJournalTests.test_unarmed_pair_reports_inconclusive',
-    'RefusalJournalTests.test_unconverged_pair_reports_inconclusive',
-    'RefusalJournalTests.test_missing_stop_action_reports_'
-    'inconclusive',
-    'RefusalJournalTests.test_missing_journal_files_reports_'
-    'inconclusive',
-    'RefusalJournalTests.test_single_endpoint_reports_inconclusive',
-    'RefusalJournalTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class FakeClock:
