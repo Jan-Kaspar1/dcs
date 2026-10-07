@@ -186,6 +186,7 @@ def spawn_peer(
     listen="127.0.0.1:0",
     bound=None,
     pair_token=None,
+    revised=False,
 ):
     """Spawn `dcs-controller <model> --remote … --driven` for one pair
     peer — `standby` the manifest's tracking wiring (None on the field
@@ -199,7 +200,10 @@ def spawn_peer(
     leg's evidence the declared wildcard bind actually deployed —
     `pair_token` the deployment's shared tracking secret a pair member
     carries (None leaves the run unkeyed — the foreign and lone peers
-    the negotiation and startup legs spawn). Returns `(process,
+    the negotiation and startup legs spawn), `revised` arming the
+    in-service model-revision path — the peer consumes the tracked
+    checkpoints across the model boundary under the carryover rule
+    instead of degrading on the fingerprint. Returns `(process,
     monitor_url, preamble)`: `monitor_url` is the
     dialable form of the reported bind — a wildcard bind normalized
     to loopback — or None when the process exits before reporting a
@@ -218,6 +222,8 @@ def spawn_peer(
     ]
     if standby is not None:
         argv += ["--standby", standby]
+    if revised:
+        argv += ["--revised"]
     if auto_promote is not None:
         argv += ["--auto-promote", str(auto_promote)]
     if pair_token is not None:
