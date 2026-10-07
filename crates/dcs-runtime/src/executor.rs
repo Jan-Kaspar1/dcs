@@ -616,6 +616,62 @@ fn parameter_value_stands(checkpointed: Value, declared: Value) -> bool {
         )
 }
 
+/// Whether a receipt carries a terminal verdict — the admission
+/// resolved, applied or rejected. An `Accepted` receipt is a pending
+/// claim, never a settlement, and takes no part in arbitration.
+fn settled_verdict(receipt: &CommandReceipt) -> bool {
+    !matches!(receipt.outcome, CommandOutcome::Accepted { .. })
+}
+
+/// Whether `left` precedes `right` in the settled-verdict order — the
+/// deterministic arbitration two lines apply to one contradictory pair
+/// of settlements at one submission index.
+///
+/// The order answers from the two receipts alone: it never reads the
+/// puller's role, the pull's direction, or any clock the two lines do
+/// not already share inside the receipts, so both lines compute the
+/// same winner from the same pair and the merge is idempotent — the
+/// line already holding the winner keeps it, and the line holding the
+/// loser converges on the next adoption. Last-pull-wins between
+/// contradictory terminal verdicts cannot exist here: the pair's two
+/// receipts order the same way whichever line is asking.
+///
+/// The order is total on distinct receipts, in three steps:
+///
+/// 1. an `Applied` verdict precedes a `Rejected` one — an effect that
+///    reached the field is not retracted by a peer's differing local
+///    adjudication, and the pair's audit must keep naming what was
+///    written;
+/// 2. among `Applied` verdicts the earlier apply tick precedes the
+///    later one — the pair's *first* settlement of the admission is the
+///    record, and a later settlement at the same index is the duplicate
+///    adjudication (the fenced owner's own boundary against the
+///    promoted peer's carry of the same still-`Accepted` receipt), not
+///    a new truth;
+/// 3. among `Rejected` verdicts — which carry no tick — the canonical
+///    rendering of the two named reasons orders them. That step claims
+///    no domain meaning: it exists so the order stays total, and the
+///    pair converges whichever rejection each line recorded.
+///
+/// A receipt whose outcome is `Accepted` has no standing in the order
+/// and precedes nothing: the merge's positional rules settle which
+/// side of a pending/settled pair stands
+/// ([`Executor::adopt_receipts`]), never this one.
+fn settled_precedes(left: &CommandReceipt, right: &CommandReceipt) -> bool {
+    match (&left.outcome, &right.outcome) {
+        (CommandOutcome::Applied { tick: earlier }, CommandOutcome::Applied { tick: later }) => {
+            earlier < later
+        }
+        (CommandOutcome::Applied { .. }, CommandOutcome::Rejected { .. }) => true,
+        (CommandOutcome::Rejected { .. }, CommandOutcome::Applied { .. }) => false,
+        (
+            CommandOutcome::Rejected { reason: earlier },
+            CommandOutcome::Rejected { reason: later },
+        ) => format!("{earlier:?}") < format!("{later:?}"),
+        _ => false,
+    }
+}
+
 /// A command resolved past static validation: what
 /// [`Executor::apply_commands`] carries out at the scan boundary.
 enum Resolved {
@@ -2246,6 +2302,24 @@ impl<'d> Executor<'d> {
     /// have applied: the resumed-stale-peer double-apply the
     /// receipted-command contract refuses.
     ///
+    /// Where *both* sides have settled the same submission at one
+    /// index to *different* terminal verdicts there is no staler
+    /// record to prefer — the pair holds a contradiction, which
+    /// [`settled_precedes`] arbitrates: an `Applied` verdict outranks a
+    /// `Rejected` one, and among `Applied` verdicts the earlier apply
+    /// tick stands as the pair's first settlement. The order answers
+    /// from the two receipts alone, so both lines converge on the same
+    /// verdict without coordination, the merge is idempotent, and the
+    /// contradiction is arbitrated away rather than answered by
+    /// whichever line pulled last. That is what keeps the receipt log
+    /// the pair's one command audit: without it, a pair that tracked
+    /// each other across an adoption window handed the index back and
+    /// forth — each adoption a fresh outcome, the served log flapping
+    /// and every flip a settled receipt the settle journal emitted
+    /// again. Each line's own first settlement stays in its own
+    /// durable journal — an append-only record of what that line
+    /// observed — while the served receipt both lines answer converges.
+    ///
     /// The covered stretch carries one more rule, because an absolute
     /// index is not a submission identity: inside the promote/fence
     /// window the demoting peer and its successor can each mint a
@@ -2385,6 +2459,40 @@ impl<'d> Executor<'d> {
             {
                 *receipt = settled.clone();
             }
+        }
+        // Contradictory settlements at one index are arbitrated, not
+        // adopted: where this run and the adopted window both settled
+        // the *same submission* to different terminal verdicts, the
+        // pair holds a contradiction no pull can resolve by being
+        // last — `settled_precedes` orders the two verdicts from the
+        // receipts alone, so both lines land on the same one however
+        // the pair adopted, and the merge stays idempotent. The
+        // winner is the run's own verdict when this run already holds
+        // it, which leaves the settled log — and the line's own
+        // already-journaled settle — untouched; only a run holding
+        // the loser moves, onto the pair's first settlement. A
+        // different submission at the index is the collision the split
+        // mint below handles, and a pending entry on either side is
+        // the positional rules above, so neither reaches this pass.
+        for (position, receipt) in self.receipts.iter_mut().enumerate() {
+            if !settled_verdict(receipt) {
+                continue;
+            }
+            let index = checkpoint.receipt_base() + position as u64;
+            let Some(local) = index
+                .checked_sub(prior_base)
+                .and_then(|prior_position| prior.get(prior_position as usize))
+            else {
+                continue;
+            };
+            if local == receipt
+                || !settled_verdict(local)
+                || !local.same_submission(receipt)
+                || !settled_precedes(local, receipt)
+            {
+                continue;
+            }
+            *receipt = local.clone();
         }
         // The adopted log is re-trimmed to this run's own bound: a
         // checkpoint captured under a looser capacity cannot grow this
@@ -7021,6 +7129,362 @@ mod tests {
         assert_eq!(restored.receipts(), active.receipts());
     }
 
+    /// The adopted staler receipt view #709 records — a checkpoint whose
+    /// window at an index this run already settled still reads
+    /// `Accepted`, because the peer's capture landed before the applying
+    /// boundary. Rule (a)'s absorption refuses the regression: the run's
+    /// own terminal verdict stands, the covering adoption that confirms
+    /// it lands no second transition for the recorder to journal, and the
+    /// admission is never re-queued onto the field.
+    ///
+    /// The pre-fix shape is the verbatim `clone_from` of the adopted
+    /// window: the local outcome moves backward silently, the covering
+    /// adoption restores it, and the recorder reads that restoration as a
+    /// fresh observable transition and journals `command_settled` a
+    /// second time for one admission.
+    #[test]
+    fn an_adopted_stale_view_never_regresses_a_settled_receipt() {
+        let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut holder = setpoint_rig(&driver);
+        holder.submit_command_as(
+            write_value(10, ValueKind::Float, Value::Float(5.0)),
+            Some("operator-7".to_string()),
+        );
+        holder.scan();
+        let settled = holder.receipts()[0].clone();
+        assert_eq!(settled.outcome, CommandOutcome::Applied { tick: Tick(1) });
+        assert_eq!(driver_value(&driver, 20), Value::Float(10.0));
+
+        // The peer's staler window: the same submission at the same
+        // absolute index, still pending on the source's own capture.
+        let mut staler = holder.checkpoint();
+        staler.receipts[0].outcome = CommandOutcome::Accepted {
+            apply_tick: Tick(2),
+        };
+
+        // The adoption the finding staged: a settled receipt the adopted
+        // window still shows `Accepted` is a staler record of this run's
+        // own verdict, not a license to un-settle it.
+        holder.apply(&staler).unwrap();
+        assert_eq!(
+            holder.receipts()[0].outcome,
+            CommandOutcome::Applied { tick: Tick(1) },
+            "an adopted stale view must never regress a settled receipt: \
+             {:?}",
+            holder.receipts()
+        );
+        assert_eq!(
+            holder.snapshot().command_queue.depth,
+            0,
+            "the restored verdict must not re-queue the admission: {:?}",
+            holder.snapshot().command_queue
+        );
+        // And nothing re-applies on the field: a regressed entry lands
+        // the command a second time at this run's next boundary.
+        holder.scan();
+        assert_eq!(
+            driver_value(&driver, 20),
+            Value::Float(10.0),
+            "the regression must not re-execute the command"
+        );
+        assert_eq!(holder.receipts()[0], settled);
+
+        // The covering adoption — the peer's next capture, showing the
+        // settled verdict — confirms rather than re-settles: whatever the
+        // peer captured, the index still carries this run's one
+        // settlement, and alternating between the two views at the
+        // ping-pong's cadence never trades the verdict back.
+        let covering = holder.checkpoint();
+        for round in 0..4 {
+            holder.apply(&staler).unwrap();
+            holder.apply(&covering).unwrap();
+            assert_eq!(
+                holder.receipts()[0],
+                settled,
+                "round {round}: the pair must not trade the verdict back"
+            );
+        }
+
+        // The refusal is per submission, not per index: a different
+        // admission at the same index is the split mint rule (c) names,
+        // so the adopted entry lands as the line's own record there
+        // rather than being read as a staler view of this run's.
+        let mut foreign = holder.checkpoint();
+        foreign.receipts[0].actor = Some("operator-9".to_string());
+        holder.apply(&foreign).unwrap();
+        assert_eq!(
+            holder.receipts()[0].actor.as_deref(),
+            Some("operator-9"),
+            "a different submission at the index is not this run's \
+             settled verdict to hold: {:?}",
+            holder.receipts()
+        );
+    }
+
+    /// The settled-verdict order both lines compute from a contradictory
+    /// pair alone: an effect that reached the field outranks a peer's
+    /// differing rejection, the earlier application is the pair's first
+    /// settlement, and two rejections order totally without claiming
+    /// which reason was right.
+    #[test]
+    fn the_settled_verdict_order_is_total_and_answers_from_the_pair() {
+        let minted = |outcome| CommandReceipt {
+            command: write_value(10, ValueKind::Float, Value::Float(5.0)),
+            outcome,
+            actor: Some("operator-7".to_string()),
+            reason: None,
+            submission: None,
+        };
+        let applied = |tick| minted(CommandOutcome::Applied { tick: Tick(tick) });
+        let superseded = || {
+            minted(CommandOutcome::Rejected {
+                reason: CommandError::Superseded { point: None },
+            })
+        };
+        let unwritable = || {
+            minted(CommandOutcome::Rejected {
+                reason: CommandError::NotWritable { point: PointId(10) },
+            })
+        };
+
+        // An application outranks a rejection, in both directions.
+        assert!(settled_precedes(&applied(9), &superseded()));
+        assert!(!settled_precedes(&superseded(), &applied(1)));
+        // Among applications the earlier tick stands as the pair's first
+        // settlement, and neither direction holds for equal receipts.
+        assert!(settled_precedes(&applied(1), &applied(9)));
+        assert!(!settled_precedes(&applied(9), &applied(1)));
+        assert!(!settled_precedes(&applied(4), &applied(4)));
+        // Two rejections order one way only — antisymmetry is what makes
+        // the pair converge whichever line pulls.
+        assert_ne!(superseded(), unwritable());
+        assert_ne!(
+            settled_precedes(&superseded(), &unwritable()),
+            settled_precedes(&unwritable(), &superseded()),
+            "the order must not hold in both directions",
+        );
+        // A pending receipt has no standing: the merge's positional
+        // rules settle which side of a pending/settled pair stands.
+        let accepted = || {
+            minted(CommandOutcome::Accepted {
+                apply_tick: Tick(1),
+            })
+        };
+        assert!(!settled_precedes(&accepted(), &applied(1)));
+        assert!(!settled_precedes(&applied(1), &accepted()));
+    }
+
+    /// QA finding `divergent-settled-receipts-oscillate-flooding-journal`:
+    /// two runs holding the *same submission* settled to *different*
+    /// terminal verdicts at one submission index converge on one
+    /// arbitrated verdict under mutual adoption, and stay converged.
+    ///
+    /// The reproduction is the pair's fence window: the boundary pull
+    /// carried the still-`Accepted` admission onto the successor, and
+    /// each line then settled it at its own boundary. Adoption used to
+    /// answer last-pull-wins, so a pair tracking each other handed the
+    /// index back and forth — a fresh outcome on every adoption, the
+    /// served log flapping and every flip another settled line in the
+    /// durable journal.
+    #[test]
+    fn a_contradictory_settled_pair_converges_to_one_arbitrated_verdict() {
+        let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut earlier = setpoint_rig(&driver);
+        earlier.submit_command_as(
+            write_value(10, ValueKind::Float, Value::Float(5.0)),
+            Some("operator-7".to_string()),
+        );
+        earlier.scan();
+        assert_eq!(
+            earlier.receipts()[0].outcome,
+            CommandOutcome::Applied { tick: Tick(1) }
+        );
+
+        // The sibling's half of the contradiction: the same submission
+        // at the same index, settled at its own boundary's later tick.
+        let mut document = earlier.checkpoint();
+        document.receipts[0].outcome = CommandOutcome::Applied { tick: Tick(9) };
+        let sibling_driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut later = Executor::restore(
+            &sibling_driver,
+            PointMap::new()
+                .with_writable_point(PointId(10), Direction::In, ValueKind::Float)
+                .with_point(PointId(20), Direction::Out, ValueKind::Float)
+                .with_point(PointId(30), Direction::Out, ValueKind::Float),
+            vec![Box::new(Scale {
+                name: "a",
+                input: PointId(10),
+                output: PointId(20),
+                gain: 2.0,
+            })],
+            &document,
+            None,
+        )
+        .unwrap();
+        assert_ne!(
+            earlier.receipts(),
+            later.receipts(),
+            "the staged pair contradicts"
+        );
+
+        // Mutual adoption, alternately — the pair tracking each other
+        // across an adoption window. One round arbitrates; the rest
+        // change nothing, which is the idempotence the ping-pong
+        // lacked.
+        for round in 0..4 {
+            earlier.apply(&later.checkpoint()).unwrap();
+            later.apply(&earlier.checkpoint()).unwrap();
+            assert_eq!(
+                earlier.receipts(),
+                later.receipts(),
+                "the pair must agree after round {round}",
+            );
+            // The earlier application is the pair's first settlement, so
+            // the line holding it never moves at all.
+            assert_eq!(
+                earlier.receipts()[0].outcome,
+                CommandOutcome::Applied { tick: Tick(1) },
+                "round {round}",
+            );
+        }
+        assert_eq!(
+            later.receipts()[0].outcome,
+            CommandOutcome::Applied { tick: Tick(1) }
+        );
+
+        // The admission count is untouched by arbitration: the pair
+        // minted one receipt for the one submission, so the durable
+        // audit cannot grow a second settle for it.
+        assert_eq!(earlier.receipts().len(), 1);
+        assert_eq!(later.receipts().len(), 1);
+        assert_eq!(earlier.receipt_base(), 0);
+        assert_eq!(later.receipt_base(), 0);
+    }
+
+    /// The pair's other contradictory class: one line's boundary wrote
+    /// the effect, the sibling's adjudicated the same admission as a
+    /// rejection. The applied verdict stands on both sides — an effect
+    /// that reached the field is not retracted by a peer's differing
+    /// local adjudication.
+    #[test]
+    fn an_applied_verdict_stands_against_a_peers_rejection() {
+        let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut applied = setpoint_rig(&driver);
+        applied.submit_command_as(
+            write_value(10, ValueKind::Float, Value::Float(5.0)),
+            Some("operator-7".to_string()),
+        );
+        applied.scan();
+
+        let mut document = applied.checkpoint();
+        document.receipts[0].outcome = CommandOutcome::Rejected {
+            reason: CommandError::Superseded { point: None },
+        };
+        let sibling_driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut rejected = Executor::restore(
+            &sibling_driver,
+            PointMap::new()
+                .with_writable_point(PointId(10), Direction::In, ValueKind::Float)
+                .with_point(PointId(20), Direction::Out, ValueKind::Float)
+                .with_point(PointId(30), Direction::Out, ValueKind::Float),
+            vec![Box::new(Scale {
+                name: "a",
+                input: PointId(10),
+                output: PointId(20),
+                gain: 2.0,
+            })],
+            &document,
+            None,
+        )
+        .unwrap();
+
+        // Whichever direction the pair adopts in, both lines land on the
+        // application.
+        applied.apply(&rejected.checkpoint()).unwrap();
+        assert_eq!(
+            applied.receipts()[0].outcome,
+            CommandOutcome::Applied { tick: Tick(1) },
+            "the line holding the applied verdict keeps it",
+        );
+        rejected.apply(&applied.checkpoint()).unwrap();
+        assert_eq!(
+            rejected.receipts()[0].outcome,
+            CommandOutcome::Applied { tick: Tick(1) },
+            "the sibling adopts the arbitrated winner",
+        );
+        rejected.apply(&applied.checkpoint()).unwrap();
+        assert_eq!(applied.receipts(), rejected.receipts());
+    }
+
+    /// Arbitration is scoped to one admission's own contradiction: a
+    /// *different* submission at the index is the collision the split
+    /// mint re-homes beside the adopted window, and a still-`Accepted`
+    /// counterpart is the positional rules' — neither is arbitrated, so
+    /// the merge keeps its documented behavior for both.
+    #[test]
+    fn arbitration_touches_only_one_admissions_contradiction() {
+        let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut mine = setpoint_rig(&driver);
+        mine.submit_command_as(
+            write_value(10, ValueKind::Float, Value::Float(5.0)),
+            Some("operator-7".to_string()),
+        );
+        mine.scan();
+        // A second admission lands still `Accepted`: the line's own
+        // pending claim, which the adoption must not arbitrate away.
+        mine.submit_command_as(
+            write_value(10, ValueKind::Float, Value::Float(9.0)),
+            Some("operator-9".to_string()),
+        );
+
+        let mut document = mine.checkpoint();
+        // The sibling settled the *first* admission at its own later
+        // boundary and never saw the second one at all — it is still
+        // the same `Accepted` record the local run holds, so the
+        // adoption carries it verbatim.
+        document.receipts[0].outcome = CommandOutcome::Applied { tick: Tick(9) };
+        let sibling_driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let sibling = Executor::restore(
+            &sibling_driver,
+            PointMap::new()
+                .with_writable_point(PointId(10), Direction::In, ValueKind::Float)
+                .with_point(PointId(20), Direction::Out, ValueKind::Float)
+                .with_point(PointId(30), Direction::Out, ValueKind::Float),
+            vec![Box::new(Scale {
+                name: "a",
+                input: PointId(10),
+                output: PointId(20),
+                gain: 2.0,
+            })],
+            &document,
+            None,
+        )
+        .unwrap();
+        assert!(matches!(
+            mine.receipts()[1].outcome,
+            CommandOutcome::Accepted { .. }
+        ));
+
+        mine.apply(&sibling.checkpoint()).unwrap();
+        // The contradiction arbitrates; the pending counterpart was
+        // never a settlement and rides the line's own boundary.
+        assert_eq!(
+            mine.receipts()[0].outcome,
+            CommandOutcome::Applied { tick: Tick(1) }
+        );
+        assert!(matches!(
+            mine.receipts()[1].outcome,
+            CommandOutcome::Accepted { .. }
+        ));
+        mine.scan();
+        assert_eq!(
+            mine.receipts()[1].outcome,
+            CommandOutcome::Applied { tick: Tick(2) },
+            "the pending admission still settles at its own boundary",
+        );
+        assert_eq!(mine.receipts().len(), 2);
+    }
+
     #[test]
     fn a_full_command_queue_refuses_admission_until_a_scan_drains_it() {
         // The bounded-ingress bound: at capacity a validated command is
@@ -9871,6 +10335,7 @@ mod tests {
                     working_counter_mismatches: state.shortfalls,
                     last_exchange_tick: state.last_exchange_tick,
                     missed_deadlines: state.missed_deadlines,
+                    buses: Vec::new(),
                 }),
             })
         }
@@ -10152,6 +10617,7 @@ mod tests {
                     working_counter_mismatches: 0,
                     last_exchange_tick: Some(Tick(1)),
                     missed_deadlines: 0,
+                    buses: Vec::new(),
                 }),
             }
         );
@@ -10357,6 +10823,7 @@ mod tests {
                 working_counter_mismatches: 0,
                 last_exchange_tick: Some(Tick(4)),
                 missed_deadlines: 1,
+                buses: Vec::new(),
             }
         );
         // The recovered link reports connected again.

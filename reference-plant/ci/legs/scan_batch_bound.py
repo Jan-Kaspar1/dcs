@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The scan-batch bound leg for the reference plant — the consumer-side
-proof that the deployed pair's driven `POST /scan` accepts only
+proof that the declared pair's driven `POST /scan` accepts only
 bounded batches: a `scans` past the monitor's declared per-request
 bound is refused `400` by name before the first scan, and a batch
 whose client dies mid-flight still terminates inside its own request
@@ -12,13 +12,22 @@ boundary on the manifest-declared pair, whose controllers run
 The pair leg (`ci/legs/pair.py`) proves the declared pair runs and
 switches; the bounded-liveness leg proves its reads stay answered
 under a wedged client. This leg exercises the driven lane's work
-bound on the same deployment: without it one `POST /scan` carrying a
+bound on the same model and pair wiring: without it one `POST /scan` carrying a
 huge `scans` count hands a single client the run's whole timeline and
 pins its submission worker for as long as it cares to — and a client
 gone mid-batch leaves nothing to cancel the runaway work. The
 monitor's socket API hands a request no liveness to poll, so the
 declared bound is the cancellation: the batch that always terminates
-is the batch that is bounded. The run:
+is the batch that is bounded.
+
+This leg launches without the optional persistence files. Its unpaced
+256-scan burst can outrun the checkpoint writer's 64-entry queue on a
+contended runner; that queue's designed fatal refusal stops the batch
+and leaves the last published tick standing, which a longer settle
+deadline cannot repair. Persistence, restart, and durable history have
+their own legs on the manifest's full file-backed deployment. Here the
+HTTP work bound and the actual shared plant's step count own the proof.
+The run:
 
 - converges the declared standby to `tracking` through the pair
   leg's driven-tick loop, recording the field owner's served tick and
@@ -129,12 +138,35 @@ DOCTORED_BOUND = 128
 # for the batch to show its first scan (provably in flight before the
 # sever), the deadline for the bounded batch to run out, the quiet
 # window proving the dead client's batch holds its end rather than
-# climbing on, and the poll cadence — all wall-clock slack around work
-# that lands in milliseconds on the simulated plant.
-IN_FLIGHT_TIMEOUT_S = 30.0
-BATCH_SETTLE_TIMEOUT_S = 30.0
+# climbing on, and the poll cadence — all wall-clock slack around the
+# batch's work, none of it a contract assertion. Every check below is
+# an exactness claim (the tick lands exactly on the batch's bound, the
+# plant exactly on it, the follow-up exactly one past); the timings
+# only decide how long the run *waits* for that exactness to arrive.
+#
+# The settle deadline therefore scales with the declared bound rather
+# than naming one figure: a 256-scan batch that runs its scans in
+# milliseconds on an idle machine takes far longer on a CI runner
+# already carrying the rest of the workspace's test binaries, and a
+# fixed budget read that contention as a contract violation — the leg
+# reported "the batch never terminated" for a batch that was
+# terminating perfectly, just slower than the budget (main runs
+# 37236005898 and this branch's 37273526223; the tick stood at 188 and
+# 225 of 256 rather than having overrun). The budget is now generous
+# per scan, so the wall clock cannot decide a contract the tick
+# counter decides exactly.
+SETTLE_S_PER_SCAN_S = 1.0
+SETTLE_MIN_S = 30.0
+IN_FLIGHT_TIMEOUT_S = 60.0
 HOLD_SETTLE_S = 0.2
 POLL_INTERVAL_S = 0.02
+
+
+def batch_settle_timeout(bound):
+    """The severed batch's wait budget: the floor, or a generous
+    per-scan allowance for the bound the leg asks the monitor to run."""
+    return max(SETTLE_MIN_S, bound * SETTLE_S_PER_SCAN_S)
+
 
 # The tracking-first pair ticks the restore phase drives — the pair
 # leg's convergence count, past the adopted image's one-pull lag.
@@ -205,7 +237,7 @@ def scan_batch_pass(args, tamper):
     digest_entries, evidence, failures = [], {}, []
     rig = None
     try:
-        rig = pair.launch_pair(args, declared)
+        rig = pair.launch_pair(args, declared, persistence=False)
         duty_url, standby_url = rig.duty_url, rig.standby_url
 
         # Phase 1 — convergence, then the baselines the refusal and
@@ -325,7 +357,7 @@ def scan_batch_pass(args, tamper):
             evidence["severed_at"] = tick
         finally:
             client.close()
-        deadline = time.monotonic() + BATCH_SETTLE_TIMEOUT_S
+        deadline = time.monotonic() + batch_settle_timeout(bound)
         while tick < target and time.monotonic() < deadline:
             time.sleep(POLL_INTERVAL_S)
             tick = served_tick(duty_url, failures)

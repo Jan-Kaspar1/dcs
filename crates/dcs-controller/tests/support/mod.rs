@@ -466,6 +466,92 @@ pub fn canonicalize_origins(value: &mut serde_json::Value, seen: &mut Vec<u64>) 
     }
 }
 
+/// A controllable network path between a tracking peer's configured
+/// `--standby` address and the field owner it follows: while clear the
+/// relay forwards each connection to the retargetable upstream, and
+/// while partitioned it accepts and drops them — the refused/EOF
+/// failure a partitioned or dead source produces, and the transient
+/// fault injector a scripted run cuts for one pull. The flag is only
+/// ever flipped between scripted ticks, so a pull's verdict is never
+/// racy. The upstream is retargetable because a cold-restarted process
+/// binds a new ephemeral port and the configured address must keep
+/// reaching the respawned stream.
+pub struct Relay {
+    /// The address a configured `--standby` names as its source.
+    pub addr: SocketAddr,
+    upstream: std::sync::Arc<std::sync::Mutex<SocketAddr>>,
+    partitioned: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    accept: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Relay {
+    /// A relay forwarding to `upstream` — the field owner's monitor
+    /// address the tracking peer's `--standby` is pointed at.
+    pub fn forwarding(upstream: SocketAddr) -> Self {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let upstream = Arc::new(std::sync::Mutex::new(upstream));
+        let partitioned = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let accept = {
+            let upstream = Arc::clone(&upstream);
+            let partitioned = Arc::clone(&partitioned);
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    if stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let Ok(stream) = stream else { continue };
+                    if partitioned.load(Ordering::Relaxed) {
+                        // Dropped on the floor: the pull sees a refused
+                        // or immediately closed connection — fast, never
+                        // a hang.
+                        drop(stream);
+                    } else {
+                        let upstream = *upstream.lock().unwrap();
+                        std::thread::spawn(move || pump(stream, upstream));
+                    }
+                }
+            })
+        };
+        Self {
+            addr,
+            upstream,
+            partitioned,
+            stop,
+            accept: Some(accept),
+        }
+    }
+
+    /// Drops or restores the heartbeat path mid-run.
+    pub fn partition(&self, cut: bool) {
+        use std::sync::atomic::Ordering;
+        self.partitioned.store(cut, Ordering::Relaxed);
+    }
+
+    /// Repoints the forwarding at a restarted process's new address —
+    /// each later connection follows it.
+    pub fn retarget(&self, upstream: SocketAddr) {
+        *self.upstream.lock().unwrap() = upstream;
+    }
+}
+
+impl Drop for Relay {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        self.stop.store(true, Ordering::Relaxed);
+        // Wake the blocking accept so the loop observes the flag.
+        let _ = std::net::TcpStream::connect(self.addr);
+        if let Some(accept) = self.accept.take() {
+            let _ = accept.join();
+        }
+    }
+}
+
 /// Pumps one accepted connection against the real monitor: two copy
 /// loops, one per direction, each ending by half-closing the other
 /// side so the request/response pair completes and the sockets close

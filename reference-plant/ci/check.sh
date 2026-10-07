@@ -12,20 +12,36 @@
 #                (path-dependency-leak), on the pin's own remote and
 #                the same `tag`/`rev` fragment Cargo.toml spells, one
 #                precise revision across all three — at the revision
-#                the declared pin names: the tag's target read back
-#                off the remote, the declared full-sha rev, or the
-#                release record's filled Commit field. Read before
-#                any fetch can rewrite the file, so a committed
-#                lockfile that no longer records the pin is reported
-#                rather than silently re-resolved
+#                the declared pin names, and at every spelling Cargo
+#                accepts in `rev =`: the tag's target and every ref a
+#                `rev` names — a branch, a tag, any other ref the
+#                remote serves under that name — read back off the
+#                remote, a query the remote cannot answer refused as
+#                unverifiable rather than read as an absent tag
+#                (pin-unresolvable), a full-sha `rev` compared
+#                literally, a short-sha `rev` held to abbreviate the
+#                recorded revision — or the release record's filled
+#                Commit field — the record
+#                fetched at the pinned rev through the same remote, or
+#                the substituted tree under DCS_RECORD_DIR. Read
+#                before any resolve can rewrite the file, so a
+#                committed lockfile that no longer records the pin is
+#                reported rather than silently re-resolved
 #                (lockfile-stale); the leg's own doctored copies —
 #                a lockfile recorded at another revision, one missing
-#                a release crate's package block, and ones recording a
-#                release crate twice — a divergent `rev` record ahead
-#                of and behind the pinned block, and a path package's
-#                sourceless twin beside it — must each report their
-#                diagnostic (lockfile-stale-unchecked,
-#                path-dependency-leak-unchecked).
+#                a release crate's package block, one recording the
+#                pin at a commit the pin does not name, and ones
+#                recording a release crate twice — a divergent `rev`
+#                record ahead of and behind the pinned block, and a
+#                path package's sourceless twin beside it — must each
+#                report their diagnostic (lockfile-stale-unchecked,
+#                path-dependency-leak-unchecked), beside each movable
+#                `rev` spelling checked on a scratch remote the stage
+#                seeds itself: a lockfile recording a revision its
+#                pin has moved past refused, the same spelling
+#                recording the revision the pin does name accepted, so
+#                a pin Cargo resolves afresh is never admitted and
+#                left unchecked.
 #                The stage's digest of the file is what the resolve
 #                stage re-checks, naming a rewrite the fallback fetch
 #                performs on the committed artifact.
@@ -135,6 +151,28 @@
 #                run-boundary marker; a missing or unparseable state
 #                file never passes silently
 #                (restart-resume-failed, restart-resume-nondeterministic)
+#   stale-freshness
+#                this composition's own declared freshness budget
+#                (decision 45's `stale_after_ticks`) exercised on the
+#                deployed pair: the composition declares the budget on
+#                its primary wet-well level — under the manifest's
+#                failover budget, so staleness presents inside the
+#                writer-loss window — beside an unbudgeted neighbour
+#                on the same field step; the writer-holding peer is
+#                frozen so the field stops stepping while the surviving
+#                peer's reads keep answering, and the budgeted point
+#                must walk Good → Uncertain(Stale) at the declared lag
+#                while its unbudgeted neighbour keeps serving its last
+#                sample, the stale presentation degraded rather than a
+#                healthy last-known value, the declared failover-select
+#                annunciating rather than the control path holding the
+#                reading, and the resumed writer returning the point to
+#                Good with the stale interval retained in the served
+#                history and the pair's launch roles restored. The
+#                stage's doctored case — the held read served as a
+#                healthy last-known value — must report
+#                (stale-freshness-failed, stale-freshness-nondeterministic,
+#                stale-freshness-unchecked)
 #   surface      the served operator surface — the signal index, the
 #                monitoring page, the snapshot's descriptors, the
 #                block-interface registry covering every declared
@@ -254,8 +292,9 @@
 #                mechanism — into a scratch root.
 #   DCS_RECORD_DIR
 #                a directory holding the release record tree
-#                (`docs/releases/<tag>/…`) the schema-drift leg
-#                compares the tooling's emissions against. When unset
+#                (`docs/releases/<tag>/…`) the lockfile stage's
+#                Commit-field leg and the tooling stage's schema-drift
+#                legs compare against. When unset
 #                — the contract's own shape — the record is fetched
 #                from $DCS_REMOTE at $DCS_REV. The workspace-side
 #                proof substitutes the checkout's own docs/releases:
@@ -280,8 +319,14 @@ TOOLS=""
 TOOLS_REV=""
 UPGRADE_DIR=""
 INSTALL_ROOTS=""
+PIN_SCRATCH=""
 RIG_DIR=""
 SCRATCH=""
+# The lockfile leg by absolute path: the movable-pin self-checks below
+# run it rooted in a scratch tree whose own manifest declares the pin
+# under test, and the leg resolves that manifest through `cargo
+# metadata` in the working directory.
+LEG="$(pwd)/ci/lockfile.py"
 
 fail() {
     echo "$1" >&2
@@ -290,6 +335,7 @@ fail() {
 
 cleanup() {
     if [ -n "$UPGRADE_DIR" ]; then rm -rf "$UPGRADE_DIR"; fi
+    if [ -n "$PIN_SCRATCH" ]; then rm -rf "$PIN_SCRATCH"; fi
     if [ -n "$RIG_DIR" ]; then rm -rf "$RIG_DIR"; fi
     if [ -n "$SCRATCH" ]; then rm -rf "$SCRATCH"; fi
     for dir in $INSTALL_ROOTS; do rm -rf "$dir"; done
@@ -372,26 +418,45 @@ PY
 # a leaked path source.
 # $1 is the lockfile to read: `Cargo.lock` itself in the positive
 # leg, a doctored scratch copy in the self-check below; $2 is the
-# release record's `record.md` when one was substituted, else the
-# empty string. Exit status 2 is a release crate recorded from a
+# release record's `record.md` — the fetched record in the contract's
+# own shape, the substituted one under DCS_RECORD_DIR, or the empty
+# string in the doctored legs that prove the other diagnostics. Exit
+# status 2 is a release crate recorded from a
 # non-git source or from no source at all — a `path` package into some
 # checkout carries neither, and is `path-dependency-leak`'s finding —
-# and 1 every other disagreement, `lockfile-stale`'s.
+# 3 a pin the remote could not answer — `pin-unresolvable`'s
+# finding, the served target unverifiable rather than absent — and 1
+# every other disagreement, `lockfile-stale`'s.
 lockfile_leg() {
     python3 ci/lockfile.py "${1:-Cargo.lock}" "$DCS_REMOTE" "${2:-}"
 }
 
+# The same leg over another tree's declared pin: $1 the scratch tree
+# whose manifest declares it, $2 the lockfile to read, $3 the remote
+# that pin must name, $4 the release record when one applies, else the
+# empty string. The leg reads the manifest through `cargo metadata`,
+# which resolves it in the working directory, so the run is rooted in
+# $1 and reaches the leg by absolute path — the only reason a scratch
+# pair can declare a pin of its own. The exit status is the leg's own,
+# as above.
+lockfile_leg_in() {
+    (cd "$1" && python3 "$LEG" "${2:-Cargo.lock}" "$3" "${4:-}")
+}
+
 # The leg's exit status named: a release crate recorded from a path
 # into some checkout — or with no source at all, as a path package is
-# written — is `path-dependency-leak`; every other
-# disagreement between the committed lockfile and this repository's
-# declared pin is `lockfile-stale`.
+# written — is `path-dependency-leak`; a pin the remote could
+# not answer is `pin-unresolvable` — the served target unverifiable,
+# never the absent-ref skip — and every other disagreement between
+# the committed lockfile and this repository's declared pin is
+# `lockfile-stale`.
 lockfile_check() {
     local status=0
     lockfile_leg "${1:-Cargo.lock}" "${2:-}" || status=$?
     case "$status" in
         0) return 0 ;;
         2) fail "path-dependency-leak: a release crate is recorded from a non-git source — or from no source at all — in ${1:-Cargo.lock}" ;;
+        3) fail "pin-unresolvable: the remote could not be queried for the revision the declared pin names — ${1:-Cargo.lock}'s recorded revision is unverifiable" ;;
         *) fail "lockfile-stale: ${1:-Cargo.lock} does not record this repository's declared pin" ;;
     esac
 }
@@ -402,11 +467,42 @@ echo "== lockfile =="
 # byte-identical, so the documented re-resolve fallback cannot absorb
 # a stale artifact.
 LOCK_DIGEST="$(sha256sum Cargo.lock | cut -d' ' -f1)"
-LOCK_RECORD=""
-if [ -n "$DCS_RECORD_DIR" ]; then
-    DCS_RELEASE="$(python3 -c 'import json; print(json.load(open("deploy/manifest.json"))["dcs_release"])')"
-    [ -f "$DCS_RECORD_DIR/$DCS_RELEASE/record.md" ] \
-        && LOCK_RECORD="$DCS_RECORD_DIR/$DCS_RELEASE/record.md"
+# The release record's `record.md` — the Commit-field comparison's
+# comparator. A tag re-pointed after the cut with the committed
+# lockfile regenerated to follow it answers every other leg: the
+# manifest's `tag` query still matches and the remote's served target
+# still equals the recorded revision — only the record still names
+# the commit the release was cut on. The record lives on the same
+# remote the pins resolve from, fetched once here at the pinned rev
+# through the contract's own mechanism — a consumer's own CI runs
+# exactly this path, never the workspace-side proof's DCS_RECORD_DIR
+# substitution — so the comparison holds in the shipped check. The
+# tooling stage reuses this fetch's FETCH_HEAD for the schema
+# artifacts it pins the tooling's emissions against.
+#
+# The leg's declared-pin census requires one release crate declared
+# directly — `dcs-build`, the crate every consumer composes with.
+# `dcs-core` and `dcs-model` are the contract's optional direct
+# declarations (`docs/release-contract.md`: "a consumer may also declare
+# them directly"), so a manifest that drops the direct `dcs-model` line
+# this template happens to carry still resolves it through `dcs-build`
+# at the same pin: the committed lockfile's own record of all three
+# release crates is what this stage holds to the declared pin, and a
+# manifest's spelling of the optional two is not a correctness gate.
+SCRATCH="$(mktemp -d)"
+DCS_RELEASE="$(python3 -c 'import json; print(json.load(open("deploy/manifest.json"))["dcs_release"])')"
+git -C "$SCRATCH" init -q -b main
+git -C "$SCRATCH" fetch --depth 1 --quiet "$DCS_REMOTE" "$DCS_REV" \
+    || fail "pin-unresolvable: the pinned rev $DCS_REV could not be fetched for the release record"
+LOCK_RECORD="$SCRATCH/record.md"
+git -C "$SCRATCH" show "FETCH_HEAD:docs/releases/$DCS_RELEASE/record.md" \
+    > "$LOCK_RECORD" \
+    || fail "pin-unresolvable: the pinned rev serves no docs/releases/$DCS_RELEASE/record.md"
+if [ -n "$DCS_RECORD_DIR" ] && [ -f "$DCS_RECORD_DIR/$DCS_RELEASE/record.md" ]; then
+    # The workspace-side proof's substitution stands in for the
+    # fetched record; the fetch above still proved the record stays
+    # reachable at the pinned rev through the consumer mechanism.
+    LOCK_RECORD="$DCS_RECORD_DIR/$DCS_RELEASE/record.md"
 fi
 lockfile_check Cargo.lock "$LOCK_RECORD"
 
@@ -537,6 +633,170 @@ for twin in "$TWIN_FIRST" "$TWIN_LAST"; do
 done
 echo "  a lockfile recording a release crate twice refused"
 
+# The remote-side half of the same leg: a lockfile recording the
+# declared pin at a commit the pin does not name — the tag's served
+# target or the declared rev diverging from the recorded
+# revision — is `lockfile-stale`, and only the leg names it: `cargo
+# fetch --locked` resolves any commit the remote serves under a
+# matching query without re-checking the pin's target. The doctored
+# copy keeps the recorded query and records the release crates at the
+# upgrade baseline — a commit the remote serves that the declared pin
+# does not land on — exercising the target comparison the
+# recorded-revision self-checks cannot reach; the doctor reports the
+# refusal marker the recorded pin's shape must produce. Every spelling
+# a `rev` may carry names a revision, so none stands down: a full sha
+# compares literally ("for rev"), any other spelling is read back off
+# the remote under that name ("names"). A `rev` naming a branch or tag
+# is exercised against this tree's own remote by the movable-pin
+# self-checks below, where the branch that moves is the one this check
+# seeded.
+WRONG_SHA_LOCK="$(mktemp)"
+EXPECT_WRONG="$(python3 - Cargo.lock "$WRONG_SHA_LOCK" "$DCS_UPGRADE_REV" <<'PY'
+import re, sys
+lock, wrong, baseline = sys.argv[1], sys.argv[2], sys.argv[3]
+release = ("dcs-build", "dcs-core", "dcs-model")
+original = open(lock).read()
+block = (r'\[\[package\]\]\nname = "(?:' + "|".join(release)
+         + r')"\nversion = "[^"]+"\nsource = "[^?"]*')
+records = re.findall(block + r'\?([^#"]*)#([0-9a-f]{40})"', original)
+if len(records) < len(release):
+    sys.exit(f"doctor: expected at least {len(release)} release-crate records to doctor, found {len(records)}")
+# The planted revision must differ from the recorded one — the
+# upgrade baseline when it does, another sha when a tree pinned at
+# that baseline would otherwise doctor the file to itself.
+wrong_sha = next(sha for sha in (baseline, "1" * 40) if sha != records[0][1])
+doctored = re.sub(
+    r'(' + block + r'\?[^#"]*#)[0-9a-f]{40}"',
+    lambda m: m.group(1) + wrong_sha + '"',
+    original,
+)
+kinds = {query.partition("=")[0] for query, _ in records}
+values = {query.partition("=")[2] for query, _ in records}
+if kinds == {"tag"}:
+    marker = "lands on"
+elif kinds == {"rev"} and all(re.fullmatch(r"[0-9a-f]{40}", value) for value in values):
+    marker = "for rev"
+elif kinds == {"rev"}:
+    marker = "names"
+else:
+    sys.exit(f"doctor: release crates record unexpected pin kinds: {sorted(kinds)}")
+open(wrong, "w").write(doctored)
+print(marker)
+PY
+)"
+if out="$(lockfile_leg "$WRONG_SHA_LOCK" 2>&1)"; then
+    fail "lockfile-stale-unchecked: a lockfile recording the pin at a commit the pin does not name passed the lockfile leg"
+fi
+case "$out" in
+    *"$EXPECT_WRONG"*) ;;
+    *) fail "lockfile-stale-unchecked: the wrong-target lockfile was refused without naming the pin's target: $out" ;;
+esac
+echo "  a lockfile recording a commit the declared pin does not name refused: lockfile-stale"
+
+# A `rev` Cargo resolves afresh on every resolve — a branch name, a
+# short sha, a tag name — names whatever the remote serves under that
+# name at check time, so the leg must compare against that target
+# instead of admitting the spelling uncompared. The reported defect
+# (`lockfile-leg-rev-compare-skipped-for-non-full-sha`): a full-sha
+# gate on the compare left every other spelling uncompared at all, so a
+# lockfile recording a commit the branch had moved past passed the
+# stage — the exact staleness class this stage exists to report,
+# accepted silently. The proof is hermetic: a scratch remote the stage
+# seeds itself serves two commits, a `main` moved past the first and a
+# tag on the second, and each spelling is checked twice — once
+# recording a revision the pin no longer names, which must be refused
+# naming both revisions, and once recording the revision it does name,
+# which must pass, so a leg that refused every movable pin would be
+# caught too.
+PIN_SCRATCH="$(mktemp -d)"
+PIN_REMOTE="$PIN_SCRATCH/movable-remote.git"
+PIN_SEED="$PIN_SCRATCH/seed"
+git init --quiet --bare "$PIN_REMOTE"
+git init --quiet -b main "$PIN_SEED"
+(
+    cd "$PIN_SEED"
+    git config user.email "ci@example.invalid"
+    git config user.name "reference plant ci"
+    git remote add origin "file://$PIN_REMOTE"
+    git commit --quiet --allow-empty -m base
+    git push --quiet origin main
+    git commit --quiet --allow-empty -m moved
+    git push --quiet origin main
+    git tag movable-tag
+    git push --quiet origin movable-tag
+)
+PIN_URL="file://$PIN_REMOTE"
+PIN_BASE="$(git -C "$PIN_SEED" rev-parse HEAD~1)"
+PIN_TIP="$(git -C "$PIN_SEED" rev-parse HEAD)"
+# An abbreviated rev no served commit shares with the recorded one: the
+# comparison the short-sha spelling exists for, deterministic under
+# construction rather than assumed by a hex-prefix collision check.
+PIN_SHORT="$(python3 - "$PIN_BASE" "$PIN_TIP" <<'PY'
+import sys
+base, tip = sys.argv[1], sys.argv[2]
+for width in range(4, 41):
+    if not base.startswith(tip[:width]):
+        sys.stdout.write(tip[:width])
+        break
+else:
+    sys.exit("no abbreviation distinguishes the two revisions")
+PY
+)"
+
+# One movable-pin case: $1 the declared `rev` spelling, $2 the revision
+# the lockfile records, $3 `refuse` or `accept`. A scratch manifest
+# declares the spelling and a scratch lockfile records $2 for every
+# release crate; both live under the scratch root, so the committed
+# pair stays pristine.
+movable_pin_case() {
+    local value="$1" recorded="$2" want="$3" dir out status=0
+    dir="$PIN_SCRATCH/$want-$(printf '%s' "$value" | tr -c 'a-zA-Z0-9' '_')"
+    mkdir -p "$dir/src"
+    printf 'fn main() {}\n' > "$dir/src/main.rs"
+    python3 - "$dir" "$PIN_URL" "$value" "$recorded" <<'PY'
+import sys
+directory, url, value, recorded = sys.argv[1:5]
+pin = '{ git = "%s", rev = "%s" }' % (url, value)
+open(f"{directory}/Cargo.toml", "w").write(
+    '[package]\nname = "movable-pin"\nversion = "0.1.0"\nedition = "2021"\n\n'
+    "[dependencies]\ndcs-build = %s\ndcs-model = %s\n" % (pin, pin)
+)
+blocks = "".join(
+    '[[package]]\nname = "%s"\nversion = "0.10.0"\nsource = "git+%s?rev=%s#%s"\n\n'
+    % (name, url, value, recorded)
+    for name in ("dcs-build", "dcs-core", "dcs-model")
+)
+open(f"{directory}/Cargo.lock", "w").write("version = 4\n\n" + blocks)
+PY
+    out="$(lockfile_leg_in "$dir" Cargo.lock "$PIN_URL" 2>&1)" || status=$?
+    case "$want" in
+        refuse)
+            [ "$status" -eq 1 ] \
+                || fail "lockfile-stale-unchecked: the \`rev = \"$value\"\` manifest recording $recorded passed the lockfile leg: $out"
+            case "$out" in
+                *"$recorded"*"$PIN_TIP"*) ;;
+                *) fail "lockfile-stale-unchecked: the \`rev = \"$value\"\` refusal named neither the recorded revision nor the revision the pin names: $out" ;;
+            esac
+            echo "  a \`rev = \"$value\"\` lockfile recording $recorded refused: lockfile-stale"
+            ;;
+        *)
+            [ "$status" -eq 0 ] \
+                || fail "lockfile-stale-unchecked: a \`rev = \"$value\"\` lockfile recording the revision the pin names was refused: $out"
+            case "$out" in
+                *"records rev=$value at $recorded"*) ;;
+                *) fail "lockfile-stale-unchecked: the \`rev = \"$value\"\` pass reported no recorded pin: $out" ;;
+            esac
+            echo "  a \`rev = \"$value\"\` lockfile recording the revision the pin names accepted"
+            ;;
+    esac
+}
+movable_pin_case main "$PIN_BASE" refuse
+movable_pin_case main "$PIN_TIP" accept
+movable_pin_case "$PIN_SHORT" "$PIN_BASE" refuse
+movable_pin_case "$PIN_SHORT" "$PIN_TIP" accept
+movable_pin_case movable-tag "$PIN_BASE" refuse
+movable_pin_case movable-tag "$PIN_TIP" accept
+
 echo "== resolve =="
 # `cargo fetch --locked` is the fast path and, with a committed
 # lockfile that satisfies the manifest, it is what makes every build
@@ -555,7 +815,7 @@ if ! cargo fetch --locked 2>"$LOCKED_ERR"; then
         fail "lockfile-stale: the committed Cargo.lock did not satisfy the declared pin — the resolve stage re-resolved it; regenerate it with \`cargo update\` (README §7)"
     fi
 fi
-rm -f "$LOCKED_ERR" "$STALE_LOCK" "$MISSING_LOCK" "$DUP_FIRST" "$DUP_LAST" "$TWIN_FIRST" "$TWIN_LAST"
+rm -f "$LOCKED_ERR" "$STALE_LOCK" "$MISSING_LOCK" "$DUP_FIRST" "$DUP_LAST" "$TWIN_FIRST" "$TWIN_LAST" "$WRONG_SHA_LOCK"
 
 echo "== build =="
 cargo build --quiet || {
@@ -605,15 +865,11 @@ fi
 echo "  validate, lint, --check, and --check-dynamics accept the checked-in documents"
 
 # The release record's schema artifacts: `docs/releases/<tag>/` lives
-# in the same repository the crate and tooling pins resolve from, so
-# the record is fetched through the same mechanism — the pinned
-# revision's git remote. The manifest's `dcs_release` names the record
-# directory; the files are read out of the fetched commit's tree.
-SCRATCH="$(mktemp -d)"
-DCS_RELEASE="$(python3 -c 'import json; print(json.load(open("deploy/manifest.json"))["dcs_release"])')"
-git -C "$SCRATCH" init -q -b main
-git -C "$SCRATCH" fetch --depth 1 --quiet "$DCS_REMOTE" "$DCS_REV" \
-    || fail "pin-unresolvable: the pinned rev $DCS_REV could not be fetched for the release record"
+# in the same repository the crate and tooling pins resolve from, and
+# the lockfile stage already fetched the record tree at the pinned
+# rev — FETCH_HEAD still names it — so the files are read out of the
+# fetched commit's tree. The manifest's `dcs_release` names the record
+# directory.
 RECORD="$SCRATCH/record"
 mkdir -p "$RECORD"
 RECORD_ARTIFACTS="block-interfaces.schema.json plant-model.schema.json deploy-manifest.schema.json dynamics.schema.json"
@@ -625,8 +881,8 @@ done
 if [ -n "$DCS_RECORD_DIR" ]; then
     # The workspace-side proof's tooling stand-ins emit the checkout's
     # schemas, so the checkout's own record tree is the comparator;
-    # the fetch above still proves the record stays fetchable at the
-    # pinned rev through the consumer mechanism.
+    # the lockfile stage's fetch still proves the record stays
+    # fetchable at the pinned rev through the consumer mechanism.
     for artifact in $RECORD_ARTIFACTS; do
         cp "$DCS_RECORD_DIR/$DCS_RELEASE/$artifact" "$RECORD/$artifact" \
             || fail "record-missing: $DCS_RECORD_DIR serves no $DCS_RELEASE/$artifact"
@@ -1359,6 +1615,39 @@ for tamper in missing-state-file corrupt-state-file; do
     echo "  $tamper: reported, restart-resume-failed"
 done
 
+echo "== stale-freshness =="
+# The consumer composition's own declared freshness budget, on the
+# deployment the manifest declares. The stage brings the pair up
+# through the pair stage's shared rig, so it and the legs run one pair
+# definition. Two passes must render identical digest lines, and the
+# doctored case — the held read served as a healthy last-known value —
+# must fail.
+run_stale_freshness() {
+    python3 ci/stale_freshness.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json \
+        || fail "stale-freshness-failed: the declared freshness stage did not hold — its evidence lines are above"
+}
+STALE_FRESHNESS_FIRST="$(run_stale_freshness)" || exit 1
+STALE_FRESHNESS_SECOND="$(run_stale_freshness)" || exit 1
+[ "$STALE_FRESHNESS_FIRST" = "$STALE_FRESHNESS_SECOND" ] \
+    || fail "stale-freshness-nondeterministic: two stale-freshness stage passes produced different digests"
+echo "  $STALE_FRESHNESS_FIRST identical across both passes"
+if python3 ci/stale_freshness.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json \
+        --tamper expect-last-good; then
+    fail "stale-freshness-unchecked: the expect-last-good case passed the declared freshness stage"
+fi
+
 echo "== surface =="
 python3 ci/simulate.py \
     --surface \
@@ -1461,7 +1750,7 @@ for file in ci/alarm_rationalization.py ci/alarm_validation.py \
         ci/managed_carryover.py ci/oos.py ci/overview_url.py \
         ci/power_trip.py \
         ci/restart.py ci/schema_conformance.py ci/simulate.py \
-        ci/staging.py ci/legs/*.py README.md; do
+        ci/stale_freshness.py ci/staging.py ci/legs/*.py README.md; do
     if grep -nE 'crates/|\.\./|file://|/home/|target/debug' "$file"; then
         fail "path-dependency-leak: $file references a platform-checkout path"
     fi

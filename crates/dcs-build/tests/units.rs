@@ -732,14 +732,12 @@ fn the_ijmuiden_scenario_declares_every_quantity_it_measures_and_wires() {
             (PointId(20), unit::FRACTION),
             (PointId(200), unit::M),
             (PointId(201), unit::M),
-            (PointId(202), unit::M),
             (PointId(203), unit::M),
             (PointId(204), unit::M),
             (PointId(205), unit::M),
             (PointId(206), unit::M),
-            (PointId(207), unit::M),
-            (PointId(208), unit::M),
-            (PointId(209), unit::FRACTION),
+            (PointId(207), unit::M_PER_SCAN),
+            (PointId(209), unit::M_PER_SCAN),
             (PointId(220), unit::FRACTION),
             (PointId(221), unit::FRACTION),
             (PointId(230), unit::STAGES),
@@ -753,49 +751,46 @@ fn the_ijmuiden_scenario_declares_every_quantity_it_measures_and_wires() {
             (ComponentId(1), "primary", unit::M),
             (ComponentId(1), "backup", unit::M),
             (ComponentId(1), "out", unit::M),
-            // Both filters smooth the level, not a fixed dimension of
-            // their own.
+            // The filter smooths the level, not a fixed dimension of its
+            // own.
             (ComponentId(2), "in", unit::M),
             (ComponentId(2), "out", unit::M),
-            (ComponentId(3), "in", unit::M),
-            (ComponentId(3), "out", unit::M),
-            (ComponentId(4), "level", unit::M),
+            (ComponentId(3), "level", unit::M),
             // The annunciation rungs a discharge gate declares, not
             // pump stages.
-            (ComponentId(4), "demand", unit::STAGES),
-            // The composed rate-of-rise detector compares two levels
-            // and reports a dimensionless ratio.
-            (ComponentId(5), "expected", unit::M),
-            (ComponentId(5), "measured", unit::M),
-            (ComponentId(5), "deviation", unit::FRACTION),
-            (ComponentId(6), "control", unit::FRACTION),
-            (ComponentId(6), "manual", unit::FRACTION),
+            (ComponentId(3), "demand", unit::STAGES),
+            // The dedicated rate-of-rise detector reads the filtered
+            // level and reports its per-scan first difference.
+            (ComponentId(4), "in", unit::M),
+            (ComponentId(4), "rate", unit::M_PER_SCAN),
+            (ComponentId(5), "control", unit::FRACTION),
+            (ComponentId(5), "manual", unit::FRACTION),
+            (ComponentId(5), "out", unit::FRACTION),
+            (ComponentId(6), "cmd", unit::FRACTION),
             (ComponentId(6), "out", unit::FRACTION),
-            (ComponentId(7), "cmd", unit::FRACTION),
-            (ComponentId(7), "out", unit::FRACTION),
-            (ComponentId(7), "fb", unit::FRACTION),
-            (ComponentId(8), "in", unit::M),
+            (ComponentId(6), "fb", unit::FRACTION),
+            (ComponentId(7), "in", unit::M),
         ],
     );
     assert_parameters(
         &model,
         &[
-            (ComponentId(4), "cutoff", unit::M),
-            (ComponentId(4), "high", unit::M),
-            (ComponentId(5), "deviation_limit", unit::FRACTION),
-            (ComponentId(5), "window_ticks", unit::TICKS),
-            (ComponentId(6), "transfer_delta", unit::FRACTION),
-            (ComponentId(7), "tolerance", unit::FRACTION),
-            (ComponentId(7), "discrepancy_ticks", unit::TICKS),
-            (ComponentId(8), "low_limit", unit::M),
-            (ComponentId(8), "high_limit", unit::M),
-            (ComponentId(8), "hysteresis", unit::M),
-            (ComponentId(8), "max_shelve_ticks", unit::TICKS),
-            (ComponentId(8), "response_ticks", unit::TICKS),
+            (ComponentId(3), "cutoff", unit::M),
+            (ComponentId(3), "high", unit::M),
+            (ComponentId(4), "rate_limit", unit::M_PER_SCAN),
+            (ComponentId(4), "initial_rate", unit::M_PER_SCAN),
+            (ComponentId(5), "transfer_delta", unit::FRACTION),
+            (ComponentId(6), "tolerance", unit::FRACTION),
+            (ComponentId(6), "discrepancy_ticks", unit::TICKS),
+            (ComponentId(7), "low_limit", unit::M),
+            (ComponentId(7), "high_limit", unit::M),
+            (ComponentId(7), "hysteresis", unit::M),
+            (ComponentId(7), "max_shelve_ticks", unit::TICKS),
+            (ComponentId(7), "response_ticks", unit::TICKS),
         ],
     );
     // Every other alarm declares its decision-70 response budget.
-    for alarm in [9, 10, 11, 12, 13, 14, 15, 16] {
+    for alarm in [8, 9, 10, 11, 12, 13, 14, 15] {
         assert_parameters(
             &model,
             &[(ComponentId(alarm), "response_ticks", unit::TICKS)],

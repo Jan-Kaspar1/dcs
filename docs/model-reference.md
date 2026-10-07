@@ -1324,10 +1324,11 @@ params.rs` (`DeviceParameters::parse`); parameters:
 
 - `"bus"` — required non-empty string: the *logical* bus name. The
   model names the bus; **deployment configuration binds the name to a
-  host interface outside the document** (decision 47) — no parameter
-  names a host interface, so a plant model stays identical wherever the
-  controller runs. `crates/dcs-assembly/tests/ethercat.rs` pins that
-  the declared vocabulary admits no interface field;
+  host interface outside the document** — the controller's `--bus
+  <bus>=<interface>` arm (decision 110) — so no parameter names a host
+  interface and a plant model stays identical wherever the controller
+  runs. `crates/dcs-assembly/tests/ethercat.rs` pins that the declared
+  vocabulary admits no interface field;
 - `"identity"` — required object `{"vendor": <u32>, "product": <u32>,
   "revision": <u32>}`: the expected station identity the master checks
   the answering station against before outputs are enabled;
@@ -1355,10 +1356,14 @@ Any other parameter key is rejected. A malformed declaration —
 missing `bus`, a mistyped identity, colliding offsets, a channel placed
 in the wrong image or left unmapped, a bad threshold, a non-`fail`
 startup policy, a missing or kind-mismatched safe state — is
-`InvalidDeviceParameters` before any scan. Until the EtherCAT master
-integration lands (Lenovo QA lane HQ-4), a *well-formed* declaration
-still fails assembly as `DeviceBackend`: no bus can initialize, and the
-kind fails startup rather than substituting a simulated backend. The
+`InvalidDeviceParameters` before any scan. A *well-formed* declaration
+resolves through whichever registry the caller chose: a deployment run
+resolves the kind against its `--bus` bindings and attaches to the named
+logical bus (`docs/packaging.md` documents the arm and its named
+startup failures), a `--check` run validates the declaration and opens
+no segment, and the bus-less registry a binding-less caller resolves
+against still fails assembly as `DeviceBackend` — the kind fails
+startup rather than substituting a simulated backend. The
 emitted JSON Schema carries the kind-conditional shape for the keys it
 can express; the channel-table-dependent rules stay with the factory.
 

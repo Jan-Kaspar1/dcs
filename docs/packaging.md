@@ -76,6 +76,74 @@ container while the active keeps scanning; peer management and takeover
 semantics are recorded in `docs/architecture.md` (decisions 9, 10, and
 11–15) and are not part of this image.
 
+### A hardware-bound field bus
+
+A model declaring a hardware-bound device kind — `ethercat` — names a
+*logical* bus (`parameters.bus`, e.g. `ecat0`); which segment serves it is
+deployment knowledge, not engineered plant data, so the container supplies it:
+
+```sh
+docker run --rm \
+    -v "$PWD/crates/dcs-demo/fixtures/wago_rig.json:/model/plant.json:ro" \
+    dcs-controller /model/plant.json \
+        --bus ecat0=enx00e04c751f7c --scan-ms 100 --listen 0.0.0.0:8080
+```
+
+`--bus <bus>=<binding>` is repeatable, one arm per logical bus, and its value
+is either a host interface name or a *recorded run* replayed in the interface's
+place — `--bus ecat0=@captures/rig-session.json`, a capture document in the
+format `crates/dcs-ethercat/tests/README.md` documents. The recorded form is
+how the whole hardware path is exercised with no rig and no privileges; it is
+the deployment's explicit choice and never a substitution the controller makes.
+
+There is no fallback in either direction and no degraded mode. Startup fails,
+naming the bus, when a hardware-bound bus carries no `--bus` arm, when an arm
+names an interface this host does not have, and when a recorded run cannot be
+read or replayed. An interface binding never degrades to a recording and a
+recording never opens a socket. A hardware-bound model runs paced only:
+`--driven` exits nonzero naming the mode conflict, because a driven scan is a
+request that also steps the field while the exchange against a real bus is the
+master's own cycle — and the paced run's `POST /scan` stays refused with `409`.
+`--check` remains the engineering compile-check and needs no binding at all: it
+validates the declaration and opens no segment, so a hardware document is
+checkable on a laptop.
+
+What the run then serves is the identity and the field's own state on the
+endpoints a monitoring consumer already reads. `GET /health` carries a `build`
+object — the image's crate version, the git revision where the deployment
+supplied one (`DCS_BUILD_SHA` in the container's environment, baked in or passed
+with `--env-file`), and the served model's fingerprint — and the snapshot's
+`io_health` carries one row per bus: the logical bus, the binding that served
+it, the segment's own `init`/`pre-op`/`safe-op`/`op` state, its exchange
+freshness, its own attempted/succeeded/failed/short/late counters, and its last
+failure. Physical acceptance is the Lenovo QA lane's work
+(`docs/lenovo-hardware-qa-plan.md`); none of this establishes it.
+
+### Graceful shutdown
+
+SIGTERM or SIGINT stops the controller at a scan boundary within ten
+seconds — the pacing sleep is interruption-sliced, so a long scan
+period never delays the stop — then flushes the latest checkpoint to
+`--state-file` where configured (waiting at most five seconds for the
+sink's writer), releases the held plant write claim on the way out so
+a successor is never fenced by the dead claim, and exits 0. Only a
+failure exits nonzero, naming the reason. A second signal forces
+prompt exit with status 128+signo (143 for SIGTERM, 130 for SIGINT),
+skipping the flush and the release — the escape hatch a stalled
+sink's flush wait must not close. Runs without `--state-file` skip
+the flush; peers holding no field claim skip the release. The same
+contract is recorded on the binary's own `--help` text, so the image
+and the process agree:
+
+```sh
+docker kill --signal=SIGTERM ctrl-a
+```
+
+stops the field-owning peer gracefully — the surviving peer promotes
+(or a restarted container resumes the flushed checkpoint) without
+meeting the dead claim — while a plain `docker stop` (SIGTERM
+followed by SIGKILL) keeps its configured grace for the same path.
+
 ### Rolling a revised model
 
 The no-interruption path is the pair roll: start a third container as

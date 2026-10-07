@@ -272,22 +272,42 @@ class PeerAnnounceTests(unittest.TestCase):
 
     def test_registered(self):
         order = list(scenarios.SCENARIOS)
-        # The restored pre-switch window behind the demote-carry and
-        # repromote-suspended-settle cases — the settled tracking
-        # pair ahead of the tune case's a->b switch.
+        # The restored pre-switch window behind the demote-carry,
+        # repromote-suspended-settle, gossip-repromote-settle,
+        # settled-receipt-arbitration, and command-across-promotion
+        # cases — the settled tracking pair ahead of the tune case's
+        # a->b switch.
         self.assertLess(
             order.index(scenarios.scenario_demote_settle_uniqueness),
             order.index(scenarios.scenario_peer_announce))
         self.assertEqual(
             order.index(scenarios.scenario_demote_carry_settle) + 1,
             order.index(scenarios.scenario_repromote_suspended_settle))
+        # The two receipt-window contracts behind it — the adopted
+        # stale-view regression and the collided submission index —
+        # run in the same launch-layout window and clear onto the
+        # peer-announce case with the entry roles restored.
         self.assertEqual(
             order.index(scenarios.scenario_repromote_suspended_settle)
             + 1,
+            order.index(scenarios.scenario_gossip_repromote_settle))
+        self.assertEqual(
+            order.index(scenarios.scenario_gossip_repromote_settle) + 1,
+            order.index(scenarios.scenario_settled_receipt_arbitration))
+        self.assertEqual(
+            order.index(scenarios.scenario_settled_receipt_arbitration)
+            + 1,
+            order.index(scenarios.scenario_adopted_receipt_regression))
+        self.assertEqual(
+            order.index(scenarios.scenario_receipt_index_collision) + 1,
+            order.index(scenarios.scenario_command_across_promotion))
+        self.assertEqual(
+            order.index(scenarios.scenario_command_across_promotion) + 1,
             order.index(scenarios.scenario_peer_announce))
-        # The forged-standby, stale-island, journal-boundary, and
-        # suspended-alias legs share the same restored pre-switch
-        # window, then the tune case's a->b switch closes it.
+        # The forged-standby, announced-source-verify, stale-island,
+        # journal-boundary, and suspended-alias legs share the same
+        # restored pre-switch window, then the tune case's a->b switch
+        # closes it.
         self.assertEqual(
             order.index(scenarios.scenario_peer_announce) + 1,
             order.index(
@@ -295,6 +315,10 @@ class PeerAnnounceTests(unittest.TestCase):
         self.assertEqual(
             order.index(
                 scenarios.scenario_demote_forged_standby_source) + 1,
+            order.index(scenarios.scenario_announced_source_verify))
+        self.assertEqual(
+            order.index(
+                scenarios.scenario_announced_source_verify) + 1,
             order.index(scenarios.scenario_stale_island_resolution))
         self.assertEqual(
             order.index(

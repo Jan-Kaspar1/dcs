@@ -395,17 +395,33 @@ pub(super) struct Recorder {
     /// from re-journaling a settle the run already emitted. The
     /// superseded drains journaled through
     /// [`note_settled`](Self::note_settled) mark here the same way —
-    /// one dedup every settle emission shares. Entries compare whole
-    /// receipts, not outcomes alone: a divergent line can adjudicate
-    /// the same index to a different command's identical-looking
-    /// outcome, and that receipt is a new settle, not a re-emission.
+    /// one dedup every settle emission shares.
+    ///
+    /// One admission journals one settle transition per journal, so the
+    /// mark is keyed on the submission index alone: a *second*,
+    /// contradictory terminal verdict at an index this run already
+    /// journaled is the same settlement seen twice, not a new
+    /// settlement. The runtime arbitrates such a pair to one verdict
+    /// the pair converges on (`settled_precedes` in `dcs-runtime`), so
+    /// the only verdicts a line can observe at a settled index are its
+    /// own first settlement and, when another line settled first, the
+    /// arbitrated winner — and the run's own durable record keeps the
+    /// settlement it wrote. Journalling each later contradiction would
+    /// put the flood back: a pair that tracked each other across an
+    /// adoption window appended one `command_settled` line per adoption
+    /// forever, growing the file without bound and evicting the earlier
+    /// real audit from the served ring.
+    ///
+    /// The stored receipt is what the settle was journaled *as* — the
+    /// evidence a re-keying re-home and a replayed-file accounting both
+    /// read back.
     ///
     /// Bounded like the log it extends: a receipt can only resurface
     /// inside an adopted window, whose span the line's own receipt
     /// retention bounds, so the journaled tail needs to reach at most a
     /// couple of window spans behind the served window — entries lower
     /// than that can never re-enter and evict lowest-index first.
-    journaled_settles: BTreeMap<u64, Vec<CommandReceipt>>,
+    journaled_settles: BTreeMap<u64, CommandReceipt>,
     /// The settled receipts the replayed journal file already carries,
     /// keyed by their serialized form and counted — the whole record's
     /// fold like `replayed_qualities`, a multiset because identical
@@ -647,6 +663,8 @@ impl Recorder {
         match receipt.outcome {
             CommandOutcome::Accepted { .. } => {}
             CommandOutcome::Applied { .. } | CommandOutcome::Rejected { .. } => {
+                self.journaled_settles
+                    .insert(receipt_index, receipt.clone());
                 self.push(
                     tick,
                     JournalEvent::CommandSettled {
@@ -666,16 +684,15 @@ impl Recorder {
     /// submission `index` (settled `superseded` at the adoption).
     ///
     /// The indexed form joins the dedup the window diff runs on
-    /// [`record_scan`](Self::record_scan): the same receipt already
-    /// journaled for the index — scanned or drained — does not emit
-    /// again, no matter how the window moved between the emissions.
-    /// The indexless form has no submission identity to dedup on; each
-    /// call is a distinct refusal's one settle.
+    /// [`record_scan`](Self::record_scan): an admission that already
+    /// carries a journaled settle — scanned or drained, whichever
+    /// verdict this drain carries — does not emit again, no matter how
+    /// the window moved between the emissions. The indexless form has
+    /// no submission identity to dedup on; each call is a distinct
+    /// refusal's one settle.
     pub(super) fn note_settled(&mut self, index: Option<u64>, receipt: CommandReceipt, tick: Tick) {
         if let Some(index) = index {
-            if self.receipt_outcomes.get(&index) == Some(&receipt)
-                || self.settle_journaled(index, &receipt)
-            {
+            if self.receipt_outcomes.get(&index) == Some(&receipt) || self.settle_journaled(index) {
                 return;
             }
             // A drain the replayed file already recorded — the same
@@ -685,16 +702,10 @@ impl Recorder {
             // news. Marking the index keeps a repeated drain on the
             // shared dedup rather than spending the fold twice.
             if !self.local_receipts.contains(&index) && self.take_replayed_settled(&receipt) {
-                self.journaled_settles
-                    .entry(index)
-                    .or_default()
-                    .push(receipt);
+                self.journaled_settles.insert(index, receipt);
                 return;
             }
-            self.journaled_settles
-                .entry(index)
-                .or_default()
-                .push(receipt.clone());
+            self.journaled_settles.insert(index, receipt.clone());
         }
         self.push(tick, JournalEvent::CommandSettled { receipt });
     }
@@ -723,7 +734,7 @@ impl Recorder {
         tick: Tick,
     ) {
         let recorded = self.receipt_outcomes.get(&prior) == Some(&receipt)
-            || self.settle_journaled(prior, &receipt)
+            || self.settle_journaled(prior)
             || (!self.local_receipts.contains(&prior) && self.take_replayed_settled(&receipt));
         if !recorded {
             self.note_settled(Some(index), receipt, tick);
@@ -732,22 +743,19 @@ impl Recorder {
         if self.local_receipts.remove(&prior) {
             self.local_receipts.insert(index);
         }
-        self.journaled_settles
-            .entry(index)
-            .or_default()
-            .push(receipt.clone());
+        self.journaled_settles.insert(index, receipt.clone());
         self.observe(index, receipt);
     }
 
-    /// Whether this exact `receipt` — command, outcome, and actor — was
-    /// already journaled for absolute submission `index` — the dedup
-    /// check every terminal emission shares, so a receipt re-admitted
-    /// at the same index after the window moved never re-journals the
-    /// same settle.
-    fn settle_journaled(&self, index: u64, receipt: &CommandReceipt) -> bool {
-        self.journaled_settles
-            .get(&index)
-            .is_some_and(|emitted| emitted.iter().any(|emitted| emitted == receipt))
+    /// Whether absolute submission `index` already carries a journaled
+    /// settle — the dedup check every terminal emission shares, so a
+    /// receipt re-admitted at the same index after the window moved
+    /// never re-journals the settle, and a *contradictory* verdict
+    /// arbitrated in over that index after this run wrote its own is
+    /// not journaled a second time. The mark is the admission's, not
+    /// the receipt's: one admission settles once per journal.
+    fn settle_journaled(&self, index: u64) -> bool {
+        self.journaled_settles.contains_key(&index)
     }
 
     /// Marks `receipt` as the last observed at absolute submission
@@ -1103,10 +1111,7 @@ impl Recorder {
             if index >= base && index < end {
                 self.receipt_outcomes.insert(index, observed);
             } else if !matches!(observed.outcome, CommandOutcome::Accepted { .. }) {
-                self.journaled_settles
-                    .entry(index)
-                    .or_default()
-                    .push(observed);
+                self.journaled_settles.entry(index).or_insert(observed);
             }
         }
         // A re-admission only ever arrives inside an adopted window,
@@ -1126,37 +1131,54 @@ impl Recorder {
             if self.receipt_outcomes.get(&index) == Some(receipt) {
                 continue;
             }
-            // The same terminal receipt already journaled for the
-            // index — however the window moved between the
-            // observations — does not journal again: each admission's
-            // settle emits once per journal. A settled receipt this
-            // run did not itself submit accounts the same way against
-            // the replayed file's fold: the durable record is the
-            // pair's one command audit trail across the run boundary,
-            // so a restart onto a checkpoint whose receipt window did
-            // not cover a journaled settlement — a missing
-            // `--state-file`, an evicted settled prefix — must not
-            // re-record it.
+            // An admission that already carries a journaled settle —
+            // however the window moved between the observations, and
+            // whichever verdict the observation now carries — does not
+            // journal again: each admission's settle transition emits
+            // once per journal. A later terminal verdict at that index
+            // is the runtime's arbitration — the pair's contradiction
+            // resolved to one winner — not a second settlement, and
+            // journalling each one would append a line per adoption
+            // forever. A settled receipt this run did not itself submit
+            // accounts the same way against the replayed file's fold:
+            // the durable record is the pair's one command audit trail
+            // across the run boundary, so a restart onto a checkpoint
+            // whose receipt window did not cover a journaled
+            // settlement — a missing `--state-file`, an evicted settled
+            // prefix — must not re-record it.
             let journaled = matches!(
                 receipt.outcome,
                 CommandOutcome::Applied { .. } | CommandOutcome::Rejected { .. }
-            ) && (self.settle_journaled(index, receipt)
+            ) && (self.settle_journaled(index)
                 || (!self.local_receipts.contains(&index) && self.take_replayed_settled(receipt)));
             match receipt.outcome {
                 CommandOutcome::Accepted { .. } => {}
                 _ if journaled => {}
-                CommandOutcome::Applied { tick } => self.push(
-                    tick,
-                    JournalEvent::CommandSettled {
-                        receipt: receipt.clone(),
-                    },
-                ),
-                CommandOutcome::Rejected { .. } => self.push(
-                    scan_tick,
-                    JournalEvent::CommandSettled {
-                        receipt: receipt.clone(),
-                    },
-                ),
+                // The settle marks its admission here, while the
+                // receipt is still inside the served window: the dedup
+                // every terminal emission shares is the index's mark,
+                // and a contradiction arbitrated in over this index in
+                // a later scan must find it — the migration above only
+                // reaches the marks whose observations have left the
+                // window.
+                CommandOutcome::Applied { tick } => {
+                    self.journaled_settles.insert(index, receipt.clone());
+                    self.push(
+                        tick,
+                        JournalEvent::CommandSettled {
+                            receipt: receipt.clone(),
+                        },
+                    );
+                }
+                CommandOutcome::Rejected { .. } => {
+                    self.journaled_settles.insert(index, receipt.clone());
+                    self.push(
+                        scan_tick,
+                        JournalEvent::CommandSettled {
+                            receipt: receipt.clone(),
+                        },
+                    );
+                }
             }
             self.observe(index, receipt.clone());
         }
@@ -1502,4 +1524,228 @@ impl Recorder {
 /// fold keys on the same bytes it appended.
 fn settled_key(receipt: &CommandReceipt) -> Vec<u8> {
     serde_json::to_vec(receipt).expect("a CommandReceipt serializes")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dcs_core::{Command, Direction, IoDriver, IoError, Sample, Value, ValueKind};
+    use dcs_runtime::{Executor, PointMap};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    /// The in-memory driver the monitor's other fixtures use — one
+    /// writable image-carried `In` point whose value the command path
+    /// writes and the scan echoes.
+    struct StubDriver {
+        points: Mutex<HashMap<PointId, Sample>>,
+    }
+
+    impl StubDriver {
+        fn new(points: &[(PointId, Value)]) -> Self {
+            Self {
+                points: Mutex::new(
+                    points
+                        .iter()
+                        .map(|&(point, value)| (point, Sample::good(value, Tick::ZERO)))
+                        .collect(),
+                ),
+            }
+        }
+    }
+
+    impl IoDriver for StubDriver {
+        fn read(&self, point: PointId) -> Result<Sample, IoError> {
+            self.points
+                .lock()
+                .unwrap()
+                .get(&point)
+                .copied()
+                .ok_or(IoError::UnknownPoint(point))
+        }
+
+        fn write(&self, point: PointId, value: Value) -> Result<(), IoError> {
+            let mut points = self.points.lock().unwrap();
+            let sample = points.get_mut(&point).ok_or(IoError::UnknownPoint(point))?;
+            *sample = Sample::good(value, Tick::ZERO);
+            Ok(())
+        }
+    }
+
+    const HELD: PointId = PointId(40);
+
+    fn held_map() -> PointMap {
+        PointMap::new().with_writable_internal(
+            HELD,
+            Direction::In,
+            ValueKind::Bool,
+            Value::Bool(false),
+        )
+    }
+
+    fn held_rig<'d>(driver: &'d StubDriver) -> Executor<'d> {
+        Executor::new(driver, held_map(), Vec::new()).unwrap()
+    }
+
+    /// The write the recorder tests admit — one admission whose whole
+    /// record (`command`, `actor`) rides every receipt unchanged, so
+    /// the merge correlates the adopted view against the local verdict
+    /// by submission and not by luck.
+    fn held_write(value: bool) -> Command {
+        Command::WriteValue {
+            point: HELD,
+            kind: ValueKind::Bool,
+            value: Value::Bool(value),
+        }
+    }
+
+    /// Every `command_settled` receipt the recorder's served journal
+    /// carries — the pair's command audit for this run.
+    fn settled(recorder: &Recorder) -> Vec<CommandReceipt> {
+        recorder
+            .journal(0)
+            .iter()
+            .filter_map(|entry| match &entry.event {
+                JournalEvent::CommandSettled { receipt } => Some(receipt.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// One submission plus its settling scan, recorded the way the
+    /// monitor's `POST /command` and scan lanes record it: the admission
+    /// is noted at its own index, then the scan's window diff journals
+    /// the settle the transition observed.
+    fn admit_and_settle(
+        recorder: &mut Recorder,
+        executor: &mut Executor<'_>,
+        value: bool,
+    ) -> CommandReceipt {
+        let receipt =
+            executor.submit_command_as(held_write(value), Some("recorder-probe".to_string()));
+        let index = executor.receipt_base() + executor.receipts().len() as u64 - 1;
+        recorder.note_command(index, receipt, Tick(1));
+        let tick = executor.scan();
+        recorder.record_scan(executor, tick);
+        let settled = executor.receipts()[0].clone();
+        assert_eq!(settled.outcome, CommandOutcome::Applied { tick });
+        settled
+    }
+
+    /// The finding's own chain at the recorder's boundary: a settled
+    /// receipt, then an adopted checkpoint whose window at that same
+    /// absolute index still reads `Accepted` — the peer's capture landed
+    /// before the applying boundary — then the covering checkpoint that
+    /// shows the settled verdict again. The merge must refuse the
+    /// regression, so the recorder never observes the stale view and
+    /// exactly one `command_settled` stands for the admission.
+    #[test]
+    fn an_adopted_stale_view_journals_one_settle_for_the_admission() {
+        let driver = StubDriver::new(&[]);
+        let mut recorder = Recorder::new(MonitorConfig::default(), Tick::ZERO, None).unwrap();
+        let mut executor = held_rig(&driver);
+        let verdict = admit_and_settle(&mut recorder, &mut executor, true);
+        assert_eq!(
+            settled(&recorder).len(),
+            1,
+            "the settling scan journals the admission once: {:?}",
+            settled(&recorder)
+        );
+
+        // The peer's staler window: the same submission at the same
+        // absolute index, still pending on its own capture.
+        let mut staler = executor.checkpoint();
+        staler.receipts[0].outcome = CommandOutcome::Accepted {
+            apply_tick: Tick(3),
+        };
+        executor.apply(&staler).unwrap();
+        recorder.record_scan(&executor, executor.tick());
+        assert_eq!(
+            executor.receipts()[0].outcome,
+            verdict.outcome,
+            "an adopted stale view may never regress a settled receipt: \
+             {:?}",
+            executor.receipts()
+        );
+        assert_eq!(
+            settled(&recorder).len(),
+            1,
+            "the regression journals nothing and the observation keeps \
+             the settled verdict: {:?}",
+            settled(&recorder)
+        );
+
+        // The covering adoption: the peer's next capture, showing the
+        // settled verdict. Confirming a verdict this run already
+        // journaled is not a second observable transition.
+        let mut covering = staler.clone();
+        covering.receipts[0].outcome = verdict.outcome.clone();
+        executor.apply(&covering).unwrap();
+        recorder.record_scan(&executor, executor.tick());
+        assert_eq!(
+            executor.receipts()[0].outcome,
+            verdict.outcome,
+            "the covering view confirms the verdict: {:?}",
+            executor.receipts()
+        );
+        assert_eq!(
+            settled(&recorder).len(),
+            1,
+            "one admission carries exactly one command_settled: {:?}",
+            settled(&recorder)
+        );
+    }
+
+    /// The recorder's half of the same contract, staged where the merge
+    /// cannot cover for it: a run whose served window really did regress
+    /// to `Accepted` and is then restored — a regressed checkpoint
+    /// lineage a restored run adopts, the shape the adoption can
+    /// produce — records the restored verdict as an observable
+    /// transition, and the index-keyed settle dedup still keeps the
+    /// admission at one `command_settled`.
+    #[test]
+    fn a_regressed_then_restored_receipt_journals_one_settle() {
+        let driver = StubDriver::new(&[]);
+        let mut recorder = Recorder::new(MonitorConfig::default(), Tick::ZERO, None).unwrap();
+        let mut run = held_rig(&driver);
+        let verdict = admit_and_settle(&mut recorder, &mut run, true);
+        let lineage = run.checkpoint();
+
+        // The regressed lineage: the same admission's window, captured
+        // before the boundary that settled it.
+        let mut regressed = lineage.clone();
+        regressed.receipts[0].outcome = CommandOutcome::Accepted {
+            apply_tick: Tick(3),
+        };
+        let regressed_driver = StubDriver::new(&[]);
+        let served =
+            Executor::restore(&regressed_driver, held_map(), Vec::new(), &regressed, None).unwrap();
+        assert_eq!(
+            served.receipts()[0].outcome,
+            regressed.receipts[0].outcome,
+            "the restored run serves the regressed window verbatim"
+        );
+        recorder.record_scan(&served, Tick(2));
+        assert_eq!(
+            recorder.receipt_outcomes.get(&0),
+            Some(&regressed.receipts[0]),
+            "the observation followed the regressed window"
+        );
+
+        // The covering view lands on a run of its own: the restored
+        // verdict is an observable transition this record sees, and the
+        // settle it names was already journaled at this index.
+        let covering_driver = StubDriver::new(&[]);
+        let covering =
+            Executor::restore(&covering_driver, held_map(), Vec::new(), &lineage, None).unwrap();
+        assert_eq!(covering.receipts()[0].outcome, verdict.outcome);
+        recorder.record_scan(&covering, Tick(3));
+        assert_eq!(
+            settled(&recorder).len(),
+            1,
+            "a re-settle the index-keyed dedup already recorded cannot \
+             become a second journal line: {:?}",
+            settled(&recorder)
+        );
+    }
 }

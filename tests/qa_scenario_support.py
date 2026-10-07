@@ -186,6 +186,25 @@ def _pipelined_bodies(raw):
     return bodies
 
 
+class FakeClock:
+    """The scenario `time` module swapped for a deterministic clock:
+    every `sleep` advances `now` by exactly its argument, so a leg
+    that measures how long a state stood records the same elapsed
+    value on two runs and its evidence stays byte-identical."""
+
+    def __init__(self, start=1000.0):
+        self.now = start
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
 class FakeSocket:
     """Just enough of a connected TCP stream for the overlay's held,
     churning, and raw-probe consumers."""
@@ -699,6 +718,7 @@ class ClaimPlantPeer(_SocketPeerLifecycle):
         }
         self.directions = {20: 'in', 40: 'in', 200: 'out'}
         self.plant_tick = 0
+        self.faults = {}          # point -> 'disconnected' | 'timeout'
         self.claim = None         # {'owner': token, 'holders': set()}
         self.shared_conns = set()  # holders that joined via ensure
         self.next_conn = 0
@@ -710,10 +730,25 @@ class ClaimPlantPeer(_SocketPeerLifecycle):
         self.ensure_preempts = False      # foreign ensure grants anyway
         self.ensure_done = False          # shared grant answers `done`
         self.shared_write_fenced = False  # a holder's write is refused
+        self.freeze_writes = False         # a write answers done and
+                                           # stores nothing
         self.release_drops_claim = False  # one release frees the claim
         self.idle_release_fails = False   # a holder of nothing refused
+        self.release_dissolves = False    # a non-holder's release frees
+                                          # the claim — the pre-#638
+                                          # shape, the defect
+                                          # dead-owner-fencing pins
+        self.ensure_rearms_refused = False  # a same-owner ensure_writer
+                                          # refuses, so a dead owner
+                                          # can never re-arm
+        self.foreign_grants_after = None  # grant a foreign
+                                          # ensure_writer only from
+                                          # the Nth one on — the
+                                          # after-the-re-arm takeover
         self.refuse_rogue = False         # claim_writer answers fenced
+        self.refuse_ensure = False        # ensure_writer answers fenced
         self.rogue_token = scenarios.CLAIM_ROGUE
+        self.foreign_ensures = 0
         self.listener = socket.socket()
         self.listener.setsockopt(socket.SOL_SOCKET,
                                  socket.SO_REUSEADDR, 1)
@@ -792,11 +827,30 @@ class ClaimPlantPeer(_SocketPeerLifecycle):
         except OSError:
             pass
         finally:
-            # Disconnect releases nothing: the claim outlives a dead
-            # owner so the field fails closed until another claim.
+            # Disconnect reaps the attachment's *hold*, never the
+            # claim: the claim outlives a dead owner so the field
+            # fails closed until another claim, exactly as the shipped
+            # server's `release_hold` does. Without the reap a
+            # closed attachment's corpse would sit in the holder set
+            # forever and the empty-holder window the dead-owner
+            # contract turns on could never open in a leg's fixture.
             with self.lock:
-                self.conn_ids.pop(id(conn), None)
+                cid = self.conn_ids.pop(id(conn), None)
+                if cid is not None and self.claim is not None:
+                    self.claim['holders'].discard(cid)
+                    self.shared_conns.discard(cid)
             conn.close()
+
+    def _fault_verdict(self, point):
+        """The IoError verdict an injected error fault makes the
+        point's accesses answer — the fault the divergence legs inject
+        so the staged-versus-field comparison cannot complete."""
+        fault = self.faults.get(point)
+        if fault is None:
+            return None
+        return {'result': 'error',
+                'error': {'kind': 'io',
+                          'error': {fault: point}}}
 
     def _grant(self, owner, cid, request):
         """The claim a granted request lands: the owner token, this
@@ -833,7 +887,17 @@ class ClaimPlantPeer(_SocketPeerLifecycle):
                     for i, p in enumerate(sorted(self.samples))
                 ]
                 return {'result': 'points', 'points': points}
+            if op == 'inject_fault':
+                self.faults[request['point']] = request.get(
+                    'fault', 'disconnected')
+                return {'result': 'done'}
+            if op == 'clear_fault':
+                self.faults.pop(request['point'], None)
+                return {'result': 'done'}
             if op == 'read':
+                fault = self._fault_verdict(request['point'])
+                if fault is not None:
+                    return fault
                 return {'result': 'sample',
                         'sample': dict(
                             self.samples[request['point']])}
@@ -861,6 +925,21 @@ class ClaimPlantPeer(_SocketPeerLifecycle):
                 return {'result': 'done'}
             if op == 'ensure_writer':
                 owner = request['owner']
+                if self.refuse_ensure:
+                    return self._fenced()
+                if self.foreign_grants_after is not None:
+                    self.foreign_ensures += 1
+                    if self.foreign_grants_after <= self.foreign_ensures \
+                            and self.claim is not None \
+                            and owner != self.claim['owner']:
+                        # The late takeover: the foreign token is
+                        # refused while the dead owner's window stands
+                        # and granted only once the owner has
+                        # re-armed — the clause the leg reads after the
+                        # re-arm.
+                        self.claim = self._grant(owner, cid, request)
+                        self.shared_conns = set()
+                        return {'result': 'done'}
                 if self.claim is None:
                     self.claim = self._grant(owner, cid, request)
                     self.shared_conns = set()
@@ -870,6 +949,11 @@ class ClaimPlantPeer(_SocketPeerLifecycle):
                         self.claim = self._grant(owner, cid, request)
                         self.shared_conns = set()
                         return {'result': 'done'}
+                    return self._fenced()
+                if self.ensure_rearms_refused:
+                    # The dead owner's own token refused its re-arm:
+                    # the claim stands, but nothing behind it can
+                    # return — the re-arm clause's failure.
                     return self._fenced()
                 self._declare(request)
                 self.claim['holders'].add(cid)
@@ -920,6 +1004,12 @@ class ClaimPlantPeer(_SocketPeerLifecycle):
                         self.claim = None
                         self.shared_conns = set()
                     return {'result': 'done'}
+                if self.release_dissolves:
+                    # The pre-#638 shape: a release from an attachment
+                    # holding nothing dissolves the standing claim, so
+                    # a dead owner's fence drops to any next claimant.
+                    self.claim = None
+                    self.shared_conns = set()
                 if self.idle_release_fails:
                     return {'result': 'error',
                             'error': {'kind': 'invalid_request',
@@ -940,8 +1030,9 @@ class ClaimPlantPeer(_SocketPeerLifecycle):
                                     'kind': 'io',
                                     'error': {'fenced':
                                               self.claim['owner']}}}
-                self.samples[request['point']]['value'] \
-                    = request['value']
+                if not self.freeze_writes:
+                    self.samples[request['point']]['value'] \
+                        = request['value']
                 return {'result': 'done'}
             if op == 'step':
                 if not self.open_field:
@@ -1376,6 +1467,377 @@ class DemoteSettleFeed:
             return 200, {'role': 'promoting'}
         raise AssertionError('unexpected request %s %s'
                              % (method, url))
+
+
+class DivergencePair:
+    """A stubbed monitor pair for the staged-versus-field divergence
+    legs (the promotion gate, the divergence lifecycle, and the
+    diverged-field wedge). Every served surface reads the planted
+    plant double's own state, so the evidence the legs grade is
+    produced by the transitions the field actually took rather than
+    hand-fed: the `diverged` verdict appears exactly while the field's
+    stored value stands off the owner's declared image, clears on the
+    restore, the refused promotion carries the report the gate
+    declined on, and the journal records each transition once.
+
+    The planted field point is 200 — the double's boolean field
+    output — and its staged value is what the owner declares. The
+    peer's verdict follows the contract: a `diverged` verdict names
+    the mismatched point with both sides' values; a source that has
+    demoted stamps `source_owns_field: false`, which supersedes a
+    `Diverged` verdict with the named `orphaned` one the wedge leg
+    reads. Promotion is admitted on the converged verdicts the promote
+    gate accepts and refused `not_converged` on the rest — with the
+    orphan verdict's one exception the wedge stages: its claim is the
+    *conditional* grant, so a live different owner's claim standing on
+    the field refuses the promotion `field_claim_failed` and hands
+    nothing off, while the unconditional claims the other promotable
+    verdicts assert preempt it.
+
+    The lifecycle actions are the operator's: `stop`/`start` model the
+    recorded remedy's two halves — the wedged field owner removed, then
+    relaunched as a fresh active whose conditional startup grant takes
+    the free field.
+
+    Flags stage each named failure a leg reports: `no_detection` keeps
+    the tracked peer converged, `no_journal` journals no divergence
+    record, `promote_admits` admits the refused promotion, `no_fenced`
+    never demotes the preempted owner, `orphan_immediately` serves the
+    orphan verdict from the first read, `no_resolution` journals no
+    divergence_resolved, `hide_resolutions` serves the resolution
+    records nowhere, `duplicate_resolutions` journals the resolution
+    twice — a flap — and `bad_resolution_evidence` records one whose
+    compared rows name no matching pair of values,
+    `no_unclaimed` never lets the field report unclaimed,
+    `never_heals` leaves the relaunched owner unable to take the
+    field, and `lie` serves a report with no fault where the leg
+    asserts one.
+    """
+
+    POINT = 200
+    STAGED = {'bool': False}
+    PROMOTABLE = ('tracking', 'reinitialized', 'orphaned', 'usurped')
+
+    def __init__(self, plant, tokens=None):
+        self.plant = plant
+        self.tokens = tokens or {'active': 424243, 'standby': 424244}
+        self.tick = 0
+        self.owner = 'active'
+        self.demoted = False
+        self.stopped = set()
+        self.journal = {name: [] for name in self.tokens}
+        self.next_seq = 1
+        self.orphaned = False
+        self.saw_orphaned = False
+        self.was_diverged = False
+        self.started = set()
+        self.promotes = 0
+        self.demotes = 0
+        self.start_calls = []
+        self.stop_calls = []
+        # Failure injection for the named-failure cases.
+        self.no_detection = False
+        self.no_journal = False
+        self.promote_admits = False
+        self.no_fenced = False
+        self.silent_loss = False
+        self.misattribute_loss = None
+        self.orphan_immediately = False
+        self.diverge_survivor = False
+        self.always_tracking = False
+        self.no_resolution = False
+        self.hide_resolutions = False
+        self.duplicate_resolutions = False
+        self.bad_resolution_evidence = False
+        self.clears_on_fault = False
+        self.no_unclaimed = False
+        self.never_heals = False
+        self.lie = None
+
+    # -- the field evidence the served verdicts read ----------------
+    def _stored(self):
+        return self.plant.samples[self.POINT]['value']
+
+    def _skewed(self):
+        return self._stored() != self.STAGED
+
+    def _faulted(self):
+        return self.POINT in self.plant.faults
+
+    # -- the operator's lifecycle actions ---------------------------
+    def _fence(self, name):
+        """The preempted field owner meets the fence on its next
+        scan: the demotion happens in place, the journaled loss names
+        the claimant the field's own arbitration reported, and every
+        later checkpoint of that seat stamps the tracked line
+        ownerless — which is what supersedes a `Diverged` verdict on
+        the peers that follow it."""
+        if self.no_fenced or self.demoted or name in self.started:
+            return
+        claim = self.plant.claim
+        if claim is None or claim['owner'] == self.tokens.get(name):
+            return
+        self.demoted = True
+        if not self.silent_loss:
+            self._record(name, 'field_claim_lost',
+                         {'point': self.POINT,
+                          'claimant': (self.misattribute_loss
+                                       if self.misattribute_loss is not None
+                                       else claim['owner'])})
+        self._record(name, 'role_changed',
+                     {'from': 'active', 'to': 'demoting',
+                      'origin': 'fenced'})
+        self._record(name, 'role_changed',
+                     {'from': 'demoting', 'to': 'standby',
+                      'origin': 'fenced'})
+
+    def stop(self, name):
+        self.stop_calls.append(name)
+        self.stopped.add(name)
+
+    def start(self, name):
+        self.start_calls.append(name)
+        self.stopped.discard(name)
+        self.started.add(name)
+        # The recorded remedy's second half: the relaunched field
+        # owner's conditional startup grant takes the free field, and
+        # it settles active on its first scan under the lifted gate.
+        if name in ('active', 'standby') and not self.never_heals:
+            self.plant.claim = {'owner': self.tokens[name],
+                                'holders': {'relaunched'}}
+            self.owner = name
+            self.demoted = False
+            self.heal(name)
+            self._record(name, 'role_changed',
+                         {'from': 'standby', 'to': 'active',
+                          'origin': 'startup'})
+
+    # -- the served journals ----------------------------------------
+    def _record(self, name, kind, payload):
+        self.journal[name].append({'seq': self.next_seq, 'tick':
+                                   self.tick, 'event': {kind: payload}})
+        self.next_seq += 1
+
+    def _journal_kind(self, name, kind):
+        return [(entry['tick'], entry['event'][kind])
+                for entry in self.journal[name] if kind in entry['event']]
+
+    def _settle(self, name, report):
+        """Journal the transitions the peer's verdict just made."""
+        sync = report.get('sync')
+        variant = None
+        if isinstance(sync, dict) and sync:
+            variant = next(iter(sync))
+        elif isinstance(sync, str):
+            variant = sync
+        if name == self.owner or variant is None:
+            return
+        if variant == 'diverged' and not self.was_diverged:
+            self.was_diverged = True
+            if not self.no_journal:
+                self._record(name, 'divergence_detected',
+                             {'mismatches': report['sync']['diverged']
+                              ['mismatches']})
+        elif variant != 'diverged' and self.was_diverged:
+            self.was_diverged = False
+            if not self.no_journal and not self.no_resolution:
+                compared = [{'point': self.POINT,
+                             'staged': self.STAGED,
+                             'field': self.STAGED}]
+                if self.bad_resolution_evidence:
+                    # A resolution whose compared evidence names no
+                    # matching pair of values — the audit trail that
+                    # cannot say what the comparison saw.
+                    compared = [{'point': self.POINT,
+                                 'staged': self.STAGED,
+                                 'field': {'bool': not self.STAGED['bool']}}]
+                self._record(name, 'divergence_resolved',
+                             {'compared': compared})
+                if self.duplicate_resolutions:
+                    # A flap: the same resolution journaled again, the
+                    # record no leg may leave behind.
+                    self._record(name, 'divergence_resolved',
+                                 {'compared': compared})
+
+    # -- the served reports ----------------------------------------
+    def report(self, name):
+        """The peer's served RoleReport — the verdict the contract
+        serves for the field state it observes."""
+        if name == self.owner:
+            self._fence(name)
+        claim = 'held' if self.plant.claim is not None or self.lie == 'held' \
+            else 'unclaimed'
+        if self.lie == 'unclaimed':
+            claim = 'unclaimed'
+        if name == self.owner and not self.demoted:
+            return {'role': 'active', 'tick': self.tick,
+                    'sync': None, 'field_claim': claim,
+                    'failover': {'converged': True, 'misses': 0,
+                                 'budget': 120}}
+        variant = 'tracking'
+        if self.always_tracking:
+            variant = 'tracking'
+        elif self.was_diverged:
+            # A standing `Diverged` verdict observes nothing a
+            # comparison cannot read: the field healing clears it, a
+            # faulted read leaves it standing — unless the double is
+            # doctored into the #541 regression, clearing it on the
+            # comparison that never completed.
+            if self.clears_on_fault and self._faulted():
+                variant = 'tracking'
+            elif self._skewed() or self._faulted():
+                variant = 'diverged'
+        elif self.orphan_immediately or self.demoted:
+            if not self.diverge_survivor:
+                variant = 'orphaned'
+                self.saw_orphaned = True
+            elif self._skewed() and not self.no_detection:
+                variant = 'diverged'
+        elif self._skewed() and not self.no_detection and not self._faulted():
+            variant = 'diverged'
+        if variant == 'orphaned':
+            sync = {'orphaned': {'aligned': self.tick}}
+        elif variant == 'diverged':
+            sync = {'diverged': {'mismatches': [
+                {'point': self.POINT, 'staged': self.STAGED,
+                 'field': self._stored()}]}}
+        else:
+            sync = {'tracking': {'aligned': self.tick}}
+        report = {'role': 'standby', 'tick': self.tick, 'sync': sync,
+                  'field_claim': claim,
+                  'failover': {'converged': variant_of(sync) != 'diverged',
+                               'misses': 0, 'budget': 120}}
+        self._settle(name, report)
+        return report
+
+    # -- the monitoring surface -------------------------------------
+    def _foreign_claim_stands(self, name):
+        """Whether a live different owner's claim stands on the field —
+        the incumbent a conditional claim defers to."""
+        claim = self.plant.claim
+        return (claim is not None and claim['owner'] != self.tokens[name]
+                and bool(claim['holders']))
+
+    def _admit(self, name):
+        """The promotion the gate accepted: the peer walks to `active`
+        and its own claim preempts whatever stood."""
+        self._record(name, 'role_changed',
+                     {'from': 'standby', 'to': 'promoting',
+                      'origin': 'request'})
+        self._record(name, 'role_changed',
+                     {'from': 'promoting', 'to': 'active',
+                      'origin': 'request'})
+        self.owner = name
+        self.demoted = False
+        self.plant.claim = {'owner': self.tokens[name],
+                            'holders': {'promoted'}}
+        return 200, {'role': 'promoting'}
+
+    def http_json(self, method, url, body=None, timeout=10):
+        path = '/' + url.split('/', 3)[3]
+        route, _, query = path.partition('?')
+        name = 'standby' if 'ctrl-b' in url else 'active'
+        if name in self.stopped:
+            raise ConnectionError('the ' + name + ' monitor is down')
+        self.tick += 1
+        if (method, route) == ('GET', '/role'):
+            return 200, self.report(name)
+        if (method, route) == ('GET', '/snapshot'):
+            return 200, {
+                'tick': self.tick,
+                'points': [{'point': self.POINT, 'direction': 'out',
+                            'sample': {'value': dict(self._stored()),
+                                       'quality': {'quality': 'good'}}}],
+                'descriptors': [], 'parameters': []}
+        if (method, route) == ('GET', '/journal'):
+            since = int(query.split('=', 1)[1]) if query else 0
+            served = [dict(entry) for entry in self.journal[name]
+                      if entry['seq'] > since]
+            if self.hide_resolutions:
+                served = [entry for entry in served
+                          if 'divergence_resolved' not in entry['event']]
+            return 200, served
+        if (method, route) == ('POST', '/promote'):
+            self.promotes += 1
+            return self._switch(name, 'promote')
+        if (method, route) == ('POST', '/demote'):
+            self.demotes += 1
+            return self._switch(name, 'demote')
+        raise AssertionError('unexpected request %s %s' % (method, url))
+
+    def _switch(self, name, verb):
+        report = self.report(name)
+        if verb == 'promote':
+            if report['role'] == 'active':
+                return 409, {'already_active': {}}
+            if self.promote_admits:
+                return self._admit(name)
+            if self._foreign_claim_stands(name) \
+                    and variant_of(report['sync']) == 'orphaned':
+                # The orphan verdict's claim is the *conditional* grant:
+                # the tracking evidence cannot tell a dead owner from a
+                # live incumbent, so a standing live different-owner
+                # claim refuses the promotion by the field's own
+                # arbitration and no field changes hands. The
+                # unconditional claims the other promotable verdicts
+                # assert preempt it — decision 91's recorded boundary.
+                return 409, {
+                    'field_claim_failed': {
+                        'detail': 'the field stands claimed by owner '
+                                  + str(self.plant.claim['owner'])}}
+            if variant_of(report['sync']) in self.PROMOTABLE:
+                return self._admit(name)
+            return 409, {'not_converged': {'sync': report['sync']}}
+        # The demote: the owner steps down and the field reverts to the
+        # peers' conditional claims.
+        if report['role'] != 'active':
+            return 409, {'not_active': {}}
+        other = 'standby' if name == 'active' else 'active'
+        self._record(name, 'role_changed',
+                     {'from': 'active', 'to': 'demoting',
+                      'origin': 'request'})
+        self._record(name, 'role_changed',
+                     {'from': 'demoting', 'to': 'standby',
+                      'origin': 'request'})
+        self.owner = other
+        self.plant.claim = None
+        return 200, {'role': 'demoting'}
+
+    # The fenced demotion the wedge leg reads: the preempted field
+    # owner meets the fence on its next write, and the journal names
+    # the claimant the field's own arbitration reported.
+    def fence_owner(self, name):
+        """Force the fenced demotion the standing claim's own owner
+        mismatch produces — the tests that stage each of its journaled
+        halves reach for this."""
+        if self.no_fenced or self.demoted:
+            return
+        self.demoted = True
+        claimant = getattr(self.plant, 'rogue_token', None)
+        self._record(name, 'field_claim_lost',
+                     {'point': self.POINT, 'claimant': claimant})
+        self._record(name, 'role_changed',
+                     {'from': 'active', 'to': 'demoting',
+                      'origin': 'fenced'})
+        self._record(name, 'role_changed',
+                     {'from': 'demoting', 'to': 'standby',
+                      'origin': 'fenced'})
+
+    def heal(self, name):
+        """The relaunched owner's declared image overwrites the field
+        — what the recorded remedy's writes do."""
+        self.plant.samples[self.POINT]['value'] = dict(self.STAGED)
+
+
+def variant_of(sync):
+    """The served StandbySync's variant name — 'unsynchronized' and
+    'degraded' are bare strings, the rest single-key objects. None for
+    a settled active."""
+    if isinstance(sync, str):
+        return sync
+    if isinstance(sync, dict) and sync:
+        return next(iter(sync))
+    return None
 
 
 __all__ = [name for name in globals() if not name.startswith('__')]

@@ -7,7 +7,8 @@
 //! Usage: `dcs-controller <model-file> [--check] [--ticks N]
 //!         [--scan-ms MS] [--dt T] [--listen ADDR] [--standby ADDR]
 //!         [--remote ADDR] [--driven] [--auto-promote N]
-//!         [--owner-token N] [--state-file PATH] [--journal-file PATH]`
+//!         [--owner-token N] [--state-file PATH] [--journal-file PATH]
+//!         [--journal-capacity N]`
 //!
 //! `--check` is the engineering compile-check: the model is loaded,
 //! validated, and assembled through the standard registries — device
@@ -114,6 +115,20 @@
 //! lock the fresh inode happily. A dead holder's lock releases with its
 //! descriptor, so the restart that resumes the dead run's checkpoint
 //! re-acquires it — the recovery this flag exists for, unchanged.
+//!
+//! Graceful shutdown (WW-LCM-001 continuity): SIGTERM or SIGINT stops a
+//! paced or driven run at a scan boundary within ten seconds — the
+//! pacing sleep is interruption-sliced, so a long scan period never
+//! delays it — then flushes the latest checkpoint through `--state-file`
+//! where configured (waiting at most five seconds for the sink's
+//! writer), releases the held plant write claim on the way out, and
+//! exits 0. Only a failure exits nonzero, naming the reason. A second
+//! signal forces prompt exit with status 128+signo (143 for SIGTERM,
+//! 130 for SIGINT), skipping the flush and the release — the escape
+//! hatch a stalled sink's flush wait must not close. Runs without
+//! `--state-file` skip the flush; peers holding no field claim skip
+//! the release. `docs/packaging.md` records the same contract for the
+//! container image.
 //!
 //! `--journal-file PATH` persists the transition journal the monitor
 //! records — the journal-persistence decision's durable audit trail:
@@ -344,25 +359,30 @@
 //! Load, validation, and assembly failures exit nonzero naming the
 //! offending model element.
 
-use dcs_assembly::{DriverRegistry, FanoutDriver, StepError, assemble, resolve_drivers};
+use dcs_assembly::{
+    DriverRegistry, ETHERCAT_KIND, FanoutDriver, StepError, assemble, resolve_drivers,
+};
 use dcs_controller::registry;
 use dcs_core::{
     CarryoverReport, CommandError, CommandOutcome, CommandReceipt, FieldClaim, IoDriver, IoError,
     PointId, RestartConsultOutcome, SwitchError, TelemetrySnapshot, Tick, TickAnchor, ValueKind,
 };
+use dcs_ethercat::{EthercatBuses, RECORDED_BINDING_PREFIX};
 use dcs_model::PlantModel;
 use dcs_monitor::{
-    CheckpointPuller, DEFAULT_STATE_DRAIN_CAPACITY, Driven, Monitor, MonitorClient, MonitorConfig,
-    StateSink, StateWriterLock, TrackTarget,
+    BuildIdentity, CheckpointPuller, DEFAULT_STATE_DRAIN_CAPACITY, Driven, Monitor, MonitorClient,
+    MonitorConfig, StateSink, StateWriterLock, TrackTarget,
 };
 use dcs_runtime::{
     Activation, Checkpoint, Executor, Peer, PeerEvent, TrackReport, WriteGate, mint_generation,
 };
 use dcs_sim_net::{ClaimGrant, RemoteDriver, RemoteError};
+use signal_hook::consts::{SIGINT, SIGTERM};
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -900,6 +920,155 @@ fn owner_token() -> u64 {
     hasher.finish()
 }
 
+/// The graceful-shutdown bound: a SIGTERM/SIGINT stops the paced scan
+/// loop at a scan boundary within this long of the first signal — the
+/// pacing sleep below is interruption-sliced, so a long scan period
+/// never delays it — and the checkpoint flush waits at most
+/// [`SHUTDOWN_FLUSH_WAIT`] inside it. The QA rig's `docker kill
+/// --signal=SIGTERM` action and the reference-plant leg assert this
+/// bound; `docs/packaging.md` records it for the container image.
+const GRACEFUL_SHUTDOWN_BOUND: Duration = Duration::from_secs(10);
+/// How long the graceful exit waits for the `--state-file` sink's
+/// writer to durably land the final checkpoint — inside
+/// [`GRACEFUL_SHUTDOWN_BOUND`], off the executor lock. A stalled sink
+/// that overruns it fails the exit naming the file rather than
+/// running on without recovery state.
+const SHUTDOWN_FLUSH_WAIT: Duration = Duration::from_secs(5);
+/// The pacing sleep's interruption slice — the granularity a signal
+/// stops the scan loop at.
+const SHUTDOWN_POLL: Duration = Duration::from_millis(10);
+
+/// First-signal arrivals since process start — the scan loop's stop
+/// flag. The handler only counts; the loop stops itself at the next
+/// scan boundary, so a checkpoint is always whole.
+static SHUTDOWN_COUNT: AtomicU8 = AtomicU8::new(0);
+/// The first signal's number — what the graceful report names.
+static SHUTDOWN_SIGNAL: AtomicI32 = AtomicI32::new(0);
+
+/// Whether the run already failed — set by [`fail`] on every nonzero
+/// exit path. The graceful-shutdown branches consult it alongside
+/// [`shutdown_requested`]: a scan, step, or persist failure racing a
+/// signal keeps its nonzero verdict instead of being masked by a
+/// graceful 0 — "nonzero only on failure" cuts both ways.
+static RUN_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// Whether a SIGTERM/SIGINT has asked this process to stop at its next
+/// scan boundary.
+fn shutdown_requested() -> bool {
+    SHUTDOWN_COUNT.load(Ordering::SeqCst) != 0
+}
+
+/// The first shutdown signal's conventional name — SIGTERM or SIGINT —
+/// for the graceful report.
+fn shutdown_name() -> &'static str {
+    match SHUTDOWN_SIGNAL.load(Ordering::SeqCst) {
+        SIGTERM => "SIGTERM",
+        SIGINT => "SIGINT",
+        _ => "shutdown",
+    }
+}
+
+/// The signal handler's count step: the first SIGTERM/SIGINT arms the
+/// scan loop's boundary stop; a second one forces prompt exit with the
+/// conventional 128+signo status (143 for SIGTERM, 130 for SIGINT),
+/// skipping the checkpoint flush and the claim release — the escape
+/// hatch a stalled sink's flush wait must not close.
+fn on_shutdown_signal(signal: std::os::raw::c_int) {
+    if SHUTDOWN_COUNT.fetch_add(1, Ordering::SeqCst) >= 1 {
+        std::process::exit(128 + signal);
+    }
+    SHUTDOWN_SIGNAL.store(signal, Ordering::SeqCst);
+}
+
+/// Installs the graceful-shutdown signal handlers — SIGTERM and SIGINT
+/// arm the scan loop's boundary stop, a second one forcing prompt
+/// exit. A registration failure is a launch failure naming the signal
+/// machinery rather than a run without a stop path.
+fn install_shutdown_handlers() -> Result<(), String> {
+    for signal in [SIGTERM, SIGINT] {
+        unsafe {
+            signal_hook::low_level::register(signal, move || on_shutdown_signal(signal)).map_err(
+                |error| format!("cannot install shutdown handler for signal {signal}: {error}"),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// The graceful exit's final `--state-file` persist on a monitored run:
+/// captures the run's checkpoint under the shared lock — after the
+/// scan loop already stopped at its boundary, so this is the latest
+/// cycle's state — and waits at most [`SHUTDOWN_FLUSH_WAIT`] for the
+/// sink's writer to durably land it. A refusal or a wait the writer
+/// overruns fails the exit naming the file; no configured state file
+/// is a no-op. The wait rides the caller's thread alone, never the
+/// executor lock.
+fn flush_monitored_state(monitor: &Monitor<'_>, options: &Options) -> Result<(), String> {
+    monitor.persist_state()?;
+    if let Some(health) = monitor.flush_state_sink(SHUTDOWN_FLUSH_WAIT)
+        && (health.lost > 0 || health.drained + health.lost < health.accepted)
+    {
+        let path = options
+            .state_file
+            .as_deref()
+            .unwrap_or_else(|| Path::new("<state file>"));
+        return Err(format!(
+            "graceful shutdown: state file {} did not durably land the final checkpoint \
+             (accepted {}, drained {}, lost {})",
+            path.display(),
+            health.accepted,
+            health.drained,
+            health.lost
+        ));
+    }
+    Ok(())
+}
+
+/// The graceful exit's final `--state-file` persist on a monitorless
+/// run: hands the peer's checkpoint to the sink's bounded queue and
+/// waits at most [`SHUTDOWN_FLUSH_WAIT`] for the writer to durably
+/// land it — the same attestation the monitor's own persist carries.
+/// No configured state file is a no-op.
+fn flush_monitorless_state(
+    state_sink: &Option<StateSink>,
+    peer: &std::cell::RefCell<Peer<'_>>,
+) -> Result<(), String> {
+    match state_sink {
+        Some(sink) => {
+            let ordinal = sink.offer(peer.borrow().checkpoint())?;
+            sink.attest(ordinal, SHUTDOWN_FLUSH_WAIT)
+        }
+        None => Ok(()),
+    }
+}
+
+/// The graceful exit shared by every run mode once its scan loop or
+/// serve loop stopped on a signal: flushes the latest checkpoint where
+/// configured, releases the held plant write claim on the way out —
+/// best-effort, the demotion counterpart that marks a deliberate
+/// step-down so a successor's conditional claim takes the field
+/// without meeting a dead claim — and reports the named shutdown.
+/// `tick` is the stopped run's virtual tick for the report.
+fn finish_graceful_shutdown(driver: &Driver, options: &Options, tick: Tick) -> ExitCode {
+    driver.release_claim();
+    match &options.state_file {
+        Some(path) => eprintln!(
+            "graceful shutdown on {}: scan loop stopped at tick {}; checkpoint flushed to {}; \
+             field write claim released",
+            shutdown_name(),
+            tick.0,
+            path.display()
+        ),
+        None => eprintln!(
+            "graceful shutdown on {}: scan loop stopped at tick {}; no state file configured; \
+             field write claim released",
+            shutdown_name(),
+            tick.0
+        ),
+    }
+    ExitCode::SUCCESS
+}
+
 /// Parsed command line.
 struct Options {
     /// The plant model document to load.
@@ -952,6 +1121,12 @@ struct Options {
     /// restart. Requires `--listen`: the journal's recorder lives in
     /// the monitor.
     journal_file: Option<PathBuf>,
+    /// The journal's served-window and append-queue bound — the two
+    /// capacities `--journal-capacity` sizes together. A plant whose
+    /// own cold start journals more records than the default carries
+    /// declares its scale here; the bound is still a hard bound, only
+    /// one the plant's engineering data sizes.
+    journal_capacity: Option<usize>,
     /// Persist the durable process history to this append-only file
     /// and replay it at startup — the declared-`record` points'
     /// samples, run-boundary markers, and tick-domain seams surviving
@@ -966,6 +1141,18 @@ struct Options {
     /// misconfiguration the plant server flags `claimed_shared` and
     /// this instance warns about.
     owner_token: Option<u64>,
+    /// The deployment's logical-bus → host-interface bindings, from
+    /// repeated `--bus <bus>=<binding>` arms — the deployment half of
+    /// decision 47's split: the model owns the logical name, the
+    /// deployment says which segment serves it.
+    ///
+    /// A binding value names either a host interface
+    /// (`ecat0=enx00e04c751f7c`) or a recorded run replayed in its
+    /// place (`ecat0=@capture.json`, the `RECORDED_BINDING_PREFIX`
+    /// arm). Either is an explicit deployment choice: an interface
+    /// binding never falls back to a recording, and a recorded binding
+    /// never opens a socket.
+    buses: BTreeMap<String, String>,
     /// The pair's shared tracking secret — both peers launch with the
     /// same token, hashed to the key the monitor's `?prove=`
     /// checkpoint answers sign and its announced-source pulls verify:
@@ -1006,7 +1193,8 @@ controller scan.
                   delivery under the stdout_snapshot_drops counter
                   reported on stderr, never the scan's cadence
   --dt T          simulated process time per scan (default: scan period in
-                  seconds, or 1.0 when unpaced)
+                  seconds, or 1.0 when unpaced); at most 1000000 time
+                  units, the plant step contract's bound
   --listen ADDR   serve the monitoring endpoints on ADDR while the paced
                   scan runs; requires --scan-ms. While pacing, POST /scan is
                   refused: the wall clock owns the scan schedule
@@ -1086,6 +1274,24 @@ controller scan.
                   and an announced-only demotion refuses
                   no_tracking_source (a configured --peer still covers
                   the switchover)
+  --bus BUS=BINDING
+                  bind a hardware-bound device's logical bus to the
+                  segment that serves it, repeatable: `--bus
+                  ecat0=enx00e04c751f7c`. The model names the logical
+                  bus; this arm says which host interface serves it, so
+                  the deployment owns the NIC rather than the model.
+                  A BINDING naming a recorded run instead —
+                  `@path/to/capture.json` — replays that recording in
+                  the interface's place, which is how the hardware
+                  path is exercised with no rig. A model declaring a
+                  hardware-bound bus this flag does not bind, a
+                  binding naming an interface this host does not have,
+                  and a recorded run that cannot be read all fail
+                  startup naming the bus; neither ever falls back to
+                  simulation. A hardware-bound model runs paced only:
+                  --driven against one is refused, and the paced run
+                  refuses POST /scan, because the wall clock owns the
+                  schedule against hardware
   --state-file PATH
                   persist the run's checkpoint to PATH at the end of
                   every scan cycle and at each accepted command's
@@ -1123,6 +1329,16 @@ controller scan.
                   controllers at one journal file. Requires --listen.
                   PATH must be distinct from --state-file, its .lock
                   writer-lock sidecar, and --history-file
+  --journal-capacity N
+                  size the transition journal's served window and its
+                  append queue, the default 1024 entries each. The
+                  served window answers GET /journal and the append
+                  queue bounds the --journal-file writer's handoff: a
+                  run whose own cold start journals more records than
+                  the bound carries would refuse a record rather than
+                  lose one unaccounted, so a plant larger than the
+                  default scale declares its own here. N must be
+                  non-zero
   --history-file PATH
                   persist the durable process history to PATH — the
                   declared-record points' samples, run-boundary
@@ -1138,7 +1354,16 @@ controller scan.
 With neither --ticks nor --scan-ms, a paced run at 100 ms is assumed.
 A remote-attached standby is output-quiescent behind a write gate until
 POST /promote lifts it; a demoted remote active is re-quiesced the same
-way, so exactly one peer writes the shared plant.";
+way, so exactly one peer writes the shared plant.
+
+Signals: SIGTERM/SIGINT stop a paced or driven run gracefully — the
+scan loop stops at the next scan boundary (within 10 s), the latest
+checkpoint flushes to --state-file where configured (at most 5 s of
+the bound), the held field write claim releases, and the process
+exits 0; only a failure exits nonzero, naming the reason. A second
+signal forces prompt exit with status 128+signo, skipping the flush
+and the release.
+";
 
 impl Options {
     fn parse(args: impl Iterator<Item = String>) -> Result<Self, String> {
@@ -1156,9 +1381,11 @@ impl Options {
         let mut revised = false;
         let mut state_file = None;
         let mut journal_file = None;
+        let mut journal_capacity = None;
         let mut history_file = None;
         let mut owner_token = None;
         let mut pair_token = None;
+        let mut buses: BTreeMap<String, String> = BTreeMap::new();
         let mut args = args;
         while let Some(arg) = args.next() {
             let mut value = |flag: &str| {
@@ -1205,6 +1432,15 @@ impl Options {
                 "--journal-file" => {
                     journal_file = Some(PathBuf::from(value("--journal-file")?));
                 }
+                "--journal-capacity" => {
+                    journal_capacity = Some(
+                        value("--journal-capacity")?
+                            .parse::<usize>()
+                            .map_err(|error| {
+                                format!("invalid --journal-capacity value: {error}")
+                            })?,
+                    );
+                }
                 "--history-file" => {
                     history_file = Some(PathBuf::from(value("--history-file")?));
                 }
@@ -1214,6 +1450,23 @@ impl Options {
                             .parse::<u64>()
                             .map_err(|error| format!("invalid --owner-token value: {error}"))?,
                     );
+                }
+                "--bus" => {
+                    let binding = value("--bus")?;
+                    let (bus, bound) = binding.split_once('=').ok_or_else(|| {
+                        format!("invalid --bus value {binding:?}: expected <bus>=<binding>")
+                    })?;
+                    if bus.is_empty() || bound.is_empty() {
+                        return Err(format!(
+                            "invalid --bus value {binding:?}: expected <bus>=<binding>"
+                        ));
+                    }
+                    if buses.insert(bus.to_string(), bound.to_string()).is_some() {
+                        return Err(format!(
+                            "--bus binds logical bus {bus:?} twice: {binding:?} replaces an \
+                             earlier binding"
+                        ));
+                    }
                 }
                 "--pair-token" => pair_token = Some(value("--pair-token")?),
                 "-h" | "--help" => {
@@ -1249,6 +1502,7 @@ impl Options {
                 ("--history-file", history_file.is_some()),
                 ("--owner-token", owner_token.is_some()),
                 ("--pair-token", pair_token.is_some()),
+                ("--bus", !buses.is_empty()),
             ] {
                 if present {
                     rejected.push(flag);
@@ -1274,8 +1528,24 @@ impl Options {
         {
             return Err("--dt must be finite and non-negative".to_string());
         }
+        if let Some(dt) = dt
+            && dt > dcs_sim::MAX_STEP_DT
+        {
+            // The field refuses an over-bound step by name, so a run
+            // paced above the bound would die on its first scan with a
+            // wire diagnostic; the run defect is reported where it is
+            // configured instead.
+            return Err(format!(
+                "--dt must be at most {} — a scan period, bounded by \
+                 the plant's step contract",
+                dcs_sim::MAX_STEP_DT
+            ));
+        }
         if auto_promote == Some(0) {
             return Err("--auto-promote must be at least one missed pull".to_string());
+        }
+        if journal_capacity == Some(0) {
+            return Err("--journal-capacity must be at least one entry".to_string());
         }
         if revised && standby.is_none() && state_file.is_none() {
             return Err(
@@ -1441,9 +1711,11 @@ impl Options {
             revised,
             state_file,
             journal_file,
+            journal_capacity,
             history_file,
             owner_token,
             pair_token,
+            buses,
         })
     }
 }
@@ -1575,8 +1847,112 @@ fn ip_is_local(ip: std::net::IpAddr) -> bool {
 }
 
 fn fail(message: impl std::fmt::Display) -> ExitCode {
+    RUN_FAILED.store(true, Ordering::SeqCst);
     eprintln!("error: {message}");
     ExitCode::FAILURE
+}
+
+/// The hardware-bound device kinds a model's field wiring can declare:
+/// the kinds that name a physical bus and therefore cannot run against
+/// the `--driven` schedule, and each need their bus bound by the
+/// deployment.
+const HARDWARE_KINDS: [&str; 1] = [ETHERCAT_KIND];
+
+/// The logical buses `model` declares on a hardware-bound kind — the
+/// `bus` parameter each such device's declaration carries.
+fn hardware_buses(model: &PlantModel) -> Vec<String> {
+    let mut buses: Vec<String> = model
+        .devices
+        .iter()
+        .filter(|device| HARDWARE_KINDS.contains(&device.kind.as_str()))
+        .filter_map(|device| device.parameters.get("bus"))
+        .filter_map(|bus| bus.as_str())
+        .map(str::to_string)
+        .collect();
+    buses.sort();
+    buses.dedup();
+    buses
+}
+
+/// Resolves the deployment's logical-bus → segment bindings into the
+/// [`EthercatBuses`] the hardware-bound factories resolve through.
+///
+/// Three failures are startup errors, each naming the bus, and none of
+/// them degrades into a simulated substitute:
+///
+/// - a model declaring a hardware-bound bus that no `--bus` arm binds —
+///   the deployment did not say which segment serves it, and guessing
+///   would open the wrong one;
+/// - a binding naming a host interface this host does not have — the
+///   deployment names a NIC that is not there, which is a wiring
+///   mistake rather than a bus to open later;
+/// - a recorded binding whose capture cannot be read — the recording
+///   is the segment, so an unreadable one leaves nothing to open.
+///
+/// A binding for a bus no device declares is left alone: the deployment
+/// may bind segments ahead of the model that uses them, and an unused
+/// binding opens nothing.
+fn resolve_bus_bindings(
+    model: &PlantModel,
+    bindings: &BTreeMap<String, String>,
+) -> Result<EthercatBuses, String> {
+    let declared = hardware_buses(model);
+    for bus in &declared {
+        if !bindings.contains_key(bus) {
+            return Err(format!(
+                "logical bus {bus:?} is declared by a hardware-bound device and no \
+                 --bus binds it; bind it to the host interface that serves it \
+                 (--bus {bus}=<interface>) or to a recorded run \
+                 (--bus {bus}=@<recorded>.json)"
+            ));
+        }
+    }
+    for (bus, binding) in bindings {
+        let Some(path) = binding.strip_prefix(RECORDED_BINDING_PREFIX) else {
+            if !host_interface_exists(binding) {
+                return Err(format!(
+                    "logical bus {bus:?} is bound to interface {binding:?}, which this host \
+                     has no such interface for"
+                ));
+            }
+            continue;
+        };
+        let recorded = Path::new(path);
+        if !recorded.is_file() {
+            return Err(format!(
+                "logical bus {bus:?} is bound to the recorded run {path:?}, which is not a \
+                 readable file"
+            ));
+        }
+    }
+    Ok(EthercatBuses::new(bindings.clone()))
+}
+
+/// Whether this host has an interface named `name`.
+///
+/// `/sys/class/net` is the kernel's own answer rather than a
+/// getifaddrs walk: a bound-down or unconfigured NIC is still an
+/// interface, and the field NIC this platform binds is exactly the one
+/// whose address configuration must stay off.
+fn host_interface_exists(name: &str) -> bool {
+    if name.is_empty() || name.contains('/') {
+        return false;
+    }
+    Path::new("/sys/class/net").join(name).exists()
+}
+
+/// The driver registry a run resolves through: the standard kinds, plus
+/// the hardware-bound factories bound to `buses`.
+///
+/// A model with no hardware-bound device resolves through
+/// [`DriverRegistry::standard`] exactly as before — the deployment's
+/// bindings are inert without a device asking for them.
+fn driver_registry(model: &PlantModel, options: &Options) -> Result<DriverRegistry, String> {
+    if hardware_buses(model).is_empty() {
+        return Ok(DriverRegistry::standard());
+    }
+    let buses = resolve_bus_bindings(model, &options.buses)?;
+    Ok(DriverRegistry::standard().with_ethercat_buses(&buses))
 }
 
 /// Installs the pair's shared tracking secret on the monitor when the
@@ -1588,6 +1964,30 @@ fn keyed_monitor<'d>(monitor: Monitor<'d>, options: &Options) -> Monitor<'d> {
     match &options.pair_token {
         Some(token) => monitor.with_pair_key(dcs_monitor::pair_key(token)),
         None => monitor,
+    }
+}
+
+/// The build identity this process reports on `GET /health`: its crate
+/// version, the git revision it was compiled from where one was
+/// recorded, and the fingerprint of the model it loaded.
+///
+/// The revision is read from `DCS_BUILD_SHA` in this process's
+/// environment — the deployment's own way of stamping it, whether the
+/// image baked it in or the launch passes it with
+/// `docker run -e`/`--env-file` — and is absent when no one supplied
+/// one. An absent revision is reported absent rather than invented: a
+/// consumer must be able to tell "this build did not record one" from
+/// "it did, and here it is", because the first is a deployment gap and
+/// the second is evidence. The crate version is always present; it is
+/// compiled in, so it is never a deployment's to forget.
+fn build_identity(model: &PlantModel) -> BuildIdentity {
+    BuildIdentity {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        git_sha: std::env::var("DCS_BUILD_SHA")
+            .ok()
+            .map(|sha| sha.trim().to_string())
+            .filter(|sha| !sha.is_empty()),
+        model_fingerprint: Some(model.fingerprint().to_string()),
     }
 }
 
@@ -1947,6 +2347,22 @@ fn main() -> ExitCode {
         }
     };
 
+    // The graceful-shutdown stop path: SIGTERM/SIGINT arm the scan
+    // loop's boundary stop — a second one forcing prompt exit — so
+    // the run owns its stop from here on, including the compile-check
+    // mode (which exits before any loop runs) and every fallible
+    // startup step below (a signal before the loops only moves their
+    // first boundary check up).
+    if let Err(error) = install_shutdown_handlers() {
+        return fail(error);
+    }
+    // The flush wait is the bound's inner budget — the stop itself
+    // lands within one scan period, the sink drain inside the rest.
+    debug_assert!(
+        SHUTDOWN_FLUSH_WAIT < GRACEFUL_SHUTDOWN_BOUND,
+        "the flush wait must fit inside the shutdown bound"
+    );
+
     let source = match std::fs::read_to_string(&options.model) {
         Ok(source) => source,
         Err(error) => {
@@ -1975,6 +2391,33 @@ fn main() -> ExitCode {
             Err(error) => fail(error),
         };
     }
+
+    // A model declaring a hardware-bound device kind runs paced only:
+    // the wall clock owns the scan schedule against a real bus, so the
+    // driven schedule — scans arriving one at a time through
+    // `POST /scan`, each also stepping the field — has no meaning here.
+    // The refusal names both sides of the conflict rather than
+    // substituting a simulation for requested hardware.
+    let hardware = hardware_buses(&model);
+    if !hardware.is_empty() && options.driven {
+        return fail(format!(
+            "--driven paces scans through POST /scan, which has no meaning against a \
+             hardware-bound bus; this model declares {} on {}. Run paced with \
+             --scan-ms instead",
+            HARDWARE_KINDS.join("/"),
+            hardware.join(", ")
+        ));
+    }
+
+    // The deployment's logical-bus → segment bindings resolve before the
+    // drivers do: an unbound bus, a binding naming an interface this host
+    // does not have, and an unreadable recorded run are startup failures
+    // naming the bus, so no run ever serves telemetry as healthy over a
+    // bus it could not open.
+    let driver_kinds = match driver_registry(&model, &options) {
+        Ok(registry) => registry,
+        Err(error) => return fail(error),
+    };
 
     // The field driver: the registry-resolved fan-out — local simulated
     // backends plus any `sim-tcp` devices the model declares — or the
@@ -2018,13 +2461,10 @@ fn main() -> ExitCode {
                 }
             }
         }
-        None => {
-            match resolve_drivers(&model, &DriverRegistry::standard()).and_then(|plan| plan.build())
-            {
-                Ok(fanout) => Driver::Local(fanout),
-                Err(error) => return fail(error),
-            }
-        }
+        None => match resolve_drivers(&model, &driver_kinds).and_then(|plan| plan.build()) {
+            Ok(fanout) => Driver::Local(fanout),
+            Err(error) => return fail(error),
+        },
     };
 
     // Every instance whose driver surface reaches the shared field runs
@@ -2272,6 +2712,17 @@ fn main() -> ExitCode {
     // never hold the lock on the file's I/O.
     let monitor_config = || MonitorConfig {
         journal_file: options.journal_file.clone(),
+        // A plant larger than the default scale declares its journal's
+        // served window and append queue together: one cold start at
+        // the composed library's size journals more records than the
+        // default carries, and the run must refuse a record rather
+        // than lose one unaccounted.
+        journal_capacity: options
+            .journal_capacity
+            .unwrap_or(MonitorConfig::default().journal_capacity),
+        journal_drain_capacity: options
+            .journal_capacity
+            .unwrap_or(MonitorConfig::default().journal_drain_capacity),
         history_file: options.history_file.clone(),
         state_file: options.state_file.clone(),
         // The run already holds the checkpoint's single-writer claim
@@ -2305,7 +2756,7 @@ fn main() -> ExitCode {
                     return fail(format!("cannot bind monitor on {addr}: {error}"));
                 }
             };
-        let monitor = keyed_monitor(monitor, &options);
+        let monitor = keyed_monitor(monitor, &options).with_build(build_identity(&model));
         // Declare this monitor on every field claim this run asserts:
         // a peer the claim preempts learns where the successor serves
         // from the field's own fencing verdicts — the unkeyed pair's
@@ -2355,7 +2806,30 @@ fn main() -> ExitCode {
             }
         }
         eprintln!("listening on {}", monitor.local_addr());
-        monitor.serve();
+        graceful_serve(&monitor);
+        // The graceful exit: a signal stopped the serve loop — flush
+        // the latest checkpoint where configured and release the held
+        // field claim on the way out. A flush failure exits nonzero
+        // naming the file. A latched startup refusal still decides a
+        // refused launch first, so a pairless refusal keeps its
+        // nonzero verdict even under a signal while a declared pair
+        // rejoins and exits graceful.
+        if shutdown_requested() && !RUN_FAILED.load(Ordering::SeqCst) {
+            if let Err(error) = flush_monitored_state(&monitor, &options) {
+                return fail(format!("graceful shutdown: {error}"));
+            }
+            if let Some(error) = monitor.drain_startup_refusal()
+                && let Err(error) = settle_activation(
+                    Ok(Activation::Refused { error }),
+                    &driver,
+                    owner,
+                    options.peer.is_some(),
+                )
+            {
+                return fail(error);
+            }
+            return finish_graceful_shutdown(&driver, &options, monitor.tick());
+        }
         // The driven run's serve loop stands down when a `POST /scan`
         // settles the deferred startup grant's refusal on a pairless
         // run — the born-active contract's `Refused` verdict arriving
@@ -2400,7 +2874,7 @@ fn main() -> ExitCode {
                         return fail(format!("cannot bind monitor on {addr}: {error}"));
                     }
                 };
-                let monitor = keyed_monitor(monitor, &options);
+                let monitor = keyed_monitor(monitor, &options).with_build(build_identity(&model));
                 // Declare this monitor on every field claim this run
                 // asserts: a peer the claim preempts learns where the
                 // successor serves from the field's own fencing
@@ -2418,13 +2892,25 @@ fn main() -> ExitCode {
                 eprintln!("listening on {}", monitor.local_addr());
                 let step = || driver.step(dt, monitor.owns_field());
                 let mut puller = None;
-                run_monitored(
+                let result = run_monitored(
                     &monitor,
                     || tracked_cycle(&monitor, &mut puller, &driver, owner, &options),
                     step,
                     &options,
                     period.unwrap(),
-                )
+                );
+                // The graceful exit: a signal stopped the paced loop at
+                // its boundary — flush the latest checkpoint where
+                // configured and release the held field claim on the
+                // way out. A prior scan failure keeps its nonzero
+                // verdict instead of being masked by a graceful 0.
+                if shutdown_requested() && !RUN_FAILED.load(Ordering::SeqCst) {
+                    if let Err(error) = flush_monitored_state(&monitor, &options) {
+                        return fail(format!("graceful shutdown: {error}"));
+                    }
+                    return finish_graceful_shutdown(&driver, &options, monitor.tick());
+                }
+                result
             }
             None => {
                 // Without a monitor nothing external can promote this
@@ -2447,7 +2933,7 @@ fn main() -> ExitCode {
                     Err(error) => return fail(error),
                 };
                 let step = || driver.step(dt, peer.borrow().owns_field());
-                scan_loop(
+                let result = scan_loop(
                     || {
                         let mut peer = peer.borrow_mut();
                         if peer.owns_field() {
@@ -2583,7 +3069,21 @@ fn main() -> ExitCode {
                     || peer.borrow_mut().record_scan_overrun(),
                     &options,
                     period,
-                )
+                );
+                // The graceful exit on a monitorless standby: a signal
+                // stopped the loop at its boundary — attest the final
+                // checkpoint where configured and release the held
+                // field claim on the way out. A prior scan failure
+                // keeps its nonzero verdict instead of being masked by
+                // a graceful 0.
+                if shutdown_requested() && !RUN_FAILED.load(Ordering::SeqCst) {
+                    if let Err(error) = flush_monitorless_state(&state_sink, &peer) {
+                        return fail(format!("graceful shutdown: {error}"));
+                    }
+                    let tick = peer.borrow().tick();
+                    return finish_graceful_shutdown(&driver, &options, tick);
+                }
+                result
             }
         }
     } else {
@@ -2600,7 +3100,7 @@ fn main() -> ExitCode {
                         return fail(format!("cannot bind monitor on {addr}: {error}"));
                     }
                 };
-                let monitor = keyed_monitor(monitor, &options);
+                let monitor = keyed_monitor(monitor, &options).with_build(build_identity(&model));
                 // Declare this monitor on every field claim this run
                 // asserts: a peer the claim preempts learns where the
                 // successor serves from the field's own fencing
@@ -2650,13 +3150,25 @@ fn main() -> ExitCode {
                 // announced through its pulls.
                 let step = || driver.step(dt, monitor.owns_field());
                 let mut puller = None;
-                run_monitored(
+                let result = run_monitored(
                     &monitor,
                     || tracked_cycle(&monitor, &mut puller, &driver, owner, &options),
                     step,
                     &options,
                     period.unwrap(),
-                )
+                );
+                // The graceful exit: a signal stopped the paced loop at
+                // its boundary — flush the latest checkpoint where
+                // configured and release the held field claim on the
+                // way out. A prior scan failure keeps its nonzero
+                // verdict instead of being masked by a graceful 0.
+                if shutdown_requested() && !RUN_FAILED.load(Ordering::SeqCst) {
+                    if let Err(error) = flush_monitored_state(&monitor, &options) {
+                        return fail(format!("graceful shutdown: {error}"));
+                    }
+                    return finish_graceful_shutdown(&driver, &options, monitor.tick());
+                }
+                result
             }
             None => {
                 // The launched active's startup activation — the same
@@ -2688,7 +3200,7 @@ fn main() -> ExitCode {
                     Ok(sink) => sink,
                     Err(error) => return fail(error),
                 };
-                scan_loop(
+                let result = scan_loop(
                     || {
                         let mut peer = peer.borrow_mut();
                         let scanned = peer.scan();
@@ -2755,7 +3267,21 @@ fn main() -> ExitCode {
                     || peer.borrow_mut().record_scan_overrun(),
                     &options,
                     period,
-                )
+                );
+                // The graceful exit on a monitorless active: a signal
+                // stopped the loop at its boundary — attest the final
+                // checkpoint where configured and release the held
+                // field claim on the way out. A prior scan failure
+                // keeps its nonzero verdict instead of being masked by
+                // a graceful 0.
+                if shutdown_requested() && !RUN_FAILED.load(Ordering::SeqCst) {
+                    if let Err(error) = flush_monitorless_state(&state_sink, &peer) {
+                        return fail(format!("graceful shutdown: {error}"));
+                    }
+                    let tick = peer.borrow().tick();
+                    return finish_graceful_shutdown(&driver, &options, tick);
+                }
+                result
             }
         }
     }
@@ -2907,6 +3433,29 @@ fn run_monitored(
         monitor.shutdown();
         result
     })
+}
+
+/// Serves `monitor` until SIGTERM/SIGINT or the serve loop's own
+/// stand-down — the driven run's graceful-shutdown wait, which owns no
+/// scan loop to poll the flag from. A watcher parks on the shutdown
+/// flag and unblocks the serve loop; the main thread blocks in
+/// `serve` so its internal stand-down (the deferred startup grant's
+/// pairless refusal ending the run) still ends the run on its own.
+/// The `done` flag releases the watcher when the serve loop stands
+/// down by itself, so the scope always joins; a redundant unblock
+/// after that only pads the dead queue.
+fn graceful_serve(monitor: &Monitor<'_>) {
+    let done = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            while !shutdown_requested() && !done.load(Ordering::SeqCst) {
+                std::thread::sleep(SHUTDOWN_POLL);
+            }
+            monitor.shutdown();
+        });
+        monitor.serve();
+        done.store(true, Ordering::SeqCst);
+    });
 }
 
 /// The bound on [`SnapshotSink`]'s handoff queue: at most this many
@@ -3118,6 +3667,13 @@ impl SnapshotSink {
 /// `record_scan_overrun` on whichever wrapper they scan through — so
 /// wall-clock overrun detection stays out here in the shell and only a
 /// count, not a timestamp, enters the tick domain.
+///
+/// A SIGTERM/SIGINT stops the loop at the next scan boundary — the
+/// check at the loop top, with the pacing sleep interruption-sliced so
+/// a long period never delays it. The loop returns `SUCCESS` for both
+/// the `--ticks` completion and the signal stop; the caller tells them
+/// apart through [`shutdown_requested`] and runs the graceful exit's
+/// checkpoint flush and claim release only on the signal path.
 fn scan_loop(
     mut scan: impl FnMut() -> Result<Tick, String>,
     snapshot: impl Fn() -> TelemetrySnapshot,
@@ -3139,6 +3695,14 @@ fn scan_loop(
         .is_none()
         .then(|| SnapshotSink::start(std::io::stdout()));
     loop {
+        // The graceful-shutdown stop: a SIGTERM/SIGINT lands here, at
+        // the scan boundary — the last completed cycle already ran its
+        // scan, plant step, and `--state-file` persist, so the stopped
+        // run's durable state is whole. The caller flushes the sink
+        // and releases the field claim on the way out.
+        if shutdown_requested() {
+            return ExitCode::SUCCESS;
+        }
         let started = Instant::now();
         // A scan cycle can settle a verdict the launch could not have
         // answered — the deferred startup grant's refusal landing
@@ -3178,7 +3742,18 @@ fn scan_loop(
         if let Some(period) = period {
             let elapsed = started.elapsed();
             if elapsed < period {
-                std::thread::sleep(period - elapsed);
+                // The pacing sleep, interruption-sliced: a signal stops
+                // the loop at the next boundary instead of waiting out
+                // a long scan period — the graceful-shutdown bound's
+                // pacing half. An early stop skips the overrun report:
+                // the loop exits at the top rather than closing the
+                // cycle the measurement below would have closed.
+                let mut remaining = period - elapsed;
+                while remaining > Duration::ZERO && !shutdown_requested() {
+                    let slice = remaining.min(SHUTDOWN_POLL);
+                    std::thread::sleep(slice);
+                    remaining = period.saturating_sub(started.elapsed());
+                }
             } else {
                 // The cycle overran its period — there is nothing left
                 // to sleep off, so report it into io_health.scan_overruns.
@@ -3402,6 +3977,102 @@ mod tests {
         ] {
             if let Err(error) = parse(listen, flag, target) {
                 panic!("{flag} {target} against --listen {listen} must parse: {error}");
+            }
+        }
+    }
+
+    /// Decision 112's declared-magnitude seam: a plant whose own cold
+    /// start journals more records than the default bound carries names
+    /// its own bound through `--journal-capacity`, and the run refuses
+    /// only the incoherent value. A zero bound would silently drop every
+    /// record — the loss decision 112 exists to keep impossible — so it
+    /// is refused at parse beside every other numeric option's rule, and
+    /// a non-numeric spelling names the flag rather than defaulting.
+    #[test]
+    fn the_journal_capacity_is_parsed_declared_and_refuses_zero() {
+        let base = [
+            "model.json".to_string(),
+            "--scan-ms".to_string(),
+            "100".to_string(),
+            "--listen".to_string(),
+            "127.0.0.1:0".to_string(),
+        ];
+        let parse = |value: &str| {
+            Options::parse(
+                base.iter()
+                    .cloned()
+                    .chain(["--journal-capacity".to_string(), value.to_string()]),
+            )
+        };
+
+        // A declared bound is carried through as written.
+        for value in ["1", "1840", "65536"] {
+            let options = match parse(value) {
+                Ok(options) => options,
+                Err(error) => panic!("--journal-capacity {value} must parse: {error}"),
+            };
+            assert_eq!(options.journal_capacity, Some(value.parse().unwrap()));
+        }
+
+        // The flag's own spelling: it is what an operator reads, so the
+        // refusal names it rather than a generic parse failure.
+        for value in ["0", "nope", "-1", ""] {
+            let error = match parse(value) {
+                Ok(_) => panic!("--journal-capacity {value:?} must fail parsing"),
+                Err(error) => error,
+            };
+            assert!(
+                error.contains("--journal-capacity"),
+                "--journal-capacity {value:?}: {error}"
+            );
+        }
+
+        // Absent, the option names no bound at all — the run takes both
+        // capacities from `MonitorConfig::default()`, which is the
+        // platform default no plant has to declare.
+        let options = Options::parse(base.iter().cloned()).unwrap();
+        assert_eq!(options.journal_capacity, None);
+    }
+
+    /// Finding `huge-step-dt-poisons-plant-state`: a scan period is
+    /// the `dt` every plant step carries, and the field bounds it at
+    /// `dcs_sim::MAX_STEP_DT` — one accepted request above that bound
+    /// wound an element's accumulator past the `f64` range for every
+    /// attachment until the plant restarted. A run declaring such a
+    /// period would die on its first scan with a wire diagnostic, so
+    /// `Options::parse` refuses it where it is configured, naming the
+    /// bound, while an ordinary period still parses.
+    #[test]
+    fn an_over_bound_scan_period_fails_option_parsing() {
+        let base = [
+            "model.json".to_string(),
+            "--scan-ms".to_string(),
+            "100".to_string(),
+        ];
+        let parse = |dt: &str| {
+            Options::parse(
+                base.iter()
+                    .cloned()
+                    .chain(["--dt".to_string(), dt.to_string()]),
+            )
+        };
+
+        for over in ["1e7", "1e308"] {
+            let error = match parse(over) {
+                Ok(_) => panic!("--dt {over} is above the step bound and must fail parsing"),
+                Err(error) => error,
+            };
+            assert!(
+                error.contains("--dt") && error.contains(&dcs_sim::MAX_STEP_DT.to_string()),
+                "--dt {over}: {error}"
+            );
+        }
+
+        // The bound is a usable ceiling: an ordinary scan period and the
+        // bound itself both parse.
+        for legal in ["0.1", &dcs_sim::MAX_STEP_DT.to_string()] {
+            if let Err(error) = parse(legal) {
+                panic!("--dt {legal} must parse: {error}");
             }
         }
     }

@@ -313,12 +313,12 @@ fn integrator_map() -> ChannelMap {
 #[test]
 fn a_legal_step_that_overflows_an_element_degrades_the_sample_and_recovers() {
     // QA `sim-net-nonfinite-plant-state-poisons-wire-permanently`:
-    // claim -> write 1e308 -> step dt=1e308 drove the integrator's
-    // accumulator past the f64 range; the stored non-finite sample
-    // serialized `{"float":null}` — a frame this protocol's own client
-    // must reject — and the element stayed corrupt under every later
-    // step until the server restarted. The field now holds the last
-    // finite state instead: the served sample decodes, marked
+    // claim -> write 1e308 -> step drove the integrator's accumulator
+    // past the f64 range; the stored non-finite sample serialized
+    // `{"float":null}` — a frame this protocol's own client must
+    // reject — and the element stayed corrupt under every later step
+    // until the server restarted. The field now holds the last finite
+    // state instead: the served sample decodes, marked
     // `Bad`/`out_of_range`, and a finite input write plus a finite
     // step recovers the element in place.
     with_server(integrator_map(), |addr| {
@@ -326,9 +326,12 @@ fn a_legal_step_that_overflows_an_element_degrades_the_sample_and_recovers() {
         remote.claim_writer(1).unwrap();
         let driver: &dyn IoDriver = &remote;
 
+        // The write vector, which no bound can take away: an extreme
+        // signal is legal input, and `1e308 · 1e6` still leaves the
+        // range. Both steps refuse to commit.
         driver.write(PointId(1), Value::Float(1e308)).unwrap();
-        remote.step(1e308).unwrap();
-        remote.step(1e308).unwrap();
+        remote.step(dcs_sim::MAX_STEP_DT).unwrap();
+        remote.step(dcs_sim::MAX_STEP_DT).unwrap();
 
         // The frame decodes — the defect's Disconnected is gone — and
         // the overflowed point reports its held finite value bad
@@ -353,6 +356,81 @@ fn a_legal_step_that_overflows_an_element_degrades_the_sample_and_recovers() {
         let recovered = driver.read(PointId(10)).unwrap();
         assert_eq!(recovered.value, Value::Float(2.0));
         assert!(recovered.quality.is_good());
+    });
+}
+
+#[test]
+fn a_huge_finite_step_dt_is_refused_by_name_and_leaves_the_field_untouched() {
+    // QA `huge-step-dt-poisons-plant-state`, the finding this issue
+    // closes: `claim_writer(X); step(1e308)` on a map with an
+    // integrator — `1e308` is protocol-legal JSON and a *finite* f64,
+    // so the request boundary could not refuse it as unspellable. The
+    // pre-bound server accepted it, and one request wound the
+    // accumulator past the f64 range: reads and `list_points` then
+    // served `{"float":null}`, which this protocol's own `Value` cannot
+    // deserialize — every read a `Disconnected`, the point census dead
+    // for every attachment, and a write plus a later step unable to
+    // repair it because the element recomputed from an infinite `y`.
+    // The field now bounds a tick's advance by
+    // `dcs_sim::MAX_STEP_DT` and refuses the rest by name, changing
+    // nothing: no tick, no accumulator, no served frame moves.
+    with_server(integrator_map(), |addr| {
+        let remote = RemoteDriver::connect(addr).unwrap();
+        remote.claim_writer(1).unwrap();
+        let driver: &dyn IoDriver = &remote;
+
+        // A live tick first, so the refusal is measured against a field
+        // that really steps — a `dt:0` probe is the bound's own edge.
+        driver.write(PointId(1), Value::Float(2.0)).unwrap();
+        let tick = remote.step(1.0).unwrap();
+        let before = remote.list_points().unwrap();
+
+        // The finding's own reproduction vector, and the ordinary
+        // over-bound advance beside it: both answer the protocol's
+        // named refusal for a bad `dt`, with the bound in the detail.
+        for huge in [1e7, 1e308] {
+            let Err(RemoteError::InvalidRequest(detail)) = remote.step(huge) else {
+                panic!("dt {huge} is above the bound and must be refused");
+            };
+            assert!(
+                detail.contains(&dcs_sim::MAX_STEP_DT.to_string()),
+                "the refusal names the bound: {detail}"
+            );
+        }
+
+        // No state change at all: every served sample is byte-identical
+        // to the record the refused requests could not touch, and the
+        // refusals consumed no plant tick — the next step answers the
+        // tick right after the last accepted one.
+        assert_eq!(remote.list_points().unwrap(), before);
+        assert_eq!(remote.step(0.0), Ok(Tick(tick.0 + 1)));
+
+        // Reads and the census still deserialize, and every served
+        // float is finite — the `{"float":null}` poison signature
+        // never appears, on this attachment or a later one.
+        let level = driver.read(PointId(10)).unwrap();
+        let Value::Float(held) = level.value else {
+            panic!("the integrator's output is always a Float")
+        };
+        assert!(held.is_finite());
+        assert!(level.quality.is_good());
+        let census = remote.list_points().unwrap();
+        assert!(census.iter().all(|info| match info.sample.value {
+            Value::Float(v) => v.is_finite(),
+            _ => true,
+        }));
+        let fresh = RemoteDriver::connect(addr).unwrap();
+        assert_eq!(fresh.list_points().unwrap(), census);
+
+        // The bound is a usable ceiling, not a wedge: the field steps
+        // on through it, and a write plus a bounded step lands — the
+        // integrator integrates the bounded advance as any other.
+        driver.write(PointId(1), Value::Float(3.0)).unwrap();
+        remote.step(dcs_sim::MAX_STEP_DT).unwrap();
+        assert_eq!(
+            driver.read(PointId(10)).unwrap().value,
+            Value::Float(2.0 + 3.0 * dcs_sim::MAX_STEP_DT)
+        );
     });
 }
 
@@ -1841,6 +1919,17 @@ fn a_non_holder_release_cannot_dissolve_a_dead_owners_claim() {
         stray.claim_writer(2).unwrap();
         stray.write(PointId(20), Value::Float(4.0)).unwrap();
         assert_eq!(stray.read(PointId(20)).unwrap().value, Value::Float(4.0));
+
+        // The other half of the no-op: a `release_writer` from an
+        // attachment holding nothing is `Done` and changes nothing
+        // whether a dead owner's claim stands behind it (the window
+        // above) or no claim stands at all. On a field the recorded
+        // owner's own release emptied, the release cannot conjure a
+        // claim to dissolve and must not raise one: the field stays
+        // `unclaimed`, still closed to mutation.
+        stray.release_writer().unwrap();
+        assert_eq!(stray.probe_writer().unwrap(), FieldClaim::Unclaimed);
+        assert_eq!(stray.step(0.1), Err(RemoteError::Unclaimed));
     });
 }
 

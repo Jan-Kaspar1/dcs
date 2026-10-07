@@ -485,7 +485,9 @@ impl CyclicBusDriver {
     /// Advances the device server's bank one tick of `dt` time units —
     /// the explicit step behind the register protocol, stepping any
     /// declared dynamics by `dt` — and returns the bank's new tick.
-    /// `dt` must be finite and non-negative. Stepping mutates the
+    /// `dt` must be finite, non-negative, and at most
+    /// [`dcs_sim::MAX_STEP_DT`](dcs_sim::MAX_STEP_DT). Stepping
+    /// mutates the
     /// shared device, so while an attachment holds the write-ownership
     /// claim a non-holder's step answers [`LinkError::Fenced`].
     pub fn step(&self, dt: f64) -> Result<Tick, LinkError> {
@@ -966,6 +968,7 @@ impl IoDriver for CyclicBusDriver {
                 working_counter_mismatches: image.wkc_mismatches,
                 last_exchange_tick: image.last_exchange_tick,
                 missed_deadlines: image.missed_deadlines,
+                buses: Vec::new(),
             }),
         })
     }

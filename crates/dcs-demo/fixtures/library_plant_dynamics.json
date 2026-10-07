@@ -1,0 +1,644 @@
+[
+  {
+    "bool_flow": {
+      "input": 100,
+      "output": 20,
+      "on_rate": -1.0,
+      "off_rate": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "bool_flow": {
+      "input": 101,
+      "output": 21,
+      "on_rate": -1.0,
+      "off_rate": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        12,
+        20,
+        21
+      ],
+      "output": 13,
+      "bias": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "integrator": {
+      "input": 13,
+      "output": 10,
+      "initial": 0.8
+    }
+  },
+  {
+    "integrator": {
+      "input": 13,
+      "output": 11,
+      "initial": -2.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        1000011
+      ],
+      "output": 1000010,
+      "bias": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 1000110,
+      "output": 1000034,
+      "gain": 1.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 1000111,
+      "output": 1000035,
+      "gain": 1.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        1000034,
+        1000035
+      ],
+      "output": 1000016,
+      "bias": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "dead_time": {
+      "input": 1000016,
+      "output": 1000013,
+      "delay": 3.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "bool_flow": {
+      "input": 1000100,
+      "output": 1000030,
+      "on_rate": -10.0,
+      "off_rate": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "bool_flow": {
+      "input": 1000101,
+      "output": 1000031,
+      "on_rate": -10.0,
+      "off_rate": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        1000015,
+        1000030,
+        1000031
+      ],
+      "output": 1000014,
+      "bias": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "integrator": {
+      "input": 1000014,
+      "output": 1000012,
+      "initial": 400.0
+    }
+  },
+  {
+    "bool_flow": {
+      "input": 2000045,
+      "output": 2000025,
+      "on_rate": -0.3,
+      "off_rate": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        2000024,
+        2000025
+      ],
+      "output": 2000026,
+      "bias": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "integrator": {
+      "input": 2000026,
+      "output": 2000023,
+      "initial": 1.2
+    }
+  },
+  {
+    "threshold": {
+      "input": 2000023,
+      "output": 2000038,
+      "on": 0.08,
+      "off": 0.1,
+      "initial": false
+    }
+  },
+  {
+    "bool_flow": {
+      "input": 2000038,
+      "output": 2000027,
+      "on_rate": 1.0,
+      "off_rate": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "integrator": {
+      "input": 2000024,
+      "output": 2000028,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 2000028,
+      "output": 2000029,
+      "gain": 1.8,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 2000046,
+      "output": 2000030,
+      "gain": -0.0008,
+      "initial": 0.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        2000029,
+        2000030
+      ],
+      "output": 2000020,
+      "bias": 0.05,
+      "initial": 0.05
+    }
+  },
+  {
+    "first_order_lag": {
+      "input": 2000022,
+      "output": 2000021,
+      "time_constant": 0.6,
+      "initial": 0.05
+    }
+  },
+  {
+    "bool_flow": {
+      "input": 2000109,
+      "output": 2000089,
+      "on_rate": -0.3,
+      "off_rate": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        2000088,
+        2000089
+      ],
+      "output": 2000090,
+      "bias": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "integrator": {
+      "input": 2000090,
+      "output": 2000087,
+      "initial": 1.2
+    }
+  },
+  {
+    "threshold": {
+      "input": 2000087,
+      "output": 2000102,
+      "on": 0.08,
+      "off": 0.1,
+      "initial": false
+    }
+  },
+  {
+    "bool_flow": {
+      "input": 2000102,
+      "output": 2000091,
+      "on_rate": 1.0,
+      "off_rate": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "integrator": {
+      "input": 2000088,
+      "output": 2000092,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 2000092,
+      "output": 2000093,
+      "gain": 1.8,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 2000110,
+      "output": 2000094,
+      "gain": -0.0008,
+      "initial": 0.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        2000093,
+        2000094
+      ],
+      "output": 2000084,
+      "bias": 0.05,
+      "initial": 0.05
+    }
+  },
+  {
+    "first_order_lag": {
+      "input": 2000086,
+      "output": 2000085,
+      "time_constant": 0.6,
+      "initial": 0.05
+    }
+  },
+  {
+    "bool_flow": {
+      "input": 2000173,
+      "output": 2000153,
+      "on_rate": -0.3,
+      "off_rate": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        2000152,
+        2000153
+      ],
+      "output": 2000154,
+      "bias": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "integrator": {
+      "input": 2000154,
+      "output": 2000151,
+      "initial": 1.2
+    }
+  },
+  {
+    "threshold": {
+      "input": 2000151,
+      "output": 2000166,
+      "on": 0.08,
+      "off": 0.1,
+      "initial": false
+    }
+  },
+  {
+    "bool_flow": {
+      "input": 2000166,
+      "output": 2000155,
+      "on_rate": 1.0,
+      "off_rate": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "integrator": {
+      "input": 2000152,
+      "output": 2000156,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 2000156,
+      "output": 2000157,
+      "gain": 1.8,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 2000174,
+      "output": 2000158,
+      "gain": -0.0008,
+      "initial": 0.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        2000157,
+        2000158
+      ],
+      "output": 2000148,
+      "bias": 0.05,
+      "initial": 0.05
+    }
+  },
+  {
+    "first_order_lag": {
+      "input": 2000150,
+      "output": 2000149,
+      "time_constant": 0.6,
+      "initial": 0.05
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 3000030,
+      "output": 3000024,
+      "gain": 5.5,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 3000024,
+      "output": 3000025,
+      "gain": 0.006,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 3000023,
+      "output": 3000026,
+      "gain": -1.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        3000025,
+        3000026
+      ],
+      "output": 3000027,
+      "bias": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "first_order_lag": {
+      "input": 3000027,
+      "output": 3000020,
+      "time_constant": 1.0,
+      "initial": 2.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        3000025,
+        3000026
+      ],
+      "output": 3000028,
+      "bias": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "first_order_lag": {
+      "input": 3000028,
+      "output": 3000021,
+      "time_constant": 3.0,
+      "initial": 2.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        3000025,
+        3000026
+      ],
+      "output": 3000029,
+      "bias": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "first_order_lag": {
+      "input": 3000029,
+      "output": 3000022,
+      "time_constant": 8.0,
+      "initial": 2.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 3000070,
+      "output": 3000064,
+      "gain": 5.5,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 3000064,
+      "output": 3000065,
+      "gain": 0.006,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 3000063,
+      "output": 3000066,
+      "gain": -1.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        3000065,
+        3000066
+      ],
+      "output": 3000067,
+      "bias": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "first_order_lag": {
+      "input": 3000067,
+      "output": 3000060,
+      "time_constant": 1.0,
+      "initial": 2.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        3000065,
+        3000066
+      ],
+      "output": 3000068,
+      "bias": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "first_order_lag": {
+      "input": 3000068,
+      "output": 3000061,
+      "time_constant": 3.0,
+      "initial": 2.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        3000065,
+        3000066
+      ],
+      "output": 3000069,
+      "bias": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "first_order_lag": {
+      "input": 3000069,
+      "output": 3000062,
+      "time_constant": 8.0,
+      "initial": 2.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 3000403,
+      "output": 3000400,
+      "gain": 5.5,
+      "initial": 0.0
+    }
+  },
+  {
+    "first_order_lag": {
+      "input": 3000400,
+      "output": 3000401,
+      "time_constant": 1.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 3000401,
+      "output": 3000402,
+      "gain": 0.12,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 3000427,
+      "output": 3000424,
+      "gain": 5.5,
+      "initial": 0.0
+    }
+  },
+  {
+    "first_order_lag": {
+      "input": 3000424,
+      "output": 3000425,
+      "time_constant": 1.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 3000425,
+      "output": 3000426,
+      "gain": 0.12,
+      "initial": 0.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        3000401,
+        3000425
+      ],
+      "output": 3000013,
+      "bias": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 3000013,
+      "output": 3000011,
+      "gain": 1.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 3000013,
+      "output": 3000015,
+      "gain": 0.03,
+      "initial": 0.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        3000015
+      ],
+      "output": 3000014,
+      "bias": 30.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "first_order_lag": {
+      "input": 3000014,
+      "output": 3000010,
+      "time_constant": 1.0,
+      "initial": 30.0
+    }
+  }
+]

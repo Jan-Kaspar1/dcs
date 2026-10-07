@@ -21,7 +21,7 @@
 //!   integrator output) feeds `failover-select` as primary with the
 //!   scripted `level-remote` repeater as backup; the selected level
 //!   passes `signal-filter` into the `threshold-chain`, the managed
-//!   high-level alarm, and the divergence detector.
+//!   high-level alarm, and the rate-of-rise detector.
 //! - **Mode/authority (decision 75):** `manual-station` sits on the
 //!   gate-demand path; its `mode` input is the scripted `gate-mode`
 //!   field point — the field-reported local/auto switch the incident's
@@ -39,14 +39,19 @@
 //! - **Worsening process condition:** the rising level rides the
 //!   `threshold-chain`'s `duty_call`/`lag_call`/`high_level` ladder and
 //!   the managed `latching-alarm` at the declared `high` limit. The
-//!   rate-of-rise annunciation is the implementing ticket's documented
-//!   choice (decision 75): a `deviation-monitor` compares the filtered
-//!   level against a slower `signal-filter` trend — a sustained
-//!   divergence detector composed from existing kinds, not a dedicated
-//!   derivative kind. The recorded contract gap: no per-tick signed
-//!   rate-of-rise kind exists, so the composed monitor flags fast
-//!   excursions in either direction; a one-sided derivative kind would
-//!   revisit this.
+//!   rate-of-rise annunciation reads the filtered level through the
+//!   dedicated `rate-of-rise` kind (#321) — the post-M10 transition
+//!   record's adopted answer to decision 75's composed-versus-dedicated
+//!   question, applied under #396. The kind reports the level's per-scan
+//!   first difference and asserts its `rising` flag only while the
+//!   measured rise meets the declared one-sided bound, which is the
+//!   semantics the incident names; the earlier `deviation-monitor`
+//!   composition over a slower trend flagged sustained divergence in
+//!   *either* direction and so annunciated a falling level the scenario
+//!   does not treat as a rate of rise. The dedicated kind keeps the
+//!   scenario's observable annunciation — the same carrier, the same
+//!   `ror-alarm`, the same annunciation ordering — while expressing the
+//!   one-sided semantics the contract asks for.
 //! - **Bad or stale data:** `level-remote` declares
 //!   `stale_after_ticks` — the scripted playback's declared silence
 //!   through the incident presents `Uncertain(Stale)`, never a healthy
@@ -100,33 +105,32 @@
 //! metadata: every quantity-bearing point declares its engineering unit
 //! through [`PlantBuilder::unit`](crate::PlantBuilder::unit) — the canal
 //! level path in `m`, the tide and discharge flows in `m/s`, the gate
-//! position path in `fraction`, the composed rate-of-rise deviation in
-//! `fraction`, and the chain's stage count in `stages` — and each
-//! signal inherits its point's declaration at `build` rather than
+//! position path in `fraction`, the rate-of-rise detector's per-scan
+//! difference in `m/scan`, and the chain's stage count in `stages` — and
+//! each signal inherits its point's declaration at `build` rather than
 //! carrying a display string that could drift beside it. The
 //! unit-transparent kinds the scenario composes declare theirs through
 //! [`PlantBuilder::port_unit`](crate::PlantBuilder::port_unit) and
 //! [`PlantBuilder::param_unit`](crate::PlantBuilder::param_unit): the
-//! `failover-select`'s three level ports, both `signal-filter`s'
-//! `in`/`out`, the `threshold-chain`'s `level`, and the divergence
-//! detector's `expected`/`measured` are `m`; the chain's rungs and the
-//! high-level alarm's limits and hysteresis are `m`; the deviation
-//! detector's `deviation` and its `deviation_limit`, and the
-//! `manual-station` and `valve` position path, are `fraction`; the
+//! `failover-select`'s three level ports, the `signal-filter`'s
+//! `in`/`out`, the `threshold-chain`'s `level`, and the `rate-of-rise`
+//! detector's `in` are `m`; its `rate` output and its `rate_limit` and
+//! `initial_rate` bounds are `m/scan`; the chain's rungs and the
+//! high-level alarm's limits and hysteresis are `m`; the
+//! `manual-station` and `valve` position path is a `fraction`; the
 //! chain's `demand` is `stages`; and the `*_ticks` intervals each spec
-//! fixes as `ticks` — the divergence window, the valve's consecutive-
-//! deviating-scans budget, and every alarm's shelving bound and
-//! decision-70 response budget.
+//! fixes as `ticks` — the valve's consecutive-deviating-scans budget and
+//! every alarm's shelving bound and decision-70 response budget.
 //!
-//! The two `signal-filter`s' `alpha` stays undeclared: a blend factor
-//! is not a plant quantity. The Bool permissive, annunciation, status,
-//! and protection-layer state carriers stay uncheckable rather than
+//! The `signal-filter`'s `alpha` stays undeclared: a blend factor is not
+//! a plant quantity. The Bool permissive, annunciation, status, and
+//! protection-layer state carriers stay uncheckable rather than
 //! dimensioned, their signals keeping the explicit `""` marker above.
 
 use crate::specs::{
-    BoolLatchingAlarmInstance, BoolLatchingAlarmSpec, DeviationMonitorSpec, FailoverSelectSpec,
-    ManagedAlarmHandles, ManagedBoolLatchingAlarmSpec, ManagedInputs, ManagedLatchingAlarmSpec,
-    ManualStationSpec, SignalFilterSpec, ThresholdChainSpec, ValveSpec,
+    BoolLatchingAlarmInstance, BoolLatchingAlarmSpec, FailoverSelectSpec, ManagedAlarmHandles,
+    ManagedBoolLatchingAlarmSpec, ManagedInputs, ManagedLatchingAlarmSpec, ManualStationSpec,
+    RateOfRiseSpec, SignalFilterSpec, ThresholdChainSpec, ValveSpec,
 };
 pub use crate::station::ManagedAlarmLayout;
 use crate::station::{AlarmLayout, rationalization};
@@ -190,14 +194,12 @@ pub mod points {
 mod carriers {
     pub const LEVEL_SEL: u64 = 200;
     pub const LEVEL_FILT_IN: u64 = 201;
-    pub const LEVEL_TREND_IN: u64 = 202;
     pub const LEVEL_FILTERED: u64 = 203;
     pub const LEVEL_CHAIN: u64 = 204;
     pub const LEVEL_LAH: u64 = 205;
     pub const LEVEL_ROR: u64 = 206;
-    pub const LEVEL_TREND: u64 = 207;
-    pub const LEVEL_TREND_DEV: u64 = 208;
-    pub const DEVIATION: u64 = 209;
+    pub const LEVEL_RATE_IN: u64 = 207;
+    pub const RATE: u64 = 209;
     pub const DEVIATING: u64 = 210;
     pub const DEVIATING_IN: u64 = 211;
     pub const BACKUP_ACTIVE: u64 = 212;
@@ -318,13 +320,12 @@ pub struct IjmuidenConfig {
     pub on_bad_demand: i64,
     /// The alarm-path `signal-filter` smoothing factor.
     pub filter_alpha: f64,
-    /// The slower `signal-filter` factor producing the divergence
-    /// detector's lagged trend.
-    pub trend_alpha: f64,
-    /// The divergence detector's windowed relative-deviation bound.
-    pub deviation_limit: f64,
-    /// The divergence detector's accumulation window, in scans.
-    pub window_ticks: i64,
+    /// The dedicated `rate-of-rise` detector's declared per-tick rise
+    /// bound, in metres of canal level per scan.
+    pub rise_limit: f64,
+    /// The rate the dedicated detector reports until its first `Good`
+    /// sample pair completes a difference.
+    pub initial_rate: f64,
     /// `manual-station`'s per-scan bumpless-transfer bound.
     pub transfer_delta: f64,
     /// `valve`'s command-versus-feedback agreement tolerance.
@@ -352,9 +353,8 @@ impl IjmuidenConfig {
             high: 5.0,
             on_bad_demand: 0,
             filter_alpha: 0.6,
-            trend_alpha: 0.15,
-            deviation_limit: 0.05,
-            window_ticks: 3,
+            rise_limit: 0.012,
+            initial_rate: 0.0,
             transfer_delta: 0.5,
             valve_tolerance: 0.05,
             discrepancy_ticks: 2,
@@ -403,11 +403,10 @@ pub struct IjmuidenLayout {
     pub level_selected: PointId,
     /// The filtered level carrier the chain and alarms read.
     pub level_filtered: PointId,
-    /// The slow-trend level carrier.
-    pub level_trend: PointId,
-    /// The divergence detector's windowed deviation carrier.
-    pub deviation: PointId,
-    /// The divergence detector's `deviating` carrier — `journaled`.
+    /// The dedicated rate-of-rise detector's per-tick rate carrier.
+    pub rate: PointId,
+    /// The dedicated rate-of-rise detector's one-sided flag carrier —
+    /// the scenario's `deviating` point, `journaled`.
     pub deviating: PointId,
     /// The failover's `backup_active` carrier — `journaled`.
     pub backup_active: PointId,
@@ -438,11 +437,9 @@ pub struct IjmuidenLayout {
     pub failover: ComponentId,
     /// The alarm-path `signal-filter` instance's id.
     pub filter: ComponentId,
-    /// The trend `signal-filter` instance's id.
-    pub trend: ComponentId,
     /// The `threshold-chain` instance's id.
     pub threshold_chain: ComponentId,
-    /// The `deviation-monitor` instance's id.
+    /// The dedicated `rate-of-rise` instance's id.
     pub divergence: ComponentId,
     /// The `manual-station` instance's id.
     pub manual_station: ComponentId,
@@ -772,7 +769,7 @@ pub fn ijmuiden(config: &IjmuidenConfig) -> Result<Ijmuiden, BuildError> {
     );
 
     // The shared internal carriers: the failover's selected level, the
-    // filtered and trend levels, the chain's ladder, the demand path,
+    // filtered level, the chain's ladder, the demand path,
     // and every annunciation consumer. A carrier's `initial` seeds the
     // healthy cold-start state (mid-band level, gate held open,
     // automatic mode) so no alarm trips before the first real samples
@@ -781,15 +778,13 @@ pub fn ijmuiden(config: &IjmuidenConfig) -> Result<Ijmuiden, BuildError> {
     // reader — each link crossing the one-scan boundary.
     let level_sel = plant.internal_output::<f64>(PointId(carriers::LEVEL_SEL), 3.0);
     let level_filt_in = plant.internal_input::<f64>(PointId(carriers::LEVEL_FILT_IN), 3.0, false);
-    let level_trend_in = plant.internal_input::<f64>(PointId(carriers::LEVEL_TREND_IN), 3.0, false);
+    let level_rate_in = plant.internal_input::<f64>(PointId(carriers::LEVEL_RATE_IN), 0.0, false);
     let level_filtered = plant.internal_output::<f64>(PointId(carriers::LEVEL_FILTERED), 3.0);
     let level_chain = plant.internal_input::<f64>(PointId(carriers::LEVEL_CHAIN), 3.0, false);
     let level_lah = plant.internal_input::<f64>(PointId(carriers::LEVEL_LAH), 3.0, false);
     let level_ror = plant.internal_input::<f64>(PointId(carriers::LEVEL_ROR), 3.0, false);
-    let level_trend = plant.internal_output::<f64>(PointId(carriers::LEVEL_TREND), 3.0);
-    let level_trend_dev =
-        plant.internal_input::<f64>(PointId(carriers::LEVEL_TREND_DEV), 3.0, false);
-    let deviation = plant.internal_output::<f64>(PointId(carriers::DEVIATION), 0.0);
+    let rate = plant.internal_output::<f64>(PointId(carriers::RATE), 0.0);
+
     let deviating = plant.internal_output::<bool>(PointId(carriers::DEVIATING), false);
     let deviating_in = plant.internal_input::<bool>(PointId(carriers::DEVIATING_IN), false, false);
     let backup_active = plant.internal_output::<bool>(PointId(carriers::BACKUP_ACTIVE), false);
@@ -852,13 +847,6 @@ pub fn ijmuiden(config: &IjmuidenConfig) -> Result<Ijmuiden, BuildError> {
             "level",
         ),
         (
-            carriers::LEVEL_TREND_IN,
-            "level-trend-in",
-            "m",
-            "Selected level delivered to the trend filter",
-            "level",
-        ),
-        (
             carriers::LEVEL_FILTERED,
             "level-filtered",
             "m",
@@ -883,42 +871,35 @@ pub fn ijmuiden(config: &IjmuidenConfig) -> Result<Ijmuiden, BuildError> {
             carriers::LEVEL_ROR,
             "level-ror",
             "m",
-            "Filtered level delivered to the divergence detector",
+            "Filtered level delivered to the rate-of-rise detector",
             "level",
         ),
         (
-            carriers::LEVEL_TREND,
-            "level-trend",
-            "m",
-            "Slow level trend the divergence detector compares against",
+            carriers::LEVEL_RATE_IN,
+            "level-rate-in",
+            unit::M_PER_SCAN,
+            "Per-tick rate delivered to its served carrier",
             "level",
         ),
         (
-            carriers::LEVEL_TREND_DEV,
-            "level-trend-dev",
-            "m",
-            "Level trend delivered to the divergence detector",
-            "level",
-        ),
-        (
-            carriers::DEVIATION,
-            "deviation",
-            "fraction",
-            "Windowed level-versus-trend relative deviation",
+            carriers::RATE,
+            "rate",
+            "m/scan",
+            "The canal level's per-scan first difference",
             "level",
         ),
         (
             carriers::DEVIATING,
             "deviating",
             "",
-            "Level diverging from its trend — the composed rate-of-rise flag",
+            "The canal level's rise meets the declared bound — the rate-of-rise flag",
             "level",
         ),
         (
             carriers::DEVIATING_IN,
             "deviating-in",
             "",
-            "Divergence flag delivered to its alarm",
+            "Rate-of-rise flag delivered to its alarm",
             "level",
         ),
         (
@@ -1054,10 +1035,7 @@ pub fn ijmuiden(config: &IjmuidenConfig) -> Result<Ijmuiden, BuildError> {
         "alpha",
         Value::Float(config.filter_alpha),
     )])));
-    let trend = plant.add(SignalFilterSpec::new(parameters([(
-        "alpha",
-        Value::Float(config.trend_alpha),
-    )])));
+
     let chain = plant.add(ThresholdChainSpec::new(parameters([
         ("cutoff", Value::Float(config.cutoff)),
         ("stop", Value::Float(config.stop)),
@@ -1067,12 +1045,12 @@ pub fn ijmuiden(config: &IjmuidenConfig) -> Result<Ijmuiden, BuildError> {
         ("on_bad_demand", Value::Int(config.on_bad_demand)),
     ])));
     // The composed rate-of-rise detector: the filtered level against
-    // its slower trend, windowed — a sustained-divergence stand-in for
-    // a dedicated derivative kind, the implementing ticket's
-    // documented choice under decision 75.
-    let divergence = plant.add(DeviationMonitorSpec::new(parameters([
-        ("deviation_limit", Value::Float(config.deviation_limit)),
-        ("window_ticks", Value::Int(config.window_ticks)),
+    // the dedicated one-sided detector the post-M10 transition record
+    // adopted (#321): its `rising` flag asserts only while the filtered
+    // level's per-scan rise meets the declared bound.
+    let rise_of_level = plant.add(RateOfRiseSpec::new(parameters([
+        ("rate_limit", Value::Float(config.rise_limit)),
+        ("initial_rate", Value::Float(config.initial_rate)),
     ])));
     let station = plant.add(ManualStationSpec::new(parameters([(
         "transfer_delta",
@@ -1152,8 +1130,8 @@ pub fn ijmuiden(config: &IjmuidenConfig) -> Result<Ijmuiden, BuildError> {
             ("response_ticks", Value::Int(30)),
         ]),
         rationalization(
-            "The canal level is diverging from its trend — rising or falling fast",
-            "Check the level trend and the gate positions",
+            "The canal level is rising faster than the declared bound",
+            "Close the discharge gates and verify the protection layer's state",
             "ror-alarm",
         ),
     ));
@@ -1221,37 +1199,32 @@ pub fn ijmuiden(config: &IjmuidenConfig) -> Result<Ijmuiden, BuildError> {
     // The dimensional contract (architecture decision 106): the
     // quantity-bearing kinds are unit-transparent — a
     // `failover-select` carries whatever level it is fed, a
-    // `signal-filter` smooths whatever it is given, and the
-    // `deviation-monitor`'s windowed relative `deviation` is a
-    // dimensionless ratio of the two levels it compares — so the
-    // composition declares each quantity port's and bound's unit on the
-    // instance, beside the point declarations the same connection and
-    // validation checks read. The canal level and the annunciation
-    // ladder's rungs are `m`, the chain's stage count is `stages` (the
-    // annunciation rungs a discharge gate declares, not pump stages),
-    // the gate position path is a `fraction` of travel, and the
-    // `*_ticks` intervals each spec fixes as `ticks`. The two
-    // `signal-filter`s' `alpha` and the deviation monitor's
-    // dimensionless `deviation_limit`'s kind codes stay undeclared: a
-    // blend factor is not a plant quantity, and the monitor's limit is
-    // declared `fraction` like its output.
+    // `signal-filter` smooths whatever it is given, and a
+    // `rate-of-rise` reports whatever per-scan difference the level it
+    // is fed makes — so the composition declares each quantity port's
+    // and bound's unit on the instance, beside the point declarations
+    // the same connection and validation checks read. The canal level
+    // and the annunciation ladder's rungs are `m`, the chain's stage
+    // count is `stages` (the annunciation rungs a discharge gate
+    // declares, not pump stages), the gate position path is a
+    // `fraction` of travel, the detector's difference and its two
+    // bounds are `m/scan`, and the `*_ticks` intervals each spec fixes
+    // as `ticks`. The `signal-filter`'s `alpha` stays undeclared: a
+    // blend factor is not a plant quantity.
     plant.port_unit(failover.id, "primary", unit::M);
     plant.port_unit(failover.id, "backup", unit::M);
     plant.port_unit(failover.id, "out", unit::M);
-    for filter in [filter.id, trend.id] {
-        plant.port_unit(filter, "in", unit::M);
-        plant.port_unit(filter, "out", unit::M);
-    }
+    plant.port_unit(filter.id, "in", unit::M);
+    plant.port_unit(filter.id, "out", unit::M);
     plant.port_unit(chain.id, "level", unit::M);
     plant.port_unit(chain.id, "demand", unit::STAGES);
     for parameter in ["cutoff", "stop", "start", "lag_start", "high"] {
         plant.param_unit(chain.id, parameter, unit::M);
     }
-    plant.port_unit(divergence.id, "expected", unit::M);
-    plant.port_unit(divergence.id, "measured", unit::M);
-    plant.port_unit(divergence.id, "deviation", unit::FRACTION);
-    plant.param_unit(divergence.id, "deviation_limit", unit::FRACTION);
-    plant.param_unit(divergence.id, "window_ticks", unit::TICKS);
+    plant.port_unit(rise_of_level.id, "in", unit::M);
+    plant.port_unit(rise_of_level.id, "rate", unit::M_PER_SCAN);
+    plant.param_unit(rise_of_level.id, "rate_limit", unit::M_PER_SCAN);
+    plant.param_unit(rise_of_level.id, "initial_rate", unit::M_PER_SCAN);
     plant.port_unit(station.id, "control", unit::FRACTION);
     plant.port_unit(station.id, "manual", unit::FRACTION);
     plant.port_unit(station.id, "out", unit::FRACTION);
@@ -1288,8 +1261,9 @@ pub fn ijmuiden(config: &IjmuidenConfig) -> Result<Ijmuiden, BuildError> {
 
     // Measurement path: the failover selects between the canal level
     // and the remote repeater; the filtered selection fans out to the
-    // chain, the level alarm, and the divergence detector; the slower
-    // trend feeds the detector's `expected`.
+    // chain, the level alarm, and the rate-of-rise detector; the
+    // detector's per-scan difference lands on its own carrier.
+
     plant.connect(level, &failover.primary);
     plant.connect(level_remote, &failover.backup);
     plant.connect(&failover.out, level_sel);
@@ -1302,25 +1276,21 @@ pub fn ijmuiden(config: &IjmuidenConfig) -> Result<Ijmuiden, BuildError> {
         backup_unhealthy,
     );
     plant.connect(level_filt_in, level_sel);
-    plant.connect(level_trend_in, level_sel);
     plant.connect(level_filt_in, &filter.input);
     plant.connect(&filter.out, level_filtered);
-    plant.connect(level_trend_in, &trend.input);
-    plant.connect(&trend.out, level_trend);
     plant.connect(level_chain, level_filtered);
     plant.connect(level_lah, level_filtered);
     plant.connect(level_ror, level_filtered);
-    plant.connect(level_trend_dev, level_trend);
     plant.connect(level_chain, &chain.level);
     plant.connect(&chain.demand, chain_demand);
     plant.connect(&chain.duty_call, duty_call);
     plant.connect(&chain.lag_call, lag_call);
     plant.connect(&chain.below_cutoff, below_cutoff);
     plant.connect(&chain.high_level, high_level);
-    plant.connect(level_trend_dev, &divergence.expected);
-    plant.connect(level_ror, &divergence.measured);
-    plant.connect(&divergence.deviation, deviation);
-    plant.connect(&divergence.deviating, deviating);
+    plant.connect(level_ror, &rise_of_level.input);
+    plant.connect(&rise_of_level.rate, rate);
+    plant.connect(level_rate_in, rate);
+    plant.connect(&rise_of_level.rising, deviating);
     plant.connect(deviating_in, deviating);
     plant.connect(backup_active_in, backup_active);
     plant.connect(backup_unhealthy_in, backup_unhealthy);
@@ -1437,8 +1407,7 @@ pub fn ijmuiden(config: &IjmuidenConfig) -> Result<Ijmuiden, BuildError> {
             sis_bypass: points::SIS_BYPASS,
             level_selected: PointId(carriers::LEVEL_SEL),
             level_filtered: PointId(carriers::LEVEL_FILTERED),
-            level_trend: PointId(carriers::LEVEL_TREND),
-            deviation: PointId(carriers::DEVIATION),
+            rate: PointId(carriers::RATE),
             deviating: PointId(carriers::DEVIATING),
             backup_active: PointId(carriers::BACKUP_ACTIVE),
             backup_unhealthy: PointId(carriers::BACKUP_UNHEALTHY),
@@ -1454,9 +1423,8 @@ pub fn ijmuiden(config: &IjmuidenConfig) -> Result<Ijmuiden, BuildError> {
             gate_manual_demand: PointId(carriers::GATE_MANUAL_DEMAND),
             failover: failover.id,
             filter: filter.id,
-            trend: trend.id,
             threshold_chain: chain.id,
-            divergence: divergence.id,
+            divergence: rise_of_level.id,
             manual_station: station.id,
             valve: gate.id,
             high_level_alarm,

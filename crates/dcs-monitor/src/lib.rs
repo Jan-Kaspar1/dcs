@@ -598,6 +598,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, VecDeque};
 use std::io::{self, Cursor, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -689,6 +690,41 @@ pub struct HealthReport {
     /// freshness `live` alone cannot attest: a wedged scan loop reads
     /// as a growing age, a run that has not scanned yet as `null`.
     pub last_scan_age_ms: Option<u64>,
+    /// The build this process is: its crate version and, where the
+    /// build could supply one, the git revision it was compiled from.
+    ///
+    /// Identity is the first half of what an operator must be able to
+    /// read off a field run — "which build is talking to my rig, and
+    /// which model is it running" — and it is here rather than on the
+    /// bulk snapshot because the answer is fixed for the process's
+    /// life: it must still read while the bulk reads starve.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<BuildIdentity>,
+}
+
+/// The build identity a monitoring endpoint reports: the crate version
+/// and the git revision the binary was compiled from, where the build
+/// could supply one.
+///
+/// `git_sha` is absent rather than invented when the build did not carry
+/// one: the monitor does not invent a revision, and the hosting process
+/// decides — `dcs-controller` reads `DCS_BUILD_SHA` from its own
+/// environment, so a deployment or image that supplies the revision
+/// serves it and one that does not serves an absent field. An absent
+/// revision reports as absent, so a consumer can tell "not recorded"
+/// from "recorded, and here it is".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildIdentity {
+    /// The crate version this process was compiled from.
+    pub version: String,
+    /// The git revision this process was compiled from, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_sha: Option<String>,
+    /// The model fingerprint the served plant model carries, when the
+    /// process recorded one — the same value `/checkpoint` stamps, so an
+    /// operator reads the served bytes' identity beside the build's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_fingerprint: Option<String>,
 }
 
 /// The monitoring page served at `GET /` — see the crate docs.
@@ -896,6 +932,18 @@ fn command_lane_depth(command_capacity: usize) -> usize {
 /// trouble: each queued request is a parsed head plus its socket.
 const LANE_QUEUE_DEPTH: usize = 64;
 
+/// The bound on the dispatcher's listener-rebind retries after a
+/// listener death — the window a just-closed socket's teardown can
+/// hold the address. Rebinding is nearly always instant; the retries
+/// cover the kernel's release racing the fresh bind, and the bound
+/// keeps a genuinely contested address a named failure rather than an
+/// unbounded wait on the dispatcher thread.
+const LISTENER_REBIND_ATTEMPTS: usize = 20;
+
+/// The wait between listener-rebind attempts — small enough that a
+/// recoverable loss closes inside one scan's cadence.
+const LISTENER_REBIND_WAIT: Duration = Duration::from_millis(25);
+
 /// The bound on a request body the monitor will read — far past the
 /// largest legitimate body, a `Command` envelope or `ScanRequest` of
 /// tens of bytes. A request declaring more is refused `413` before a
@@ -1041,11 +1089,32 @@ pub struct Monitor<'d> {
     /// bulk reads nor the liveness answer that reports it.
     store: Store,
     signals: SignalIndex,
-    server: Server,
+    /// The bound listener — swapped whole on a listener death:
+    /// tiny_http's accept thread exits on its first failed `accept`
+    /// (a connection aborted before accept is routine churn — a peer
+    /// killed mid-dial, an fd limit hit under a connection wave), and
+    /// `recv` reports the loss once rather than ever serving again,
+    /// so [`serve`](Self::serve) rebinds `bound_addr` and keeps
+    /// serving instead of letting one aborted connect silence the
+    /// run. `None` only inside the rebind's drop-and-bind window.
+    server: Mutex<Option<Arc<Server>>>,
+    /// The bound listen address, captured at bind so `local_addr`
+    /// keeps answering it — and the rebind path can re-claim it —
+    /// while the listener cell stands mid-swap.
+    bound_addr: SocketAddr,
+    /// [`shutdown`](Self::shutdown)'s mark: a `recv` ending under it
+    /// is the deliberate teardown; a `recv` ending without it is the
+    /// listener's death and the dispatcher rebinds instead of
+    /// draining the lanes.
+    stopping: AtomicBool,
     /// When set — [`bind_paced`](Self::bind_paced) — the hosting process
     /// paces scans itself through [`paced_scan`](Self::paced_scan) and
     /// `POST /scan` is refused: the wall clock owns the scan schedule.
     paced: bool,
+    /// The build identity `GET /health` reports — set by
+    /// [`with_build`](Self::with_build) once the hosting process knows
+    /// its own version, revision, and the model it loaded.
+    build: Option<BuildIdentity>,
     /// The per-requested-scan wiring [`driven`](Self::driven) installed —
     /// consulted only on an unpaced monitor, where `POST /scan` runs.
     driven: Driven<'d>,
@@ -1406,6 +1475,16 @@ impl<'d> Monitor<'d> {
         Self::bind_paced_peer_with(addr, peer, signals, MonitorConfig::default())
     }
 
+    /// The build identity `GET /health` reports — the hosting process's
+    /// own declaration of what it is: its crate version, the git
+    /// revision it was compiled from where one was recorded, and the
+    /// fingerprint of the model it loaded. Call once, before serving
+    /// traffic; a later call replaces the declaration.
+    pub fn with_build(mut self, build: BuildIdentity) -> Self {
+        self.build = Some(build);
+        self
+    }
+
     /// As [`bind_paced_peer`](Self::bind_paced_peer) with explicit
     /// `config` retention bounds and journal-file sink.
     pub fn bind_paced_peer_with<A: ToSocketAddrs>(
@@ -1471,12 +1550,20 @@ impl<'d> Monitor<'d> {
         // until the first scan's refresh.
         store.publish(peer.tick(), peer.snapshot(), peer.receipts());
         store.sync_liveness(peer.report());
+        let server = Server::http(addr).map_err(io::Error::other)?;
+        let bound_addr = server
+            .server_addr()
+            .to_ip()
+            .expect("monitor listens on TCP");
         Ok(Self {
             shared: Mutex::new(Shared { peer, recorder }),
             store,
             signals,
-            server: Server::http(addr).map_err(io::Error::other)?,
+            server: Mutex::new(Some(Arc::new(server))),
+            bound_addr,
+            stopping: AtomicBool::new(false),
             paced: false,
+            build: None,
             driven: Driven::default(),
             state_sink,
             standby_source: None,
@@ -1706,12 +1793,10 @@ impl<'d> Monitor<'d> {
         source
     }
 
-    /// The address the listener is bound to.
+    /// The address the listener is bound to — stable across a
+    /// listener rebind, which re-claims the same address.
     pub fn local_addr(&self) -> SocketAddr {
-        self.server
-            .server_addr()
-            .to_ip()
-            .expect("monitor listens on TCP")
+        self.bound_addr
     }
 
     /// Serves requests until [`shutdown`](Self::shutdown).
@@ -1774,6 +1859,16 @@ impl<'d> Monitor<'d> {
     /// stays deterministic either way: the pools only decide which
     /// request waits on the shared lock next, and scans, commands,
     /// checkpoints, and role changes still serialize on it.
+    ///
+    /// The dispatcher also survives its listener's death: tiny_http's
+    /// accept thread ends on the first failed `accept` — an aborted
+    /// connect reaching `accept` is routine churn — and `recv`
+    /// reports the loss once while the dead socket would serve
+    /// nothing ever again. The dispatcher's `recv_request` step
+    /// names the loss and rebinds the same address, so one failed
+    /// accept can never silence a live run; a rebind that cannot
+    /// claim the address ends serving with the failure named, the
+    /// same teardown [`shutdown`](Self::shutdown) takes.
     pub fn serve(&self) {
         let command_depth = command_lane_depth(
             self.shared
@@ -1792,7 +1887,7 @@ impl<'d> Monitor<'d> {
         let refused = Lane::new();
         std::thread::scope(|scope| {
             scope.spawn(|| {
-                while let Ok(request) = self.server.recv() {
+                while let Some(request) = self.recv_request() {
                     // `POST /command` owns its routing: a full lane
                     // defers to the command overflow lane — whose
                     // feeder hands each submission back to the lane's
@@ -1937,14 +2032,89 @@ impl<'d> Monitor<'d> {
         });
     }
 
+    /// The dispatcher's next request — `None` only on
+    /// [`shutdown`](Self::shutdown)'s deliberate stop or on a listener
+    /// that cannot be rebound. A `recv` error that is not the stop
+    /// mark is the accept thread's death: tiny_http abandons the
+    /// listener on its first failed `accept` — connection churn's
+    /// routine `ECONNABORTED`, an fd-limit `EMFILE` — and `recv`
+    /// reports the loss once while serving nothing ever again. The
+    /// dispatcher names the loss on stderr and rebinds the same
+    /// address rather than letting one aborted connect take the
+    /// monitor — and a driven run's whole process — down silently.
+    /// Requests already parsed into a lane drain normally; only the
+    /// connections the dead listener still held unparsed see the
+    /// rebind window's refusal.
+    fn recv_request(&self) -> Option<Request> {
+        loop {
+            let server = self.server.lock().unwrap().clone()?;
+            match server.recv() {
+                Ok(request) => return Some(request),
+                Err(_) if self.stopping.load(Ordering::SeqCst) => return None,
+                Err(error) => {
+                    eprintln!(
+                        "monitor listener on {} ended: {error} — rebinding \
+                         the listen socket so one failed accept cannot \
+                         silence the run",
+                        self.bound_addr
+                    );
+                    // The dead listener still holds the port: it has to
+                    // be dropped before the same address can bind again.
+                    drop(server);
+                    let rebound = {
+                        let mut guard = self.server.lock().unwrap();
+                        drop(guard.take());
+                        // A fresh bind can race the just-closed socket's
+                        // teardown — the bounded retries absorb the
+                        // window.
+                        for _ in 0..LISTENER_REBIND_ATTEMPTS {
+                            match Server::http(self.bound_addr) {
+                                Ok(rebound) => {
+                                    *guard = Some(Arc::new(rebound));
+                                    break;
+                                }
+                                Err(_) => std::thread::sleep(LISTENER_REBIND_WAIT),
+                            }
+                        }
+                        guard.is_some()
+                    };
+                    if !rebound {
+                        eprintln!(
+                            "monitor listener on {} could not be rebound — \
+                             the monitor is done serving",
+                            self.bound_addr
+                        );
+                        return None;
+                    }
+                    // A `shutdown` landing inside the rebind window found
+                    // no listener to unblock — surface its stop now so
+                    // the fresh listener does not keep the loop serving.
+                    if self.stopping.load(Ordering::SeqCst) {
+                        self.server
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .expect("the rebound listener stands")
+                            .unblock();
+                    }
+                }
+            }
+        }
+    }
+
     /// Stops a [`serve`](Self::serve) loop running on another thread.
-    /// One `unblock` ends the dispatcher's `recv`; its lane close
+    /// The `stopping` mark keeps the dispatcher from reading the
+    /// `unblock`'s `recv` end as a listener death and rebinding past
+    /// the stop; the `unblock` then ends its `recv` and its lane close
     /// releases every worker once queued requests drain. Extra
     /// unblocks only pad the dead queue, so the original
     /// per-worker count stays as the harmless upper bound.
     pub fn shutdown(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
         for _ in 0..SERVE_WORKERS {
-            self.server.unblock();
+            if let Some(server) = self.server.lock().unwrap().as_ref() {
+                server.unblock();
+            }
         }
     }
 
@@ -2795,6 +2965,7 @@ impl<'d> Monitor<'d> {
                         last_scan_age_ms: liveness
                             .last_scan
                             .map(|at| u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX)),
+                        build: self.build.clone(),
                     },
                 ),
                 None => json(503, "no liveness yet"),
@@ -5960,12 +6131,14 @@ mod tests {
                 role: Role::Active,
                 tick: Tick(7),
                 last_scan_age_ms: Some(12),
+                build: None,
             },
             HealthReport {
                 live: true,
                 role: Role::Standby,
                 tick: Tick::ZERO,
                 last_scan_age_ms: None,
+                build: None,
             },
         ] {
             let json = serde_json::to_string(&report).unwrap();
@@ -5980,6 +6153,7 @@ mod tests {
                 role: Role::Active,
                 tick: Tick(7),
                 last_scan_age_ms: Some(12),
+                build: None,
             })
             .unwrap(),
             r#"{"live":true,"role":"active","tick":7,"last_scan_age_ms":12}"#
@@ -5990,6 +6164,7 @@ mod tests {
                 role: Role::Standby,
                 tick: Tick::ZERO,
                 last_scan_age_ms: None,
+                build: None,
             })
             .unwrap(),
             r#"{"live":true,"role":"standby","tick":0,"last_scan_age_ms":null}"#

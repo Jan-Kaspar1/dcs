@@ -11,7 +11,7 @@
 //! discovery results the master verifies before OP, a one-shot OP entry,
 //! a single-cycle exchange, and a boundary recovery step.
 
-use dcs_core::LinkState;
+use dcs_core::{LinkState, OperationalState};
 use std::fmt;
 use std::sync::Arc;
 
@@ -171,6 +171,19 @@ pub trait BusTransport: Send {
     /// [`LinkState::Connected`].
     fn link(&self) -> LinkState {
         LinkState::Connected
+    }
+
+    /// The segment's own operational state on the EtherCAT state path,
+    /// when the transport can read it — the value the monitoring
+    /// surface reports as the bus's `pre-op`/`safe-op`/`op` state
+    /// rather than an inference from whether the last exchange
+    /// answered.
+    ///
+    /// The default reports [`OperationalState::Init`], the honest
+    /// reading for a transport that has no state of its own to read; a
+    /// real master overrides it.
+    fn state(&self) -> OperationalState {
+        OperationalState::Init
     }
 }
 

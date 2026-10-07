@@ -258,6 +258,15 @@ class FieldClaimTests(unittest.TestCase):
                     patch.object(scenarios, 'CLAIM_DEADLINE', 2):
                 record = scenarios.scenario_field_claim(
                     self._ctx(plant, evidence))
+            # The claim state as the scenario left it — snapshotted
+            # before the feed's own connection closes, because the
+            # plant reaps a dropped attachment's hold the way the
+            # shipped server does and the assertion is about the
+            # scenario's restore, not about the fixture's teardown.
+            feed.restored_claim = (
+                None if plant.claim is None
+                else {'owner': plant.claim['owner'],
+                      'holders': set(plant.claim['holders'])})
         finally:
             feed.close()
             plant.close()
@@ -296,7 +305,7 @@ class FieldClaimTests(unittest.TestCase):
                 json.loads(Path(path).read_text())
             # The restore re-claimed under the owner's token; the
             # scenario's finally released its attachment's hold.
-            self.assertEqual(plant.claim,
+            self.assertEqual(feed.restored_claim,
                              {'owner': feed.TOKEN_A,
                               'holders': {0}})
 
@@ -486,8 +495,11 @@ class FieldClaimTests(unittest.TestCase):
             plant, feed, record = self._run(evidence)
             self.assertEqual(record['outcome'], 'passed')
             # The scenario's attachment released every hold it took:
-            # only the owner's own attachment holds the claim.
-            self.assertEqual(plant.claim['holders'], {0})
+            # only the owner's own attachment holds the claim — read
+            # before the feed's connection closes, since the plant
+            # reaps a dropped attachment's hold as the shipped server
+            # does.
+            self.assertEqual(feed.restored_claim['holders'], {0})
             # And the pair returned to its original layout.
             self.assertEqual(feed.role, 'active')
 

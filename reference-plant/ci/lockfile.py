@@ -16,9 +16,22 @@ The manifest is read through `cargo metadata --no-deps`: Cargo's own
 TOML dialect decides which declaration is the pin — inline-table key
 order, line wrapping, and comments are inert, and a commented-out pin
 declares nothing — while `--no-deps` leaves the committed lockfile
-unread and unwritten. The lockfile is read through `tomllib`, the
-stdlib TOML parser, so a `[[package]]` entry's field order is the
-same record however it was merged or edited.
+unread and unwritten. Only `dcs-build` must be declared directly:
+`dcs-core` and `dcs-model` are the contract's optional direct
+declarations, so a manifest naming neither resolves both through
+`dcs-build` at the same pin and still passes. The lockfile is read
+through `tomllib`, the stdlib TOML parser, so a `[[package]]` entry's
+field order is the same record however it was merged or edited.
+
+The recorded revision is held to the revision the declared pin names,
+for every spelling Cargo accepts in `rev =` — a full sha names that
+commit and compares literally; a branch name, a tag name, or any other
+ref the remote serves is read back off the remote through
+`git ls-remote` and compared exactly like a declared `tag`'s target;
+an abbreviated sha names no ref and is held to abbreviate the recorded
+revision. A pin Cargo resolves dynamically is therefore never admitted
+and left unchecked, which is the staleness class this leg exists to
+report.
 
 Usage, from the consumer tree's root:
 
@@ -28,10 +41,14 @@ Usage, from the consumer tree's root:
 leg, a doctored scratch copy in the stage's self-checks. `REMOTE` is
 the remote this check resolves — `DCS_REMOTE`, the stand-in the
 workspace-side proofs substitute — and `RECORD` the release record's
-`record.md` when one was substituted, else the empty string. Exit
+`record.md`: the one `ci/check.sh` fetches at the pinned rev in the
+contract's own shape, the substituted one under `DCS_RECORD_DIR`, or
+the empty string for the stage's doctored legs. Exit
 status 2 is a release crate recorded from a non-git source —
-`path-dependency-leak`'s finding — and 1 every other disagreement,
-`lockfile-stale`'s.
+`path-dependency-leak`'s finding — 3 a pin the remote could
+not answer at all — the served target unverifiable rather than
+absent, `pin-unresolvable`'s finding — and 1 every other
+disagreement, `lockfile-stale`'s.
 """
 
 import json
@@ -65,6 +82,16 @@ def leak(message):
 # dependency carrying no source, or a source that is not the pinned
 # remote's git query, declares no pin this leg can hold the lockfile
 # to.
+#
+# `dcs-build` must be declared directly — it is the release's
+# engineering seam, the crate a consumer composes with, and every other
+# release crate reaches the tree through it. `dcs-core` and `dcs-model`
+# are the contract's optional direct declarations ("a consumer may also
+# declare them directly", `docs/release-contract.md`): a manifest
+# naming neither resolves both through `dcs-build` at the same pin and
+# declares no pin of its own for them, so the census below learns the
+# pin from whatever the manifest does declare and the lockfile's own
+# record of all three release crates is authoritative for the rest.
 try:
     metadata = subprocess.run(
         ["cargo", "metadata", "--format-version", "1", "--no-deps", "--offline"],
@@ -76,8 +103,10 @@ if metadata.returncode != 0:
     sys.exit(f"Cargo.toml does not resolve as a cargo manifest: {metadata.stderr.strip()}")
 document = json.loads(metadata.stdout)
 git_pin = re.compile(r"^git\+[^?]+\?(tag|rev)=")
+# The census walks every release crate, so a crate this manifest does
+# not declare directly contributes no pin rather than a missing one.
 declared = {}
-for name in ("dcs-build", "dcs-model"):
+for name in release:
     pins = {
         dependency["source"]
         for package in document.get("packages", [])
@@ -87,7 +116,9 @@ for name in ("dcs-build", "dcs-model"):
         and git_pin.match(dependency["source"])
     }
     if not pins:
-        sys.exit(f"{name} declares no `git = ..., tag|rev = ...` pin in Cargo.toml")
+        if name == "dcs-build":
+            sys.exit("dcs-build declares no `git = ..., tag|rev = ...` pin in Cargo.toml")
+        continue
     if len(pins) != 1:
         sys.exit(f"{name} declares conflicting git pins in Cargo.toml: {sorted(pins)}")
     declared[name] = pins.pop()
@@ -151,27 +182,124 @@ precise = source[len(prefix):]
 if not re.fullmatch(r"[0-9a-f]{40}", precise):
     sys.exit(f"{lock_path} records no precise revision for {url} at {query}: {source}")
 
-# The recorded revision must be the one the declared pin names. A tag
-# the remote does not serve yet is not this leg's finding: an
-# unresolvable pin is `pin-unresolvable`'s, and a remote that cannot
-# be reached at all leaves the query comparison above holding.
-if kind == "tag":
-    refs = subprocess.run(
-        ["git", "ls-remote", url, f"refs/tags/{value}", f"refs/tags/{value}^{{}}"],
-        capture_output=True, text=True, check=False,
-    ).stdout
+# `git ls-remote`'s answer as a `{ref: sha}` listing, narrowed to the
+# given ref patterns — the whole remote's refs when none are named. A
+# remote that cannot be queried at all is a different shape from one
+# that serves no such ref: a transport failure, an auth refusal, a
+# safe.directory rejection, or a corrupt repository all exit nonzero,
+# which an empty stdout cannot tell from "not published" — yet the
+# pin's target is then unverifiable, never absent. The leg refuses on
+# that path (status 3, `pin-unresolvable`'s finding) because nothing
+# downstream rescues it: `cargo fetch --locked` resolves the recorded
+# sha through libgit2 and cargo's git cache without re-checking the
+# pin's target, so a lockfile recording a commit the pin does not name
+# would otherwise pass green on the ambient CLI's health.
+def ls_remote(url, *patterns):
+    try:
+        listing = subprocess.run(
+            ["git", "ls-remote", url, *patterns],
+            capture_output=True, text=True, check=False,
+        )
+    except OSError as error:
+        print(f"git ls-remote could not run: {error}", file=sys.stderr)
+        sys.exit(3)
+    if listing.returncode != 0:
+        print(f"{url} could not be queried for {' '.join(patterns) or 'its refs'}: "
+              f"git ls-remote exited {listing.returncode}: {listing.stderr.strip()}",
+              file=sys.stderr)
+        sys.exit(3)
     served = {}
-    for line in refs.splitlines():
+    for line in listing.stdout.splitlines():
         sha, _, ref = line.partition("\t")
-        served[ref] = sha
+        if ref:
+            served[ref] = sha
+    return served
+
+
+# The refs the remote serves under a bare name, as `{ref: sha}`: the
+# shapes git's own `rev-parse` resolves one through — `refs/heads/<n>`,
+# `refs/remotes/<n>`, `refs/tags/<n>` peeled to the commit it points
+# at, the bare `HEAD` — and, failing every one of those, any other
+# namespace's entry of that name, which is how a pull-request head is
+# served.
+def named_refs(served, name):
+    named = {
+        ref: served[ref]
+        for ref in (f"refs/heads/{name}", f"refs/remotes/{name}", name)
+        if ref in served
+    }
+    tag = f"refs/tags/{name}"
+    peeled = served.get(f"{tag}^{{}}") or served.get(tag)
+    if peeled is not None:
+        named[tag] = peeled
+    if not named:
+        named = {
+            ref: sha
+            for ref, sha in served.items()
+            if ref == name or ref.endswith(f"/{name}")
+        }
+    return named
+
+
+# The recorded revision must be the one the declared pin names, and
+# every spelling Cargo accepts in `rev =` names a revision: a full sha
+# is the commit itself and compares literally, while every other
+# spelling — a branch name, a tag name, any other ref, or an
+# abbreviated sha — is resolved against the remote the same way a
+# declared `tag`'s target is. The reported defect
+# (`lockfile-leg-rev-compare-skipped-for-non-full-sha`) gated that
+# comparison on a 40-hex `rev`, so every other spelling was admitted
+# and then checked not at all: a lockfile recording a commit a branch
+# had moved past, or a commit no abbreviated sha abbreviates, passed
+# the leg that exists to report exactly that.
+#
+# A pin the remote answers without serving — the ref genuinely
+# absent — is not this leg's finding: an unresolvable pin is
+# `pin-unresolvable`'s.
+if kind == "tag":
+    served = ls_remote(url, f"refs/tags/{value}", f"refs/tags/{value}^{{}}")
     target = served.get(f"refs/tags/{value}^{{}}") or served.get(f"refs/tags/{value}")
     if target is None:
         print(f"  {value} is not published on {url} yet — an unresolvable pin is "
               "pin-unresolvable's finding")
     elif target != precise:
         sys.exit(f"{lock_path} records {precise}, but {value} lands on {target}")
-elif re.fullmatch(r"[0-9a-f]{40}", value) and precise != value:
-    sys.exit(f"{lock_path} records {precise} for rev {value}")
+elif re.fullmatch(r"[0-9a-f]{40}", value):
+    if precise != value:
+        sys.exit(f"{lock_path} records {precise} for rev {value}")
+else:
+    # A `rev` Cargo resolves afresh on every resolve. A ref name first
+    # — git's own resolution prefers a served ref over an abbreviated
+    # object name — read back off the whole remote's listing, and the
+    # abbreviation only when the remote serves nothing under that
+    # name: `rev = "<short sha>"` names a commit no ref carries, and
+    # holding the record to be one the abbreviation can resolve to is
+    # the whole of what is checkable without cloning the history.
+    served = named_refs(ls_remote(url), value)
+    if served:
+        moved = sorted(f"{ref} at {sha}" for ref, sha in served.items() if sha != precise)
+        if moved:
+            sys.exit(f"{lock_path} records {precise}, but the declared rev {value} names "
+                     + ", ".join(moved))
+    elif re.fullmatch(r"[0-9a-f]{4,39}", value):
+        if not precise.startswith(value):
+            # The revision the abbreviation does resolve to on the
+            # remote, when it resolves to one: the diagnostic names
+            # both revisions, the recorded one and the reachable one.
+            served = ls_remote(url)
+            abbreviates, seen = [], set()
+            for ref, sha in sorted(served.items()):
+                if not sha.startswith(value) or ref.endswith("^{}"):
+                    continue
+                if sha not in seen:
+                    seen.add(sha)
+                    abbreviates.append(f"{ref} at {sha}")
+            sys.exit(f"{lock_path} records {precise}, which the declared short rev "
+                     f"{value} does not abbreviate"
+                     + (f" — {', '.join(abbreviates)} does" if abbreviates else ""))
+    else:
+        print(f"  the declared rev {value} names no revision {url} serves — an "
+              "unresolvable pin is pin-unresolvable's finding")
 
 # The release record's Commit field names the same release when it is
 # filled: the tag's target and the record must not diverge, or the

@@ -545,14 +545,29 @@ class LagStagingTests(unittest.TestCase):
         self.assertEqual(
             order.index(scenarios.scenario_source_failover) + 1,
             order.index(scenarios.scenario_lag_staging))
+        # The station's acceptance legs — the running-pump handover,
+        # the manual takeover, and the cutoff clamp — share this
+        # restored window ahead of standby-loss.
         self.assertEqual(
             order.index(scenarios.scenario_lag_staging) + 1,
+            order.index(scenarios.scenario_duty_handover))
+        self.assertEqual(
+            order.index(scenarios.scenario_duty_handover) + 1,
+            order.index(scenarios.scenario_manual_takeover))
+        self.assertEqual(
+            order.index(scenarios.scenario_manual_takeover) + 1,
+            order.index(scenarios.scenario_low_level_cutoff))
+        self.assertEqual(
+            order.index(scenarios.scenario_low_level_cutoff) + 1,
             order.index(scenarios.scenario_standby_loss))
         # The standby-loss, demote-settle, demote-carry, and
         # repromote-suspended-settle legs share the same restored
         # window and still run ahead of the tune case's a->b switch —
         # the quiesced-standby settle leg runs between standby-loss
-        # and demote-settle in that same launch-layout window.
+        # and demote-settle, and the gossip-repromote-settle,
+        # settled-receipt-arbitration, and command-across-promotion
+        # legs run between repromote-suspended-settle and
+        # peer-announce, in that same launch-layout window.
         self.assertEqual(
             order.index(scenarios.scenario_standby_loss) + 1,
             order.index(scenarios.scenario_quiesced_standby_settle))
@@ -570,17 +585,45 @@ class LagStagingTests(unittest.TestCase):
         self.assertEqual(
             order.index(scenarios.scenario_repromote_suspended_settle)
             + 1,
+            order.index(scenarios.scenario_gossip_repromote_settle))
+        self.assertEqual(
+            order.index(scenarios.scenario_gossip_repromote_settle) + 1,
+            order.index(scenarios.scenario_settled_receipt_arbitration))
+        # The receipt-audit legs — the settled-arbitration case and the
+        # two receipt-window contracts behind it — run back to back in
+        # the same launch-layout window, and the pair clears onto the
+        # announced-source legs still on its entry roles.
+        self.assertEqual(
+            order.index(scenarios.scenario_settled_receipt_arbitration)
+            + 1,
+            order.index(scenarios.scenario_adopted_receipt_regression))
+        self.assertEqual(
+            order.index(scenarios.scenario_adopted_receipt_regression)
+            + 1,
+            order.index(scenarios.scenario_receipt_index_collision))
+        self.assertEqual(
+            order.index(scenarios.scenario_receipt_index_collision) + 1,
+            order.index(scenarios.scenario_command_across_promotion))
+        self.assertEqual(
+            order.index(scenarios.scenario_command_across_promotion) + 1,
             order.index(scenarios.scenario_peer_announce))
         self.assertEqual(
             order.index(scenarios.scenario_peer_announce) + 1,
             order.index(scenarios.scenario_demote_forged_standby_source))
+        # The announced-source-verify leg shares the forged-standby
+        # leg's announced-only window: the same unconfigured field
+        # owner, the same stopped tracking peer, the same restored
+        # launch roles.
+        self.assertEqual(
+            order.index(scenarios.scenario_demote_forged_standby_source)
+            + 1,
+            order.index(scenarios.scenario_announced_source_verify))
         # The stale-island leg's driven third controller shares the
         # same restored window and still clears before the tune case's
         # a->b switch — the journal-boundary flood and suspended-alias
         # legs run between them in the same launch-layout window.
         self.assertEqual(
-            order.index(scenarios.scenario_demote_forged_standby_source)
-            + 1,
+            order.index(scenarios.scenario_announced_source_verify) + 1,
             order.index(scenarios.scenario_stale_island_resolution))
         self.assertEqual(
             order.index(scenarios.scenario_stale_island_resolution)
