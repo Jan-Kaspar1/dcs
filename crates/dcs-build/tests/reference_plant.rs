@@ -1667,12 +1667,13 @@ fn an_unanswerable_tag_query_is_unverifiable_not_absent() {
 /// `tag = "v0.1.0"` against its own `file://` remote — a tiny crate
 /// repository built in the scratch, tagged, and recorded in the
 /// committed lockfile exactly as `cargo update` would have written it
-/// — then runs the full clean check: the positive leg accepts the
-/// recorded release pin beside the foreign source, and the doctored
-/// copy still reports `lockfile-stale`.
+/// — then runs the unchanged check through its lockfile stage: the
+/// positive leg accepts the recorded release pin beside the foreign
+/// source, and the real doctored copy still reports `lockfile-stale`.
+/// A test-local Cargo shim stops at the subsequent fetch boundary;
+/// full consumer execution is covered by the independent release proof.
 #[test]
 fn a_foreign_git_pin_beside_the_release_pins_passes_the_lockfile_stage() {
-    let tools = build_tools();
     let copy = Materialized::new();
 
     // The vendored crate the template does not ship: a tiny library in
@@ -1761,13 +1762,60 @@ fn a_foreign_git_pin_beside_the_release_pins_passes_the_lockfile_stage() {
         "the doctored fixture does not carry a fourth git-pinned source"
     );
 
-    let output = copy.check(&tools);
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Keep the stage's real Cargo metadata, Git queries, and doctor
+    // execution. Stop only when it hands off to dependency resolution,
+    // before unrelated consumer builds and runtime acceptance begin.
+    let resolved = Command::new("sh")
+        .args(["-c", "command -v \"$1\"", "sh", CARGO])
+        .output()
+        .expect("sh resolves the real Cargo executable");
     assert!(
-        output.status.success(),
-        "a consumer lockfile carrying an extra git-pinned package failed \
-         the template's ci/check.sh:\nstdout:\n{stdout}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stderr)
+        resolved.status.success(),
+        "the real Cargo could not be resolved"
+    );
+    let real_cargo = String::from_utf8(resolved.stdout).expect("Cargo's path is utf8");
+    let shim_dir = copy.dir.join("lockfile-shim-bin");
+    std::fs::create_dir(&shim_dir).unwrap();
+    let shim = shim_dir.join("cargo");
+    const HANDOFF: &str = "reference-plant-lockfile-stage-complete";
+    std::fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\n\
+             case \"$1\" in\n\
+             metadata) exec \"$DCS_LOCKFILE_TEST_CARGO\" \"$@\" ;;\n\
+             fetch) echo '{HANDOFF}' >&2; exit 73 ;;\n\
+             *) echo \"unexpected cargo command after lockfile stage: $1\" >&2; exit 74 ;;\n\
+             esac\n"
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = format!(
+        "{}:{}",
+        shim_dir.display(),
+        std::env::var("PATH").expect("PATH is set")
+    );
+    let output = Command::new("bash")
+        .arg("ci/check.sh")
+        .current_dir(&copy.dir)
+        .env("DCS_REMOTE", &copy.remote)
+        .env("DCS_RECORD_DIR", root().join("docs/releases"))
+        .env("CARGO_TARGET_DIR", copy.dir.join("target"))
+        .env("DCS_LOCKFILE_TEST_CARGO", real_cargo.trim())
+        .env("PATH", path)
+        .output()
+        .expect("ci/check.sh runs through the lockfile stage");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success() && stderr.contains(HANDOFF),
+        "the lockfile stage failed before its controlled fetch handoff, or \
+         unexpectedly continued:\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
         stdout.contains("== lockfile =="),
@@ -1777,6 +1825,19 @@ fn a_foreign_git_pin_beside_the_release_pins_passes_the_lockfile_stage() {
         stdout.contains("a lockfile recorded at another revision refused: lockfile-stale"),
         "the lockfile stage's doctored case did not report its named diagnostic \
          beside the foreign pin:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("== resolve =="),
+        "the lockfile stage never reached its resolve handoff:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("== build =="),
+        "unrelated consumer execution ran past the controlled handoff:\n{stdout}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&lock_path).unwrap(),
+        lock,
+        "the lockfile stage changed the committed foreign-pin artifact"
     );
 }
 
