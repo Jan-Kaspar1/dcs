@@ -286,28 +286,58 @@ fn check_timeout() -> Duration {
 /// Runs `cmd` to completion, killing it after `timeout`. `Ok` carries
 /// the completed output (even on nonzero status); `Err` names the
 /// timeout and what was running.
+///
+/// Output is captured to scratch files, never pipes: the poll loop
+/// below cannot drain pipes while waiting, so a verbose child (the
+/// nested `ci/check.sh` transcript is megabytes) would fill the pipe
+/// buffer and block forever — the bound itself becoming the hang it
+/// guards against. Files also free the reaper from grandchildren
+/// holding inherited descriptors open.
 fn run_bounded(cmd: &mut Command, timeout: Duration, what: &str) -> Result<Output, String> {
-    use std::process::Stdio;
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let capture = std::env::temp_dir().join(format!(
+        "dcs-bounded-run-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&capture)
+        .unwrap_or_else(|error| panic!("failed to create {what} capture dir: {error}"));
+    let stdout_path = capture.join("stdout");
+    let stderr_path = capture.join("stderr");
+    cmd.stdout(
+        std::fs::File::create(&stdout_path)
+            .unwrap_or_else(|error| panic!("failed to capture {what} stdout: {error}")),
+    )
+    .stderr(
+        std::fs::File::create(&stderr_path)
+            .unwrap_or_else(|error| panic!("failed to capture {what} stderr: {error}")),
+    );
     let mut child = cmd
         .spawn()
         .unwrap_or_else(|error| panic!("failed to spawn {what}: {error}"));
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
-            Ok(Some(_)) => {
-                return child
-                    .wait_with_output()
-                    .map_err(|error| format!("failed waiting on {what}: {error}"));
+            Ok(Some(status)) => {
+                let stdout = std::fs::read(&stdout_path).unwrap_or_default();
+                let stderr = std::fs::read(&stderr_path).unwrap_or_default();
+                let _ = std::fs::remove_dir_all(&capture);
+                return Ok(Output {
+                    status,
+                    stdout,
+                    stderr,
+                });
             }
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    // Kill and reap the direct child only: `wait_with_output`
-                    // would also wait for grandchildren holding the pipes
-                    // (e.g. `git-remote-https`), turning the bound itself
-                    // into the stall it guards against.
+                    // Kill and reap the direct child only: orphans keep
+                    // their own file descriptors, so reaping never blocks
+                    // on grandchildren the way draining pipes would.
                     let _ = child.kill();
                     let _ = child.wait();
+                    let _ = std::fs::remove_dir_all(&capture);
                     return Err(format!("{what} timed out after {}s", timeout.as_secs()));
                 }
                 std::thread::sleep(Duration::from_millis(50));
@@ -1882,6 +1912,25 @@ fn a_stalled_fetch_fallback_fails_fast_naming_the_remote() {
     assert!(
         started.elapsed() < Duration::from_secs(30),
         "the nested check bound did not fail fast"
+    );
+    // A verbose child must still complete: the bound polls without
+    // draining pipes, so piped capture would deadlock once a transcript
+    // like the nested check's (megabytes) fills the pipe buffer — the
+    // bound itself becoming the hang. `seq` emits ~1.4MB here, far past
+    // any pipe buffer, and must arrive intact.
+    let mut verbose = Command::new("seq");
+    verbose.args(["1", "200000"]);
+    let completed = run_bounded(&mut verbose, Duration::from_secs(60), "verbose child");
+    let Ok(output) = completed else {
+        panic!("a verbose child did not survive the bound");
+    };
+    assert!(
+        output.status.success(),
+        "a verbose child failed under the bound"
+    );
+    assert!(
+        output.stdout.ends_with(b"200000\n"),
+        "a verbose child's transcript was truncated under the bound"
     );
 }
 
