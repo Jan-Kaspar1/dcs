@@ -196,7 +196,18 @@
 //! procedure), and the document set digested with each peer's
 //! checkpoint fingerprint and durable files (the documentation
 //! turnover) — the completeness audit naming any missing artifact,
-//! two passes producing identical digests — and the `upgrade` stage,
+//! two passes producing identical digests — the pair contract's
+//! in-service revision-roll leg, which emits the consumer's own
+//! revision-2 composition and rolls it through a `--revised` standby:
+//! the named crossing with its carryover report, the served
+//! fingerprint advancing, the switch settling the revised peer
+//! `active` with control continuing, and the incompatible revision
+//! refused with its named diagnostic — and the pair contract's
+//! configuration-backup and restore leg, which backs the running pair
+//! up beside the live deployment, audits the set whole, wipes the
+//! volumes, restores onto fresh ones, and resumes each peer at its
+//! persisted tick with the receipt log and journal order continuing —
+//! and the `upgrade` stage,
 //! which materializes the tree at the previous release's recorded rev
 //! (seeded into the stand-in beside the tag) and repins it to the
 //! recorded release — the stand-in's tag naming the commit the
@@ -225,7 +236,11 @@
 //! `managed-lifecycle-failed`/`managed-lifecycle-nondeterministic`,
 //! `event-parity-failed`/`event-parity-nondeterministic`,
 //! `commissioning-failed`/`commissioning-nondeterministic`/
-//! `commissioning-unchecked`, `lockfile-stale`,
+//! `commissioning-unchecked`,
+//! `revision-roll-failed`/`revision-roll-nondeterministic`/
+//! `revision-roll-unchecked`,
+//! `backup-restore-failed`/`backup-restore-nondeterministic`/
+//! `backup-restore-unchecked`, `lockfile-stale`,
 //! `path-dependency-leak`, and the
 //! `surface-mismatch` paths
 //! a drifting interface registry, a receiptless declared command, or an
@@ -1178,6 +1193,65 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         stdout.contains("expect-degraded: reported, rolling-upgrade-failed"),
         "the rolling-upgrade leg's expect-degraded case did not report its named diagnostic:\n{stdout}"
     );
+    // The pair contract's in-service revision-roll leg ran and held:
+    // the consumer's own revision-2 composition emitted
+    // deterministically and validated under the released tooling, the
+    // `--revised` peer reported the named crossing with its carryover
+    // report — the retained held point carried, the added point
+    // initialized — the served fingerprint advanced, the switch
+    // settled the revised peer `active` with control continuing, and
+    // the incompatible revision drew the named refusal — its digest
+    // line reports the evidence, and each doctored case reported its
+    // named diagnostic.
+    let revision_line = stdout
+        .lines()
+        .find(|line| line.contains("revision-roll-digest"))
+        .unwrap_or_else(|| panic!("the revision-roll leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "crossed to",
+        "carried",
+        "handover at tick",
+        "incompatible refused",
+    ] {
+        assert!(
+            revision_line.contains(phrase),
+            "the revision-roll digest names no '{phrase}' evidence: {revision_line}"
+        );
+    }
+    for tamper in ["unarmed-revision", "incompatible-model"] {
+        assert!(
+            stdout.contains(&format!("{tamper}: reported, revision-roll-failed")),
+            "the revision-roll leg's {tamper} case did not report its named diagnostic:\n{stdout}"
+        );
+    }
+    // The pair contract's configuration-backup and restore leg ran and
+    // held: the running pair backed up beside the live deployment, the
+    // completeness audit held the whole set, the wipe-and-restore onto
+    // fresh volumes resumed each peer at its persisted tick with the
+    // receipt log and journal order continuing, and the rejoined pair
+    // reconverged — its digest line reports the evidence, and each
+    // missing-artifact doctored case reported its named diagnostic.
+    let backup_line = stdout
+        .lines()
+        .find(|line| line.contains("backup-restore-digest"))
+        .unwrap_or_else(|| panic!("the backup-restore leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "backed up",
+        "resumed duty at tick",
+        "standby at tick",
+        "run continued to tick",
+    ] {
+        assert!(
+            backup_line.contains(phrase),
+            "the backup-restore digest names no '{phrase}' evidence: {backup_line}"
+        );
+    }
+    for tamper in ["missing-state-file", "missing-journal-file"] {
+        assert!(
+            stdout.contains(&format!("{tamper}: reported, backup-restore-failed")),
+            "the backup-restore leg's {tamper} case did not report its named diagnostic:\n{stdout}"
+        );
+    }
     assert!(
         stdout.contains("== consumers =="),
         "the consumers stage did not run:\n{stdout}"
