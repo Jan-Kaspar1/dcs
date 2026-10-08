@@ -7,7 +7,8 @@
   --plant-green: #237957;
   --plant-red: #b72c35;
   --plant-amber: #956015;
-  --plant-header-height: 106px;
+  --plant-alarm-height: 86px;
+  --plant-header-height: calc(62px + var(--plant-alarm-height));
   --plant-sidebar-width: 226px;
   --plant-drawer-width: 420px;
 }
@@ -60,7 +61,7 @@ h3 { font-size: 15px; font-weight: 650; }
   grid-row: 1;
   display: grid;
   grid-template-columns: var(--plant-sidebar-width) minmax(0, 1fr) auto;
-  grid-template-rows: 62px 44px;
+  grid-template-rows: 62px var(--plant-alarm-height);
   align-items: center;
   border-bottom: 1px solid var(--plant-line);
   background: #fff;
@@ -101,20 +102,53 @@ h3 { font-size: 15px; font-weight: 650; }
   grid-row: 2;
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 12px;
   min-width: 0;
-  height: 44px;
-  padding: 0 22px;
-  border-top: 1px solid #e9edf1;
-  background: #f8fafc;
-  overflow: hidden;
+  height: var(--plant-alarm-height);
+  padding: 10px 22px;
+  border-top: 1px solid #dde4eb;
+  background: #f1f4f7;
+  overflow: visible;
   font-size: 12px;
 }
-#plant-alarm-strip button { min-height: 28px; font-size: 12px; padding: 3px 9px; white-space: nowrap; }
-#plant-alarm-strip .plant-alarm-count { font-weight: 700; white-space: nowrap; }
+#plant-alarm-strip button { min-height: 32px; font-size: 12px; padding: 5px 10px; }
+#plant-alarm-strip .plant-alarm-count { flex: 0 0 164px; align-self: stretch; font-weight: 700; text-align: left; line-height: 1.45; }
+#plant-alarm-strip .plant-alarm-count.is-alarm { background: #fff; border-color: #d99fa3; color: #9b202a; }
+.plant-alarm-cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; flex: 1 1 auto; min-width: 0; align-items: stretch; }
+#plant-alarm-strip .plant-alarm-card {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  min-height: 64px;
+  padding: 8px 10px;
+  text-align: left;
+  background: #fff;
+  border-color: #dca0a5;
+  border-left: 3px solid #b72c35;
+}
+#plant-alarm-strip .plant-alarm-card.is-unacknowledged { background: #fff5f5; }
+#plant-alarm-strip .plant-alarm-card:not(.is-managed):not(.is-degraded):not(.is-stale):has(.plant-alarm-priority.p2) { background: #fff5ee; border-color: #d5ac8d; border-left-color: #ac581b; }
+#plant-alarm-strip .plant-alarm-card:not(.is-managed):not(.is-degraded):not(.is-stale):has(.plant-alarm-priority.p2) .plant-alarm-title { color: #7f4219; }
+#plant-alarm-strip .plant-alarm-card:not(.is-managed):not(.is-degraded):not(.is-stale):has(.plant-alarm-priority.p2) .plant-alarm-state { color: #6f5544; }
+#plant-alarm-strip .plant-alarm-card:not(.is-managed):not(.is-degraded):not(.is-stale):has(.plant-alarm-priority.p3) { background: #fff9e9; border-color: #dcc589; border-left-color: #aa7b1f; }
+#plant-alarm-strip .plant-alarm-card:not(.is-managed):not(.is-degraded):not(.is-stale):has(.plant-alarm-priority.p3) .plant-alarm-title { color: #6e4f13; }
+#plant-alarm-strip .plant-alarm-card:not(.is-managed):not(.is-degraded):not(.is-stale):has(.plant-alarm-priority.p3) .plant-alarm-state { color: #736247; }
+#plant-alarm-strip .plant-alarm-card:is(.is-managed, .is-degraded, .is-stale) { background: #f5f7f9; border-color: #b9c4cf; border-left-color: #748498; }
+#plant-alarm-strip .plant-alarm-card:is(.is-managed, .is-degraded, .is-stale) .plant-alarm-title { color: #43556b; }
+#plant-alarm-strip .plant-alarm-card:is(.is-managed, .is-degraded, .is-stale) .plant-alarm-state { color: #627185; }
+#plant-alarm-strip .plant-alarm-card.is-selected { outline: 2px solid #4686b6; outline-offset: 1px; }
+.plant-alarm-priority { display: inline-flex; align-items: center; justify-content: center; min-width: 32px; min-height: 29px; border-radius: 4px; font-size: 11px; font-weight: 800; background: #f0f2f4; color: #465669; }
+.plant-alarm-priority.p1 { background: #b72c35; color: #fff; }
+.plant-alarm-priority.p2 { background: #ac581b; color: #fff; }
+.plant-alarm-priority.p3 { background: #f8dc84; color: #674414; }
+.plant-alarm-copy { min-width: 0; display: block; }
+.plant-alarm-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; font-size: 12px; font-weight: 700; line-height: 1.25; color: #72232b; }
+.plant-alarm-state { display: block; margin-top: 4px; font-size: 10px; font-weight: 550; line-height: 1.3; color: #6d5260; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #plant-alarm-strip .plant-alarm-item { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #plant-alarm-strip .plant-alarm-item.bad, #plant-alarm-strip .is-alarm { color: var(--plant-red); }
-#plant-alarm-strip .plant-alarm-clear { color: var(--plant-muted); }
+#plant-alarm-strip .plant-alarm-clear { grid-column: 1 / -1; align-self: center; color: var(--plant-muted); }
 
 #plant-sidebar {
   grid-row: 2;
@@ -211,6 +245,33 @@ h3 { font-size: 15px; font-weight: 650; }
 #plant-canvas .plant-node-hit { fill: transparent; stroke: none; }
 #plant-canvas .plant-node.is-selected .plant-node-hit,
 #plant-canvas .plant-node:focus-visible .plant-node-hit { stroke: #2b75a9; stroke-width: 1.5; stroke-dasharray: 5 4; }
+#plant-canvas .plant-node.has-alarm .plant-node-hit { stroke: currentColor; stroke-width: 2; stroke-dasharray: none; }
+#plant-canvas .plant-node.has-alarm.is-unacknowledged .plant-node-hit { stroke-dasharray: 5 3; }
+#plant-canvas .plant-node.has-alarm.alarm-p1 .plant-node-hit { stroke: #b72c35; }
+#plant-canvas .plant-node.has-alarm.alarm-p2 .plant-node-hit { stroke: #ac581b; }
+#plant-canvas .plant-node.has-alarm.alarm-p3 .plant-node-hit { stroke: #956015; }
+#plant-canvas .plant-node.has-alarm.is-selected .plant-node-hit { stroke: #2b75a9; }
+#plant-canvas .plant-alarm-indicator { text-anchor: middle; }
+#plant-canvas .plant-alarm-badge { fill: #b72c35; stroke: #b72c35; stroke-width: 1.5; }
+#plant-canvas .plant-alarm-badge.p2 { fill: #ac581b; stroke: #ac581b; }
+#plant-canvas .plant-alarm-badge.p3 { fill: #956015; stroke: #956015; }
+#plant-canvas .plant-alarm-badge.other { fill: #647386; stroke: #647386; }
+#plant-canvas .plant-alarm-badge-label { fill: #fff; font-size: 11px; font-weight: 750; letter-spacing: 0.02em; }
+#plant-canvas .plant-alarm-badge-priority { fill: #fff; font-size: 10px; font-weight: 650; }
+#plant-canvas .is-acknowledged .plant-alarm-badge { fill: #fff; }
+#plant-canvas .is-acknowledged .plant-alarm-badge-label,
+#plant-canvas .is-acknowledged .plant-alarm-badge-priority { fill: #8c2931; }
+#plant-canvas .is-acknowledged .plant-alarm-indicator.p2 text { fill: #91481a; }
+#plant-canvas .is-acknowledged .plant-alarm-indicator.p3 text { fill: #805214; }
+#plant-canvas .is-acknowledged .plant-alarm-indicator.other text { fill: #536272; }
+#plant-canvas .plant-node.is-managed-alarm .plant-node-hit { stroke: #748498; stroke-dasharray: 2 5; }
+#plant-canvas .plant-node.is-managed-alarm.is-selected .plant-node-hit { stroke: #2b75a9; }
+#plant-canvas .is-managed-alarm .plant-alarm-badge { fill: #eef2f6; }
+#plant-canvas .is-managed-alarm .plant-alarm-badge-label { fill: #43566b; }
+#plant-canvas .is-managed-alarm .plant-alarm-indicator.p1 .plant-alarm-badge-priority { fill: #8c2931; }
+#plant-canvas .is-managed-alarm .plant-alarm-indicator.p2 .plant-alarm-badge-priority { fill: #91481a; }
+#plant-canvas .is-managed-alarm .plant-alarm-indicator.p3 .plant-alarm-badge-priority { fill: #805214; }
+#plant-canvas .is-managed-alarm .plant-alarm-indicator.other .plant-alarm-badge-priority { fill: #536272; }
 #plant-canvas .plant-pipe {
   fill: none;
   stroke: #7b98ad;
@@ -259,7 +320,45 @@ table { border-collapse: collapse; background: #fff; font-size: 12px; }
 th, td { border: 0; border-bottom: 1px solid #e4e9ee; padding: 8px 9px; vertical-align: top; }
 th { background: #f1f4f7; color: #56677a; font-weight: 650; font-size: 11px; }
 td.value { font-variant-numeric: tabular-nums; }
-#alarm-pane table { border: 1px solid var(--plant-line); }
+#alarm-pane table { display: block; width: 100%; max-width: 100%; overflow-x: auto; border: 1px solid var(--plant-line); }
+#alarm-pane table thead, #alarm-pane table tbody { min-width: 740px; }
+#alarm-pane tr.is-selected td { background: #eaf3fa; }
+#alarm-pane tr.is-selected td:first-child { border-left: 3px solid #377caf; }
+#alarm-pane tr { scroll-margin-top: 20px; }
+#alarm-pane td:last-child { min-width: 170px; }
+#alarm-pane button.ack { min-height: 31px; border-color: #d3a1a6; color: #a12632; }
+#alarm-pane .alarm-open { min-height: 28px; padding: 2px 0; border: 0; background: transparent; color: #245b87; text-align: left; font-size: 12px; font-weight: 700; }
+#alarm-pane .alarm-open:hover { color: #124469; text-decoration: underline; }
+#alarm-pane details.rationalization { display: block; margin-top: 5px; font-size: 11px; color: #53677a; }
+#alarm-pane details.rationalization > summary { cursor: pointer; font-weight: 550; }
+#alarm-pane details.rationalization p { max-width: 34rem; line-height: 1.5; }
+#alarm-selection { padding: 18px; margin: 16px 0 20px; border: 1px solid #bed2e3; border-left: 3px solid #397fae; border-radius: 6px; background: #fff; }
+#selected-alarm-title { display: flex; align-items: center; gap: 10px; margin: 0 0 10px; font-size: 18px; line-height: 1.4; }
+#selected-alarm-title .plant-alarm-priority { flex: 0 0 auto; }
+#alarm-selection p { margin: 8px 0; font-size: 12px; line-height: 1.5; color: #52677b; }
+.alarm-guidance { display: grid; grid-template-columns: 125px minmax(0, 1fr); gap: 8px 16px; margin: 16px 0; padding: 14px 0; border-top: 1px solid #e0e8ef; border-bottom: 1px solid #e0e8ef; }
+.alarm-guidance dt { font-size: 12px; font-weight: 650; color: #3b5972; }
+.alarm-guidance dd { margin: 0; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; color: var(--plant-ink); }
+.alarm-guidance dd:first-of-type { font-weight: 650; }
+#alarm-command-status { padding: 10px 12px; margin: 12px 0; max-height: 130px; overflow: auto; border: 1px solid #dce5ed; border-radius: 5px; background: #f8fbfd; font-size: 12px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+#alarm-command-status:empty { display: none; }
+#alarm-pane .alarm-management-actions {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px;
+  margin: 14px 0;
+  border: 1px solid #d5dfe9;
+  border-radius: 6px;
+  background: #f8fbfd;
+}
+#alarm-pane .alarm-management-actions p { margin: 0; color: var(--plant-muted); font-size: 12px; }
+#alarm-pane .alarm-management-actions input { min-width: 180px; flex: 1 1 180px; }
+#alarm-pane .alarm-management-actions button { min-height: 35px; }
 #alarm-pane label { display: inline-flex; align-items: center; gap: 9px; color: var(--plant-muted); }
 #managed-lists { margin-top: 20px; }
 #engineering-workspace #health { margin-bottom: 24px; }
@@ -331,8 +430,13 @@ td.value { font-variant-numeric: tabular-nums; }
   .plant-brand { padding: 0 18px; }
   #equipment { box-shadow: -12px 0 32px rgb(35 50 68 / 16%); }
 }
+@media (max-width: 900px) {
+  :root { --plant-alarm-height: 142px; }
+  .plant-alarm-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+  #plant-alarm-strip .plant-alarm-card { min-height: 58px; padding: 6px 8px; }
+}
 @media (max-width: 700px) {
-  :root { --plant-header-height: 106px; --plant-sidebar-width: 0px; }
+  :root { --plant-alarm-height: 178px; --plant-sidebar-width: 0px; }
   body { grid-template-columns: minmax(0, 1fr); grid-template-rows: var(--plant-header-height) auto minmax(0, 1fr); }
   #plant-header { grid-template-columns: 80px minmax(0, 1fr) auto; }
   .plant-brand { padding: 0 12px; font-size: 16px; }
@@ -340,7 +444,14 @@ td.value { font-variant-numeric: tabular-nums; }
   .plant-header-title { padding: 0 12px; }
   .plant-header-title h1 { font-size: 15px; }
   #plant-header #status { padding: 0 12px; max-width: 125px; font-size: 10px; }
-  #plant-alarm-strip { padding: 0 12px; gap: 8px; }
+  #plant-alarm-strip { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: 34px minmax(0, 1fr); padding: 8px 12px; gap: 6px; }
+  #plant-alarm-strip .plant-alarm-count { display: flex; align-items: center; justify-content: space-between; gap: 8px; align-self: stretch; padding: 3px 8px; font-size: 11px; text-align: left; }
+  #plant-alarm-strip .plant-alarm-count br { display: none; }
+  #plant-alarm-strip .plant-alarm-count small { max-width: 65%; font-size: 10px; font-weight: 550; line-height: 1.25; text-align: right; }
+  #plant-alarm-strip .plant-alarm-card { grid-template-columns: 27px minmax(0, 1fr); min-height: 58px; gap: 6px; padding: 6px; }
+  .plant-alarm-priority { min-width: 26px; min-height: 26px; font-size: 10px; }
+  .plant-alarm-title { font-size: 11px; }
+  .plant-alarm-state { font-size: 10px; }
   #plant-sidebar { grid-column: 1; grid-row: 2; flex-direction: row; gap: 4px; padding: 7px 10px; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--plant-line); }
   #plant-sidebar h2, #plant-sidebar h3, .plant-sidebar-heading, .plant-sidebar-footer { display: none; }
   .plant-nav-button, .plant-area { width: auto; flex-shrink: 0; min-height: 34px; padding: 6px 10px; margin: 0; white-space: nowrap; }
@@ -354,7 +465,19 @@ td.value { font-variant-numeric: tabular-nums; }
   .plant-canvas-wrap { min-height: 380px; flex-basis: 380px; }
   #plant-canvas { min-height: 380px; }
   #equipment { top: var(--plant-header-height); width: min(420px, 100%); padding: 18px; }
+  #alarm-pane .alarm-management-actions { gap: 7px; padding: 10px; }
+  #alarm-pane .alarm-management-actions input { min-width: 0; width: 100%; }
+  #alarm-selection { padding: 13px; }
+  #selected-alarm-title { font-size: 16px; }
+  .alarm-guidance { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .alarm-guidance dd { margin-bottom: 8px; }
 }
 @media (prefers-reduced-motion: no-preference) {
   button { transition: background-color 100ms ease, border-color 100ms ease; }
+  .plant-alarm-card.is-unacknowledged:not(.is-degraded):not(.is-stale):not(.is-managed) .plant-alarm-priority,
+  #plant-canvas .plant-node.has-attention-alarm:not(.has-degraded-alarm):not(.has-stale-alarm) .plant-alarm-badge { animation: plant-unacknowledged-pulse 1.8s ease-in-out infinite; }
+}
+@keyframes plant-unacknowledged-pulse {
+  0%, 45%, 100% { opacity: 1; }
+  70% { opacity: 0.4; }
 }

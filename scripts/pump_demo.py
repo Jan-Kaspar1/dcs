@@ -48,13 +48,13 @@ def point_named(index, name):
     return matches[0]
 
 
-def write_bool(base, name, value):
+def write_value(base, name, kind, value):
     point = point_named(http(base, "/signals"), name)
-    if not point["writable"] or point["value_type"] != "bool":
-        raise RuntimeError(f"{name} is not a declared writable Boolean")
+    if not point["writable"] or point["value_type"] != kind:
+        raise RuntimeError(f"{name} is not a declared writable {kind} point")
     receipt = http(base, "/command", {
         "command": {"write_value": {
-            "point": point["point"], "kind": "bool", "value": {"bool": value},
+            "point": point["point"], "kind": kind, "value": {kind: value},
         }},
         "actor": "pump-demo",
     })
@@ -74,6 +74,10 @@ def write_bool(base, name, value):
                 return
         time.sleep(0.1)
     raise RuntimeError("no terminal receipt observed within five seconds; inspect the journal")
+
+
+def write_bool(base, name, value):
+    return write_value(base, name, "bool", value)
 
 
 def status(base):
@@ -214,11 +218,16 @@ def main(argv=None):
     demand = actions.add_parser("automatic")
     demand.add_argument("pump", choices=("p101", "p102"))
     demand.add_argument("value", choices=("on", "off"))
+    warning = actions.add_parser("warning", help="raise or clear a simulated bearing-temperature warning")
+    warning.add_argument("pump", choices=("p101", "p102"))
+    warning.add_argument("value", choices=("on", "off"))
     args = parser.parse_args(argv)
     if args.action == "run":
         run(args)
     elif args.action == "status":
         status(args.monitor)
+    elif args.action == "warning":
+        write_value(args.monitor, f"{args.pump}-bearing-temperature", "float", 80.0 if args.value == "on" else 20.0)
     elif args.action in ("fault", "recover"):
         point = point_named(http(args.monitor, "/signals"), f"{args.pump}-thermal")
         request = {"op": "clear_fault", "point": point["point"]}

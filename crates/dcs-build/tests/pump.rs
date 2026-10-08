@@ -36,10 +36,16 @@ fn independent_pumps_follow_their_own_logical_demand() {
         plant.connect(run, command);
         let demand = plant.internal_input::<bool>(PointId(field + 4), false, true);
         demands.push(demand);
+        let mut config = PumpConfig::new(tag, 500 + 100 * index, 1_000 + 100 * index);
+        if index == 1 {
+            config.fault_priority = 4;
+            config.thermal_priority = 1;
+            config.moisture_priority = 2;
+        }
         pumps.push(
             pump(
                 &mut plant,
-                &PumpConfig::new(tag, 500 + 100 * index, 1_000 + 100 * index),
+                &config,
                 PumpInputs {
                     run,
                     thermal,
@@ -60,7 +66,7 @@ fn independent_pumps_follow_their_own_logical_demand() {
     }
 
     let model = plant.build().unwrap();
-    for (equipment, pump) in model.equipment.iter().zip(&pumps) {
+    for (index, (equipment, pump)) in model.equipment.iter().zip(&pumps).enumerate() {
         assert!(equipment.components.contains(&pump.layout.motor));
         assert!(
             equipment
@@ -68,6 +74,25 @@ fn independent_pumps_follow_their_own_logical_demand() {
                 .iter()
                 .any(|control| control.point == pump.mode.id())
         );
+        let priorities = if index == 0 { [2, 2, 3] } else { [4, 1, 2] };
+        for (alarm, priority) in [
+            &pump.layout.fault_alarm,
+            &pump.layout.thermal_alarm,
+            &pump.layout.moisture_alarm,
+        ]
+        .into_iter()
+        .zip(priorities)
+        {
+            let component = model
+                .components
+                .iter()
+                .find(|component| component.id == alarm.component)
+                .unwrap();
+            assert_eq!(component.parameters["priority"], Value::Int(priority));
+            // Configuring priority does not weaken the protection alarm policy.
+            assert_eq!(component.parameters["max_shelve_ticks"], Value::Int(0));
+            assert!(alarm.shelve.is_none());
+        }
     }
     let driver = resolve_drivers(&model, &DriverRegistry::standard())
         .unwrap()
@@ -117,6 +142,15 @@ fn invalid_pump_allocations_fail_before_mutating_the_composition() {
     let mut negative_feedback = config.clone();
     negative_feedback.motor_fault_ticks = -1;
     cases.push((negative_feedback, "motor_fault_ticks"));
+    let mut negative_fault_priority = config.clone();
+    negative_fault_priority.fault_priority = -1;
+    cases.push((negative_fault_priority, "fault_priority"));
+    let mut negative_thermal_priority = config.clone();
+    negative_thermal_priority.thermal_priority = -1;
+    cases.push((negative_thermal_priority, "thermal_priority"));
+    let mut negative_moisture_priority = config.clone();
+    negative_moisture_priority.moisture_priority = -1;
+    cases.push((negative_moisture_priority, "moisture_priority"));
     let mut control_overflow = config.clone();
     control_overflow.point_base = u64::MAX - 10;
     cases.push((control_overflow, "point_base"));

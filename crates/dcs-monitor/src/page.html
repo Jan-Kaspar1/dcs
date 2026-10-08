@@ -145,8 +145,10 @@
     <div class="plant-canvas-wrap"><svg id="plant-canvas" viewBox="0 0 1200 760" role="group" aria-label="Live plant schematic"></svg></div>
   </section>
   <section id="alarm-workspace" hidden><section id="alarm-pane" hidden>
-<h2>Alarms</h2>
+<h2>Alarm management</h2>
 <p id="alarm-summary"></p>
+<p id="alarm-command-status" role="status" aria-live="polite"></p>
+<section id="alarm-selection" hidden aria-label="Selected alarm"></section>
 <p><label>state
   <select id="alarm-filter">
     <option value="all">all</option>
@@ -705,6 +707,10 @@ const PENDING_LIMIT = 16;
 // alarm-surface navigation named, or null while none stands: the pane
 // stays hidden until a row or journal entry selects its owner.
 let equipmentSelection = null;
+let alarmSelection = null;
+let alarmCommandReceipt = null;
+const alarmReasonDrafts = new Map();
+const alarmMarkupCache = new WeakMap();
 // The inputs the last refresh rendered from — a navigation between
 // polls re-renders the equipment pane from them rather than waiting
 // out the cadence.
@@ -2739,6 +2745,78 @@ const PRIORITY_VOCABULARY = [
   { code: 3, label: "P3", cls: "p3" },
 ];
 
+// Presentation configuration in code. The operator bar ranks lower numeric
+// priority codes first and shows at most four unacknowledged alarms.
+const ALARM_PRESENTATION = { maxUnacknowledged: 4 };
+
+function alarmRecords(snapshot, telemetry) {
+  const parameters = new Map((snapshot.parameters || []).map(p => [p.name, p.values]));
+  return alarmJoin(snapshot).standing.map(({ descriptor, port }) => {
+    const sample = portSample(port, telemetry);
+    const unackPort = descriptor.ports.find(p => p.name === "unacknowledged" &&
+      p.role === "status" && p.direction === "out");
+    const unackSample = unackPort ? portSample(unackPort, telemetry) : null;
+    const value = (parameters.get(descriptor.name) || {}).priority;
+    const priority = value && Number.isInteger(value.int) && value.int >= 0 ? value.int : null;
+    return { descriptor, port, sample, priority,
+      name: descriptor.name,
+      label: alarmLabel(descriptor, port),
+      active: isAsserted(sample), unacknowledged: isAsserted(unackSample),
+      managed: MANAGED_STATES.some(name => isAsserted(flagSample(descriptor, telemetry, name))),
+      degraded: !sample || !isGood(sample.quality) ||
+        (unackPort && (!unackSample || !isGood(unackSample.quality))),
+      states: alarmRowStates(descriptor, telemetry) };
+  });
+}
+
+function alarmLabel(descriptor, port) {
+  const meta = port.point == null ? null : metaByPoint.get(port.point);
+  return meta ? meta.name : descriptor.label;
+}
+
+function compareAlarmPriority(a, b) {
+  return (a.priority === null ? Infinity : a.priority) -
+    (b.priority === null ? Infinity : b.priority) ||
+    (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+}
+
+function alarmPriorityBadge(priority) {
+  const entry = PRIORITY_VOCABULARY.find(e => e.code === priority);
+  return "<span class=\"plant-alarm-priority " + (entry ? entry.cls : "other") + "\">" +
+    esc(entry ? entry.label : priority === null ? "Priority ?" : "P" + priority) + "</span>";
+}
+
+function alarmLifecycle(row) {
+  if (!row.descriptor.ports.some(p => p.name === "unacknowledged" && p.direction === "out")) {
+    return row.active ? "Active" : "Normal";
+  }
+  return row.active ? (row.unacknowledged ? "Active · unacknowledged" : "Active · acknowledged") :
+    row.unacknowledged ? "Returned · unacknowledged" : "Normal · acknowledged";
+}
+
+// Rebuild only changing markup, retaining the operator's input and focus across
+// live updates. Drafts belong to alarm identity, including when a managed state
+// moves its row to another list.
+function updateAlarmMarkup(container, html) {
+  if (alarmMarkupCache.get(container) === html) return;
+  const focused = container.contains(document.activeElement) ? document.activeElement : null;
+  const name = focused && focused.closest("[data-alarm-name]")?.dataset.alarmName;
+  const className = focused && focused.className;
+  const point = focused && focused.dataset.point;
+  const selection = focused && focused.tagName === "INPUT"
+    ? [focused.selectionStart, focused.selectionEnd] : null;
+  container.innerHTML = html;
+  alarmMarkupCache.set(container, html);
+  if (!focused) return;
+  const replacement = Array.from(container.querySelectorAll("input, button, a")).find(element =>
+    element.className === className && element.dataset.point === point &&
+    element.closest("[data-alarm-name]")?.dataset.alarmName === name);
+  if (replacement) {
+    replacement.focus({ preventScroll: true });
+    if (selection) replacement.setSelectionRange(selection[0], selection[1]);
+  }
+}
+
 // One snapshot's alarm instances and the lifecycle points their journal
 // filter follows, including the acknowledgment input.
 function alarmJoin(snapshot) {
@@ -2800,7 +2878,7 @@ function lastChangedTick(point, sample) {
 // writable. The gate is the same metadata check every command
 // affordance on the page follows; anything else renders display-only
 // rather than silently commandable.
-function ackAffordance(descriptor) {
+function ackAffordance(descriptor, unacknowledged = null) {
   const ack = descriptor.ports.find(p =>
     p.name === "ack" && p.direction === "in" && p.kind === "bool");
   if (!ack || ack.point == null) return "";
@@ -2808,7 +2886,7 @@ function ackAffordance(descriptor) {
   if (!meta || !meta.writable) return "";
   return "<button type=\"button\" class=\"ack\" data-point=\"" + ack.point +
     "\" title=\"acknowledge " + esc(descriptor.label) +
-    "\">ack</button>";
+    "\"" + (unacknowledged === false ? " disabled" : "") + ">Acknowledge</button>";
 }
 
 // The managed-state request inputs a managed kind may declare —
@@ -2852,7 +2930,8 @@ function managedAffordance(descriptor, telemetry) {
   // shelve and oos requests carry it in both directions — the
   // shelving-reason decision's record obligation — and a point whose
   // declaration marks it mandatory refuses a blank one at admission.
-  parts.unshift("<input type=\"text\" class=\"managed-reason\" " +
+  parts.unshift("<input type=\"text\" class=\"managed-reason\" data-alarm-name=\"" +
+    esc(descriptor.name) + "\" value=\"" + esc(alarmReasonDrafts.get(descriptor.name) || "") + "\" " +
     "placeholder=\"reason\" title=\"declared reason — journaled beside " +
     "the settled managed-state command\">");
   return parts.join("");
@@ -3100,11 +3179,15 @@ function alarmRow(descriptor, port, sample, telemetry, forced, parameters, actio
   // bad sensor reads as uncertainty rather than a hidden alarm state.
   const priority = priorityMarkup(descriptor.name, parameters);
   return {
+    name: descriptor.name,
+    priority: (parameters.get(descriptor.name) || {}).priority?.int ?? null,
     states,
     managed: MANAGED_STATES.filter(state => states.has(state)),
     degraded: !sample || !isGood(sample.quality),
-    html: "<tr class=\"alarm " + cls + "\">" +
-      "<td>" + equipmentLink(descriptor.name, esc(port.point == null ? descriptor.label : pointName(port.point))) +
+    html: "<tr data-alarm-name=\"" + esc(descriptor.name) + "\" class=\"alarm " + cls +
+      (alarmSelection === descriptor.name ? " is-selected" : "") + "\">" +
+      "<td><button type=\"button\" class=\"alarm-open\" data-manage-alarm=\"" + esc(descriptor.name) + "\">" +
+        esc(alarmLabel(descriptor, port)) + "</button>" +
         rationalizationMarkup(descriptor.name) + "</td>" +
       "<td>" + esc(port.name) + (meta ? " · " + esc(meta.name) : "") +
         truthFlags(descriptor, telemetry) + "</td>" +
@@ -3120,8 +3203,8 @@ function alarmRow(descriptor, port, sample, telemetry, forced, parameters, actio
 }
 
 // Renders the pane from the polled snapshot plus the history and
-// journal the refresh already fetched. The section shows while any
-// descriptor declares a status-role port; a plant with none hides it.
+// journal the refresh already fetched. The section also reports an empty
+// state when the plant declares no alarms.
 // Rows whose component reports a managed flag route to that state's
 // named list — the standing list keeps the unmanaged rows — and the
 // state select filters every list at once: filtering selects which
@@ -3129,10 +3212,6 @@ function alarmRow(descriptor, port, sample, telemetry, forced, parameters, actio
 function renderAlarms(snapshot, telemetry, forced) {
   const pane = document.getElementById("alarm-pane");
   const join = alarmJoin(snapshot);
-  if (join.components.size === 0) {
-    pane.hidden = true;
-    return;
-  }
   pane.hidden = false;
   const parameters = new Map(
     (snapshot.parameters || []).map(p => [p.name, p.values]));
@@ -3144,11 +3223,12 @@ function renderAlarms(snapshot, telemetry, forced) {
   // ack plus the managed-state commands, built once.
   const rows = [];
   let degraded = 0;
-  for (const { descriptor, port } of join.standing) {
+  const records = alarmRecords(snapshot, telemetry).sort(compareAlarmPriority);
+  for (const { descriptor, port } of records) {
     const sample = port.point == null ? null : portSample(port, telemetry);
     const states = alarmRowStates(descriptor, telemetry);
     if (states.size === 0) continue;
-    const actions = ackAffordance(descriptor) + managedAffordance(descriptor, telemetry);
+    const actions = ackAffordance(descriptor, states.has("unacknowledged")) + managedAffordance(descriptor, telemetry);
     const row = alarmRow(descriptor, port, sample, telemetry, forced,
       parameters, actions);
     if (row.degraded) degraded++;
@@ -3156,9 +3236,9 @@ function renderAlarms(snapshot, telemetry, forced) {
   }
   const visible = filter === "all"
     ? rows : rows.filter(row => row.states.has(filter));
-  document.getElementById("alarms").innerHTML = visible
+  updateAlarmMarkup(document.getElementById("alarms"), visible
     .filter(row => row.managed.length === 0)
-    .map(row => row.html).join("");
+    .map(row => row.html).join(""));
   const lists = [];
   const counts = [];
   for (const state of MANAGED_STATES) {
@@ -3168,18 +3248,22 @@ function renderAlarms(snapshot, telemetry, forced) {
       lists.push(managedListMarkup(state, listed.map(row => row.html)));
     }
   }
-  document.getElementById("managed-lists").innerHTML = lists.join("");
+  updateAlarmMarkup(document.getElementById("managed-lists"), lists.join(""));
   const summary = document.getElementById("alarm-summary");
   const managed = MANAGED_STATES
     .map((state, i) => counts[i] + " " + MANAGED_LABELS[state])
     .filter((_, i) => counts[i] > 0);
   const standing = rows.filter(row => row.states.has("active") || row.states.has("unacknowledged")).length;
-  summary.textContent = (standing === 0 ? "no standing alarms" : standing + " standing") +
+  const unacknowledged = records.filter(row => row.unacknowledged).length;
+  const active = records.filter(row => row.active).length;
+  summary.textContent = unacknowledged + " unacknowledged · " + active + " active" +
       (managed.length > 0 ? " — " + managed.join(" · ") : "") +
       (degraded > 0 ? " — " + degraded + " degraded" : "") +
       (filter !== "all"
         ? " — showing " + (MANAGED_LABELS[filter] || filter) : "");
   summary.className = standing === 0 ? "good" : "bad";
+  renderSelectedAlarm(records, telemetry);
+  renderAlarmCommandStatus();
   // The alarm journal lists in the durable journal's transition order —
   // seq order — so a burst's initiating cause stands first: equal-tick
   // point_changed transitions and the settled receipt that caused them
@@ -3198,6 +3282,77 @@ function renderAlarms(snapshot, telemetry, forced) {
         "</td></tr>";
     })
     .join("");
+}
+
+function renderSelectedAlarm(records, telemetry) {
+  const pane = document.getElementById("alarm-selection");
+  const row = records.find(record => record.name === alarmSelection);
+  pane.hidden = !row;
+  if (!row) return;
+  const owner = declaredEquipment().find(item => equipmentMembers(item).some(member => member.name === row.name));
+  const record = componentsByName.get(row.name);
+  const response = record && record.rationalization;
+  const state = alarmLifecycle(row) + (row.degraded ? " · data degraded" : "") +
+    (feed.stale !== null ? " · last known / connection stale" : "");
+  const managed = MANAGED_STATES.filter(name => row.states.has(name)).map(name => MANAGED_LABELS[name]);
+  const guidance = response ? "<dl class=\"alarm-guidance\"><dt>Required action</dt><dd>" +
+    esc(response.required_action) + "</dd><dt>Consequence</dt><dd>" + esc(response.consequence) +
+    "</dd><dt>Reference</dt><dd>" + esc(response.reference) + "</dd></dl>" : "";
+  const measurements = row.descriptor.ports.filter(port => port.direction === "in" && port.role === "process_value");
+  const values = measurements.map(port => {
+    const sample = portSample(port, telemetry);
+    const meta = portMeta(port);
+    return "<dt>" + esc(meta ? meta.name : port.name) + "</dt><dd>" +
+      (sample ? esc(formatValue(sample.value)) + (meta && meta.unit ? " " + esc(meta.unit) : "") +
+        " · " + esc(formatQuality(sample.quality)) : "No sample") + "</dd>";
+  }).join("");
+  const parameters = (rendered.snapshot.parameters || []).find(record => record.name === row.name)?.values || {};
+  const limits = ["low_limit", "high_limit", "hysteresis"].filter(name => parameters[name])
+    .map(name => "<dt>" + esc(name.replace(/_/g, " ")) + "</dt><dd>" +
+      esc(formatValue(parameters[name])) + "</dd>").join("");
+  updateAlarmMarkup(pane, "<div data-alarm-name=\"" + esc(row.name) + "\">" +
+    "<h3 tabindex=\"-1\" id=\"selected-alarm-title\">" + alarmPriorityBadge(row.priority) + " " + esc(row.label) + "</h3>" +
+    "<p>" + esc(state) + (managed.length ? " · " + esc(managed.join(" · ")) : "") + "</p>" +
+    (owner ? "<p>Equipment: " + equipmentLink(row.name, esc(owner.label)) + "</p>" : "") +
+    (values ? "<dl class=\"alarm-guidance\">" + values + "</dl>" : "") +
+    (limits ? "<details class=\"alarm-limits\"><summary>Configured limits</summary><dl class=\"alarm-guidance\">" + limits + "</dl></details>" : "") +
+    guidance + "<div class=\"alarm-management-actions\">" +
+    ackAffordance(row.descriptor, row.unacknowledged) + managedAffordance(row.descriptor, telemetry) + "</div>" +
+    "<p>Acknowledgment records awareness. An active condition stays visible until it returns to normal.</p></div>");
+}
+
+function openAlarmManagement(name = null) {
+  alarmSelection = name;
+  selectEquipment(null);
+  setPlantWorkspace("alarms");
+  if (name) document.getElementById("alarm-filter").value = "all";
+  if (rendered.snapshot) {
+    renderAlarms(rendered.snapshot, rendered.telemetry, rendered.forced);
+    renderPlantWorkspace();
+  }
+  const title = document.getElementById("selected-alarm-title");
+  if (name && title) title.focus({ preventScroll: true });
+}
+
+function alarmCommandMessage(text) {
+  try {
+    const receipt = JSON.parse(text);
+    const outcome = receipt.outcome || {};
+    if ("accepted" in outcome) return "Request accepted; awaiting controller settlement.";
+    if ("applied" in outcome) return "Request applied by the controller.";
+    if ("rejected" in outcome) return "Request refused: " + JSON.stringify(outcome.rejected);
+  } catch (_) { /* Text notices include missing reasons and connection errors. */ }
+  return text;
+}
+
+function renderAlarmCommandStatus() {
+  if (!alarmCommandReceipt) return;
+  const submission = alarmCommandReceipt.submission;
+  const settled = submission && journalEntries.map(entry => entry.event.command_settled?.receipt)
+    .find(receipt => receipt && receipt.submission &&
+      receipt.submission.origin === submission.origin && receipt.submission.seq === submission.seq);
+  document.getElementById("alarm-command-status").textContent =
+    alarmCommandMessage(JSON.stringify(settled || alarmCommandReceipt));
 }
 
 // The independent protection layer's declared points — every index
@@ -3249,10 +3404,13 @@ async function submitAck(button) {
   const point = Number(button.dataset.point);
   const meta = metaByPoint.get(point);
   if (!meta || !meta.writable) return;
+  alarmCommandReceipt = null;
   try {
     const answer = await submitCommand({ write_value: {
       point: point, kind: meta.value_type, value: { bool: true } } });
     if (answer && answer.outcome) {
+      alarmCommandReceipt = answer;
+      renderAlarmCommandStatus();
       if ("accepted" in answer.outcome) {
         ackReleases.set(point, answer.outcome.accepted.apply_tick);
       } else if ("applied" in answer.outcome) {
@@ -3282,6 +3440,7 @@ async function submitManaged(button) {
   const point = Number(button.dataset.point);
   const meta = metaByPoint.get(point);
   if (!meta || !meta.writable) return;
+  alarmCommandReceipt = null;
   const input = button.parentElement.querySelector("input.managed-reason");
   const text = input ? input.value.trim() : "";
   const reason = text === "" ? null : text;
@@ -3291,12 +3450,17 @@ async function submitManaged(button) {
     return;
   }
   try {
-    await submitCommand({ write_value: {
+    const answer = await submitCommand({ write_value: {
       point: point,
       kind: meta.value_type,
       value: { bool: button.dataset.level === "true" },
     } }, reason);
-    if (input) input.value = "";
+    alarmCommandReceipt = answer;
+    renderAlarmCommandStatus();
+    if (input) {
+      input.value = "";
+      alarmReasonDrafts.delete(input.dataset.alarmName);
+    }
   } catch (error) {
     document.getElementById("receipt").textContent = "command failed: " + error;
   }
@@ -3407,6 +3571,7 @@ function setPlantWorkspace(mode) {
   if (!["plant", "alarms", "engineering"].includes(mode)) return;
   document.body.classList.remove("workspace-plant", "workspace-alarms", "workspace-engineering");
   document.body.classList.add("workspace-" + mode);
+  if (mode === "alarms") selectEquipment(null);
   for (const name of ["plant", "alarm", "engineering"]) {
     document.getElementById(name + "-workspace").hidden =
       (name === "alarm" ? "alarms" : name) !== mode;
@@ -3421,28 +3586,42 @@ function renderPlantWorkspace() {
   if (!rendered.snapshot) return;
   const snapshot = rendered.snapshot, telemetry = rendered.telemetry;
   const stale = feed.stale !== null;
+  const alarms = alarmRecords(snapshot, telemetry);
   if (window.DcsPlantViews) {
     window.DcsPlantViews.update({ index, snapshot, telemetry,
       descriptors: snapshot.descriptors || [], stale,
+      alarmStates: alarms.map(({ name, active, unacknowledged, priority, degraded, managed }) =>
+        ({ name, active, unacknowledged, priority, degraded: Boolean(degraded), managed })),
       selectEquipment(selection) { selectEquipment(selection); }
     });
   }
   const io = ioHealthSummary(snapshot.io_health);
   document.getElementById("plant-connection-state").textContent = stale ? "Connection stale" : io.text;
-  const alarms = alarmJoin(snapshot).standing.map(({descriptor, port}) => ({
-    descriptor, port, active: isAsserted(portSample(port, telemetry)),
-    unack: isAsserted(flagSample(descriptor, telemetry, "unacknowledged"))
-  })).filter(row => row.active || row.unack);
+  const unacknowledged = alarms.filter(row => row.unacknowledged).sort(compareAlarmPriority);
+  const active = alarms.filter(row => row.active).length;
   const strip = document.getElementById("plant-alarm-strip");
-  const count = "<button type=\"button\" class=\"plant-alarm-count" + (alarms.length ? " is-alarm" : "") + "\" data-workspace=\"alarms\">" +
-    alarms.length + (alarms.length === 1 ? " alarm" : " alarms") + " · Alarm list</button>";
-  strip.innerHTML = count + (stale ? "<span class=\"plant-alarm-item\">Last known state — connection stale</span>" :
-    alarms.length ? alarms.slice(0, 3).map(row => {
-      const owner = declaredEquipment().find(item => equipmentMembers(item).some(member => member.name === row.descriptor.name));
-      const target = owner ? "equipment:" + owner.id : row.descriptor.name;
-      return "<button type=\"button\" class=\"plant-alarm-item bad\" data-alarm-equipment=\"" + esc(target) + "\">" +
-        esc(pointName(row.port.point)) + " · " + (row.unack ? "unacknowledged" : "active") + "</button>";
-    }).join("") : "<span class=\"plant-alarm-clear\">No standing alarms</span>");
+  const count = "<button type=\"button\" class=\"plant-alarm-count" + (unacknowledged.length ? " is-alarm" : "") +
+    "\" data-workspace=\"alarms\">" + unacknowledged.length + " unacknowledged<br><small>" +
+    active + " active · Alarm management</small></button>";
+  const limit = Math.max(2, Math.min(4, ALARM_PRESENTATION.maxUnacknowledged));
+  const cards = unacknowledged.slice(0, limit).map(row => {
+    const owner = declaredEquipment().find(item => equipmentMembers(item).some(member => member.name === row.name));
+    const managed = MANAGED_STATES.filter(name => row.states.has(name));
+    return "<button type=\"button\" class=\"plant-alarm-card is-unacknowledged" +
+      (row.active ? " is-active" : "") + (row.degraded ? " is-degraded" : "") +
+      (stale ? " is-stale" : "") + (managed.length ? " is-managed" : "") +
+      (alarmSelection === row.name ? " is-selected" : "") + "\" data-manage-alarm=\"" + esc(row.name) + "\" " +
+      "title=\"Open alarm management: " + esc(row.label) + "\">" + alarmPriorityBadge(row.priority) +
+      "<span class=\"plant-alarm-copy\"><span class=\"plant-alarm-title\">" +
+      (owner ? esc(owner.label) + " · " : "") + esc(row.label) + "</span>" +
+      "<span class=\"plant-alarm-state\">" + (stale ? "Last known · stale" :
+        row.degraded ? "Unacknowledged · data degraded" : row.active ? "Active · unacknowledged" : "Returned · unacknowledged") +
+      (managed.length ? " · " + esc(managed.map(name => MANAGED_LABELS[name]).join(" · ")) : "") +
+      "</span></span></button>";
+  }).join("");
+  const empty = "<span class=\"plant-alarm-clear\">" + (stale ? "Last known alarm state · connection stale" :
+    active ? "No unacknowledged alarms · active conditions remain in the plant" : "No unacknowledged alarms") + "</span>";
+  updateAlarmMarkup(strip, count + "<div class=\"plant-alarm-cards\">" + (cards || empty) + "</div>");
 }
 
 function declaredEquipment() {
@@ -3496,7 +3675,7 @@ function equipmentControls(equipment, telemetry, forced, members) {
     port.name === "alarm" && port.direction === "out" && port.kind === "bool"));
   const alarmRows = alarms.map(descriptor => {
     const alarm = descriptor.ports.find(port => port.name === "alarm" && port.direction === "out");
-    const label = alarm.point == null ? descriptor.label : pointName(alarm.point);
+    const label = alarmLabel(descriptor, alarm);
     const sample = portSample(alarm, telemetry);
     const unack = flagSample(descriptor, telemetry, "unacknowledged");
     return "<div class=\"role\"><span>" + esc(label) + " — " +
@@ -4620,8 +4799,8 @@ async function init() {
   document.addEventListener("click", event => {
     const navigation = event.target.closest("[data-workspace]");
     if (navigation) setPlantWorkspace(navigation.dataset.workspace);
-    const alarm = event.target.closest("[data-alarm-equipment]");
-    if (alarm) selectEquipment(alarm.dataset.alarmEquipment);
+    const alarm = event.target.closest("button[data-manage-alarm]");
+    if (alarm) openAlarmManagement(alarm.dataset.manageAlarm);
     if (event.target.closest(".plant-brand")) {
       setPlantWorkspace("plant");
       if (window.DcsPlantViews) window.DcsPlantViews.selectArea("overview");
@@ -4632,6 +4811,8 @@ async function init() {
   const receipt = document.getElementById("receipt");
   new MutationObserver(() => {
     document.getElementById("equipment-receipt").textContent = receipt.textContent;
+    document.getElementById("alarm-command-status").textContent = alarmCommandMessage(receipt.textContent);
+    renderAlarmCommandStatus();
   }).observe(receipt, { childList: true, characterData: true, subtree: true });
 
   // Overview mode: configured ?pair= parameters switch the page to the
@@ -4812,6 +4993,10 @@ async function init() {
     }
     const managed = event.target.closest("button.managed");
     if (managed) await submitManaged(managed);
+  });
+  document.getElementById("alarm-pane").addEventListener("input", event => {
+    const input = event.target.closest("input.managed-reason");
+    if (input) alarmReasonDrafts.set(input.dataset.alarmName, input.value);
   });
   // The pane's close affordance drops the selection — a cleared
   // selection keeps the pane hidden on later polls until the next

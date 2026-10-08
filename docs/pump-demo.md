@@ -3,13 +3,17 @@
 This demonstration runs two independent pumps composed through the public
 `dcs_build::pump` API. Each instance declares its equipment identity, control
 points, protection status, motor feedback fault, and three managed alarms in
-the same plant model the generic controller and monitor consume.
+the same plant model the generic controller and monitor consume. The example
+also composes a separate bearing-temperature warning for each pump from the
+existing managed analog alarm block.
 
 The simulated running contact follows the pump output through an explicit
 field loopback in `crates/dcs-build/examples/pump.rs`. Thermal and moisture
 contacts are healthy initially. The protective measurement is held at a
 healthy value. There is no wet-well model or duty allocator in this small
 example; an independent supervisory demand lets you try automatic control.
+The model initializes the simulated bearing temperatures to 20 °C. These warnings
+notify the operator and do not trip the pump.
 
 ## Start from this checkout
 
@@ -106,6 +110,65 @@ service can resume a standing demand after the applicable holdout. This slice
 uses the existing automatic recovery policy, with no separate fault-reset
 command. The operator surface exposes command request, actual running feedback,
 and protection/fault state separately.
+
+## Try warning priorities and alarm management
+
+With Pump 1 running, raise its simulated bearing temperature to 80 °C:
+
+```sh
+python3 scripts/pump_demo.py warning p101 on
+```
+
+The P3 bearing-temperature alarm appears and the pump's symbol and drawer show
+its owned alarm. The pump continues running. Open the alarm from the top strip
+or the full alarm list to see its actual temperature, consequence, and required
+response. Expand **Configured limits** to inspect the declared 60 °C high
+limit and hysteresis. Select **Acknowledge** to record awareness; the standing
+condition remains visible until the temperature recovers.
+
+Use the selected warning's management actions to try **Shelve**, supplying a
+reason such as `Inspecting the simulated bearing sensor`. The request requires
+a reason and expires after 300 controller ticks, or 60 seconds at this demo's
+scan rate. The warning remains listed with its managed state. Unshelve it to
+resume annunciation sooner. Its alarm **Out of service** action is independent
+of the pump's equipment service state: it marks only this warning out of
+service for maintenance. Its standing condition and latch remain visible, and
+return to service is explicit. The pump's thermal
+and moisture protection alarms retain their non-shelvable policy.
+
+Restore the temperature to 20 °C with:
+
+```sh
+python3 scripts/pump_demo.py warning p101 off
+```
+
+Substitute `p102` to try the other pump's independent warning. To see priority
+ranking with both pumps, inject `fault p102`, then `fault p101`. The example
+configures Pump 1's thermal alarm as P1 and Pump 2's as P2, ahead of the P3
+warnings. The top strip presents up to four unacknowledged alarms, sorted by
+ascending priority code. Returned alarms remain there until acknowledged;
+active acknowledged alarms remain visible on their equipment's schematic badge.
+Use `recover p101` and `recover p102` after stopping any held demand; acknowledge
+the remaining latches from the alarm list.
+
+Alarm policy is declared in Rust. `PumpConfig` exposes `fault_priority`,
+`thermal_priority`, and `moisture_priority` as nonnegative site codes; its
+unchanged defaults are 2, 2, and 3. For example:
+
+```rust
+let mut config = PumpConfig::new("p101", 1000, 5000);
+config.thermal_priority = 1;
+```
+
+The example's `BEARING_WARNING_LIMIT`, `BEARING_WARNING_PRIORITY`, and
+`BEARING_WARNING_MAX_SHELVE_TICKS` constants configure its process warnings.
+Their rationalization, writable acknowledgment/shelving/maintenance points,
+reason requirement, journaled lifecycle outputs, and equipment ownership are
+declared alongside the analog alarm composition in
+`crates/dcs-build/examples/pump.rs`. Change the code, rebuild, and restart the
+demo to try a different policy. The monitor's `ALARM_PRESENTATION.maxUnacknowledged`
+constant in `crates/dcs-monitor/src/page.html` configures two, three, or four
+top-bar slots; four is the default. The browser provides operator controls.
 
 ## Configure the schematic in code
 

@@ -166,6 +166,14 @@
       const clip = svg("clipPath", { id: clipId }); clip.append(svg("rect", { width, height })); defs.append(clip);
       const drawing = svg("g", { "clip-path": "url(#" + clipId + ")" }); drawSymbol(node, drawing); group.append(drawing);
       if (interactive) {
+        const indicator = svg("g", { transform: "translate(" + (width - 58) + " 2)", class: "plant-alarm-indicator", hidden: "" });
+        indicator.append(svg("title", {}));
+        indicator.append(svg("rect", { x: 0, y: 0, width: 56, height: 34, rx: 3, class: "plant-alarm-badge" }));
+        indicator.append(svg("text", { x: 28, y: 14, "text-anchor": "middle", class: "plant-alarm-badge-label" }));
+        indicator.append(svg("text", { x: 28, y: 28, "text-anchor": "middle", class: "plant-alarm-badge-priority" }));
+        group.append(indicator);
+      }
+      if (interactive) {
         group.addEventListener("click", () => openNode(node));
         group.addEventListener("keydown", event => {
           if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openNode(node); }
@@ -220,7 +228,7 @@
     }
     const descriptors = descriptorsFor(node), important = [];
     const actuators = descriptors.filter(descriptor => descriptor.kind === "motor" || /valve/.test(descriptor.kind));
-    let running = null, command = null, fault = false, alarm = false, tripped = false, position = null, positionUnit = "";
+    let running = null, command = null, fault = false, tripped = false, position = null, positionUnit = "";
     descriptors.forEach(descriptor => (descriptor.ports || []).forEach(port => {
       const reading = sample(port.point), current = value(reading), actuator = actuators.includes(descriptor);
       if (actuator && ["run", "out", "cmd", "fault", "position", "fb", "discrepancy"].includes(port.name)) important.push(reading);
@@ -232,17 +240,16 @@
       }
       if (port.name === "fault" || port.name === "discrepancy") fault = fault || current === true;
       if (port.name === "tripped" && port.direction === "out") { tripped = tripped || current === true; important.push(reading); }
-      if (port.name === "alarm" && port.direction === "out" && typeof current === "boolean") { alarm = alarm || current; important.push(reading); }
     }));
     const degraded = !descriptors.length || important.length === 0 || important.some(reading => !good(reading));
-    let text = tripped ? "Protection tripped" : fault ? "Feedback fault" : alarm ? "Alarm" : degraded ? "Data degraded"
+    let text = tripped ? "Protection tripped" : fault ? "Feedback fault" : degraded ? "Data degraded"
       : running === true ? "Running" : running === false ? "Stopped" : position != null ? "Position " + position.toLocaleString(undefined, { maximumFractionDigits: 1 }) + (positionUnit ? " " + positionUnit : "")
       : command === true ? "Output on" : command === false ? "Output off" : "Live component";
-    if (!fault && !tripped && !alarm && !degraded) {
+    if (!fault && !tripped && !degraded) {
       if (running === true && command === false) text = "Stop requested";
       if (running === false && command === true) text = "Start requested";
     }
-    let tag = degraded && (fault || alarm || tripped) ? "Data degraded" : "";
+    let tag = degraded && (fault || tripped) ? "Data degraded" : "";
     if (binding.equipment != null) {
       const equipment = state.model.equipment.get(binding.equipment);
       const mode = equipment && (equipment.controls || []).find(control => /mode/i.test(control.label || ""));
@@ -251,7 +258,87 @@
         if (good(reading) && typeof value(reading) === "boolean") tag += (tag ? " · " : "") + (value(reading) ? mode.true_label || "On" : mode.false_label || "Off");
       }
     }
-    return { text, tag, running: running === true && !degraded, fault: fault || alarm || tripped, degraded };
+    return { text, tag, running: running === true && !degraded, fault: fault || tripped, degraded };
+  }
+  function alarmSummary(node) {
+    const binding = node.binding;
+    if (!binding || (binding.equipment == null && binding.component == null)) return null;
+    const ids = new Set();
+    if (binding.equipment != null) {
+      ((state.model.equipment.get(binding.equipment) || {}).components || []).forEach(id => ids.add(id));
+    } else {
+      ids.add(binding.component);
+      // A primitive glyph can be part of declared higher-level equipment.
+      // Its related alarms follow that membership, never a guessed tag name.
+      state.model.equipment.forEach(equipment => {
+        if ((equipment.components || []).includes(binding.component)) equipment.components.forEach(id => ids.add(id));
+      });
+    }
+    const names = new Set(Array.from(ids).map(id => (state.model.components.get(id) || {}).name).filter(Boolean));
+    const owned = Array.from(new Map((state.context.alarmStates || [])
+      .filter(alarm => names.has(alarm.name)).map(alarm => [alarm.name, alarm])).values());
+    if (!owned.length) return null;
+    const standing = owned.filter(alarm => alarm.active || alarm.unacknowledged);
+    const active = standing.filter(alarm => alarm.active).length;
+    const unacknowledged = standing.filter(alarm => alarm.unacknowledged).length;
+    const returned = standing.filter(alarm => alarm.unacknowledged && !alarm.active).length;
+    const managed = standing.filter(alarm => alarm.managed).length;
+    const attention = standing.filter(alarm => alarm.unacknowledged && !alarm.managed).length;
+    const fullyManaged = standing.length > 0 && managed === standing.length;
+    const rank = alarm => Number.isInteger(alarm.priority) && alarm.priority >= 0 ? alarm.priority : Infinity;
+    const highest = standing.slice().sort((a, b) => rank(a) - rank(b) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))[0];
+    const priority = highest && rank(highest) !== Infinity ? highest.priority : null;
+    const priorityLabel = priority == null ? "P?" : "P" + priority;
+    const priorityClass = [1, 2, 3].includes(priority) ? "p" + priority : "other";
+    const degraded = owned.some(alarm => alarm.degraded);
+    const stale = Boolean(state.context.stale);
+    // A primitive alarm may have no acknowledgment state. Only the declared
+    // unacknowledged port establishes that an active alarm was acknowledged.
+    const acknowledged = standing.length > 0 && unacknowledged === 0 && standing.every(alarm => {
+      const descriptor = state.model.descriptors.get(alarm.name);
+      return descriptor && (descriptor.ports || []).some(port => port.name === "unacknowledged" && port.direction === "out");
+    });
+    let label = unacknowledged ? unacknowledged + " UNACK" : active ? active + " ACTIVE" : "ALARM ?";
+    let detail = priorityLabel + (fullyManaged ? " · MGD" : returned === standing.length && returned > 0 ? " · RET" : acknowledged ? " · ACK" : "");
+    if (stale) { label = standing.length ? standing.length + " LAST" : "ALARM ?"; detail = "STALE"; }
+    else if (degraded) detail = standing.length ? priorityLabel + " · ?" : "DATA ?";
+    let description = standing.length
+      ? standing.length + (standing.length === 1 ? " alarm" : " alarms") + ": " + active + " active, " + unacknowledged + " unacknowledged"
+        + (returned ? ", " + returned + " returned" : "") + (managed ? ", " + managed + " managed" : "")
+        + "; highest priority " + priorityLabel
+      : "No alarm asserted in the last readings";
+    if (stale) description = "Last known alarm state; connection stale. " + description;
+    else if (degraded) description += "; alarm data degraded, current state is uncertain";
+    return { count: standing.length, active, unacknowledged, returned, managed, attention, fullyManaged, acknowledged, priority, priorityClass,
+      degraded, stale, visible: standing.length > 0 || degraded || stale, label, detail, description };
+  }
+  function updateAlarmIndicator(node, element) {
+    const indicator = element.querySelector(".plant-alarm-indicator");
+    if (!indicator) return "";
+    const alarms = alarmSummary(node);
+    const visible = Boolean(alarms && alarms.visible);
+    indicator.toggleAttribute("hidden", !visible);
+    element.classList.toggle("has-alarm", Boolean(alarms && alarms.count));
+    element.classList.toggle("has-active-alarm", Boolean(alarms && alarms.active));
+    element.classList.toggle("has-unacknowledged-alarm", Boolean(alarms && alarms.unacknowledged));
+    element.classList.toggle("is-unacknowledged", Boolean(alarms && alarms.unacknowledged));
+    element.classList.toggle("is-acknowledged", Boolean(alarms && alarms.acknowledged));
+    element.classList.toggle("is-managed-alarm", Boolean(alarms && alarms.fullyManaged));
+    element.classList.toggle("has-attention-alarm", Boolean(alarms && alarms.attention));
+    element.classList.toggle("has-degraded-alarm", Boolean(alarms && alarms.degraded));
+    element.classList.toggle("has-stale-alarm", Boolean(alarms && alarms.stale));
+    ["p1", "p2", "p3", "other"].forEach(priority => {
+      const selected = Boolean(visible && alarms.priorityClass === priority);
+      element.classList.toggle("alarm-" + priority, selected);
+      indicator.classList.toggle(priority, selected);
+      indicator.querySelector(".plant-alarm-badge").classList.toggle(priority, selected);
+    });
+    if (!visible) return "";
+    indicator.querySelector(".plant-alarm-badge-label").textContent = alarms.label;
+    indicator.querySelector(".plant-alarm-badge-priority").textContent = alarms.detail;
+    indicator.querySelector("title").textContent = alarms.description;
+    indicator.setAttribute("aria-label", alarms.description);
+    return alarms.description;
   }
   function updateLive() {
     const view = currentView(); if (!view) return;
@@ -267,7 +354,11 @@
       const status = element.querySelector(".plant-status, .plant-value"), tag = element.querySelector(".plant-tag");
       if (status) status.textContent = live.text;
       if (tag) tag.textContent = live.tag;
-      element.setAttribute("aria-label", node.label + (live.text ? " · " + live.text : "") + (live.tag ? " · " + live.tag : ""));
+      const alarmDescription = updateAlarmIndicator(node, element);
+      const description = node.label + (live.text ? " · " + live.text : "") + (live.tag ? " · " + live.tag : "")
+        + (alarmDescription ? " · " + alarmDescription : "");
+      element.setAttribute("aria-label", description);
+      element.querySelector("title").textContent = description;
     });
   }
   function update(context) {

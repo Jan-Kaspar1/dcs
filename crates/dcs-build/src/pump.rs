@@ -58,6 +58,12 @@ pub struct PumpConfig {
     pub min_off_ticks: i64,
     /// Nonnegative feedback-disagreement ticks before a motor fault.
     pub motor_fault_ticks: i64,
+    /// Nonnegative site priority code for feedback disagreement (default `2`).
+    pub fault_priority: i64,
+    /// Nonnegative site priority code for the thermal protection alarm (default `2`).
+    pub thermal_priority: i64,
+    /// Nonnegative site priority code for the moisture protection alarm (default `3`).
+    pub moisture_priority: i64,
     /// Unit of the protection measurement, or `None` for an undeclared anchor.
     pub measurement_unit: Option<String>,
 }
@@ -76,6 +82,9 @@ impl PumpConfig {
             signal_base: 10_000,
             min_off_ticks: 3,
             motor_fault_ticks: 10,
+            fault_priority: 2,
+            thermal_priority: 2,
+            moisture_priority: 3,
             measurement_unit: Some(unit::M.to_string()),
         }
     }
@@ -219,7 +228,7 @@ pub struct PumpInstance {
 /// Automatic demand, duty rotation, and process thresholds remain outside.
 /// [`PlantBuilder::build`] validates allocation collisions, timing ranges,
 /// and the resulting model just as it validates primitive compositions.
-/// Returns [`BuildError::InvalidConfiguration`] for negative timing or
+/// Returns [`BuildError::InvalidConfiguration`] for negative timing/priority or
 /// overflowing point/signal allocations before changing the builder.
 pub fn pump(
     plant: &mut PlantBuilder,
@@ -560,7 +569,7 @@ pub fn pump(
     let fault_alarm = plant.add(ManagedBoolLatchingAlarmSpec::new(
         parameters([
             ("max_shelve_ticks", Value::Int(0)),
-            ("priority", Value::Int(2)),
+            ("priority", Value::Int(config.fault_priority)),
             ("class", Value::Int(2)),
             ("response_ticks", Value::Int(60)),
         ]),
@@ -578,7 +587,7 @@ pub fn pump(
     let thermal_alarm = plant.add(ManagedBoolLatchingAlarmSpec::new(
         parameters([
             ("max_shelve_ticks", Value::Int(0)),
-            ("priority", Value::Int(2)),
+            ("priority", Value::Int(config.thermal_priority)),
             ("class", Value::Int(2)),
             ("response_ticks", Value::Int(60)),
         ]),
@@ -592,7 +601,7 @@ pub fn pump(
     let moisture_alarm = plant.add(ManagedBoolLatchingAlarmSpec::new(
         parameters([
             ("max_shelve_ticks", Value::Int(0)),
-            ("priority", Value::Int(3)),
+            ("priority", Value::Int(config.moisture_priority)),
             ("class", Value::Int(2)),
             ("response_ticks", Value::Int(60)),
         ]),
@@ -947,6 +956,15 @@ fn validate_config(config: &PumpConfig, inputs: &PumpInputs) -> Result<(), Build
     ] {
         if ticks < 0 {
             return Err(invalid(field, "tick budget must be nonnegative"));
+        }
+    }
+    for (field, priority) in [
+        ("fault_priority", config.fault_priority),
+        ("thermal_priority", config.thermal_priority),
+        ("moisture_priority", config.moisture_priority),
+    ] {
+        if priority < 0 {
+            return Err(invalid(field, "alarm priority code must be nonnegative"));
         }
     }
     let control_end = config
