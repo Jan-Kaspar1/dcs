@@ -171,7 +171,7 @@ def run(args):
         if len(http(monitor, "/signals").get("equipment", [])) != 2:
             raise RuntimeError("the controller does not serve the new equipment contract; rebuild from this source")
         print(f"Open {monitor}/", flush=True)
-        print("Select Equipment, then Pump 1 or Pump 2. Choose Manual and Run request.", flush=True)
+        print("Click Pump 1 or Pump 2 in the schematic. Choose Manual and Run request.", flush=True)
         print("Ctrl+C stops both simulated processes. See docs/pump-demo.md for fault and recovery actions.", flush=True)
         if not args.no_browser:
             webbrowser.open(monitor + "/")

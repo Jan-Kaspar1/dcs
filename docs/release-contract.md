@@ -77,7 +77,9 @@ compiles against:
 - The re-exported contract vocabulary: `Direction`, `PointId`,
   `SignalId`, `Value`, `ValueKind`, `PointType`, `ChannelRef`,
   `ComponentId`, `DeviceId`, `Endpoint`, `PortRef`, `Rationalization`,
-  `Equipment`, `EquipmentControl`,
+  `Equipment`, `EquipmentControl`, `PlantView`, `PlantViewNode`,
+  `PlantViewSymbol`, `PlantViewBinding`, `PlantViewPipe`,
+  `PlantViewPipeEnd`, `PlantViewPort`, and `PlantBuilder::view`,
   `BuildError`; from `dcs-core` the served-registry types
   (`SchemaView`, `BlockInterface`, `INTERFACE_VERSION`) and
   `SchemaView::json_schema`; and from `dcs-model` the `PlantModel`

@@ -31,6 +31,7 @@ mod lint;
 mod model;
 mod schema;
 mod validate;
+mod views;
 
 pub use deploy_schema::deployment_manifest_schema;
 pub use diff::{ChangeKind, ElementChange, FieldChange, ModelDiff};
@@ -42,3 +43,7 @@ pub use model::{
     PortRef, Rationalization, RecordingDuty, Signal,
 };
 pub use validate::{End, IdCollection, ValidationError};
+pub use views::{
+    PlantView, PlantViewBinding, PlantViewNode, PlantViewPipe, PlantViewPipeEnd, PlantViewPort,
+    PlantViewSymbol,
+};

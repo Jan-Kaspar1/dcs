@@ -269,6 +269,7 @@ fn an_injected_fault_is_visible_in_a_controllers_snapshot_and_journal() {
                 points: vec![],
                 components: vec![],
                 equipment: vec![],
+                views: vec![],
             },
         )
         .unwrap();

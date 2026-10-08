@@ -165,6 +165,7 @@ pub struct PlantBuilder {
     components: Vec<ComponentInstance>,
     connections: Vec<Connection>,
     equipment: Vec<Equipment>,
+    views: Vec<dcs_model::PlantView>,
     /// Each component's spec-declared parameter set, for `build`'s
     /// checks; `None` marks a spec leaving its parameters unchecked.
     parameter_sets: Vec<(ComponentId, Option<Vec<ParamDecl>>)>,
@@ -194,6 +195,7 @@ impl PlantBuilder {
             components: Vec::new(),
             connections: Vec::new(),
             equipment: Vec::new(),
+            views: Vec::new(),
             parameter_sets: Vec::new(),
             port_sets: Vec::new(),
             next_device: 1,
@@ -206,6 +208,13 @@ impl PlantBuilder {
     /// validates references, exclusive ownership, and writable controls.
     pub fn equipment(&mut self, equipment: Equipment) -> &mut Self {
         self.equipment.push(equipment);
+        self
+    }
+
+    /// Registers a code-engineered process drawing. [`build`](Self::build)
+    /// validates references, geometry, pipework, and area navigation.
+    pub fn view(&mut self, view: dcs_model::PlantView) -> &mut Self {
+        self.views.push(view);
         self
     }
 
@@ -875,6 +884,7 @@ impl PlantBuilder {
             components: self.components,
             connections: self.connections,
             equipment: self.equipment,
+            views: self.views,
         };
         let errors = model.validate();
         if errors.is_empty() {

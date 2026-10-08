@@ -511,6 +511,9 @@ pub struct PlantModel {
     /// with no equipment; an empty collection preserves their serialization.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub equipment: Vec<Equipment>,
+    /// Code-engineered process drawings. Empty views preserve legacy document bytes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub views: Vec<crate::PlantView>,
 }
 
 /// Failure to [`PlantModel::load`] a document.

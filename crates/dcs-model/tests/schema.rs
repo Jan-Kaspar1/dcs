@@ -273,35 +273,35 @@ fn recorded_release_schema_matches_the_emitted_output() {
         ("docs/releases/v0.2.0/plant-model.schema.json", None),
         (
             "docs/releases/v0.3.0/plant-model.schema.json",
-            Some("ad3550f3d30ee9b0bbe16744aa92e51f1f95cf7d9c2a35381c945575d4361b1c"),
+            Some("91f175fa58b2f45bd44c1ce2a4c138ba9c583706f4bc4ccbcd5cc171540b2f7c"),
         ),
         (
             "docs/releases/v0.4.0/plant-model.schema.json",
-            Some("ad3550f3d30ee9b0bbe16744aa92e51f1f95cf7d9c2a35381c945575d4361b1c"),
+            Some("91f175fa58b2f45bd44c1ce2a4c138ba9c583706f4bc4ccbcd5cc171540b2f7c"),
         ),
         (
             "docs/releases/v0.5.0/plant-model.schema.json",
-            Some("ad3550f3d30ee9b0bbe16744aa92e51f1f95cf7d9c2a35381c945575d4361b1c"),
+            Some("91f175fa58b2f45bd44c1ce2a4c138ba9c583706f4bc4ccbcd5cc171540b2f7c"),
         ),
         (
             "docs/releases/v0.6.0/plant-model.schema.json",
-            Some("ad3550f3d30ee9b0bbe16744aa92e51f1f95cf7d9c2a35381c945575d4361b1c"),
+            Some("91f175fa58b2f45bd44c1ce2a4c138ba9c583706f4bc4ccbcd5cc171540b2f7c"),
         ),
         (
             "docs/releases/v0.7.0/plant-model.schema.json",
-            Some("ad3550f3d30ee9b0bbe16744aa92e51f1f95cf7d9c2a35381c945575d4361b1c"),
+            Some("91f175fa58b2f45bd44c1ce2a4c138ba9c583706f4bc4ccbcd5cc171540b2f7c"),
         ),
         (
             "docs/releases/v0.8.0/plant-model.schema.json",
-            Some("ad3550f3d30ee9b0bbe16744aa92e51f1f95cf7d9c2a35381c945575d4361b1c"),
+            Some("91f175fa58b2f45bd44c1ce2a4c138ba9c583706f4bc4ccbcd5cc171540b2f7c"),
         ),
         (
             "docs/releases/v0.9.0/plant-model.schema.json",
-            Some("ad3550f3d30ee9b0bbe16744aa92e51f1f95cf7d9c2a35381c945575d4361b1c"),
+            Some("91f175fa58b2f45bd44c1ce2a4c138ba9c583706f4bc4ccbcd5cc171540b2f7c"),
         ),
         (
             "docs/releases/v0.10.0/plant-model.schema.json",
-            Some("ad3550f3d30ee9b0bbe16744aa92e51f1f95cf7d9c2a35381c945575d4361b1c"),
+            Some("91f175fa58b2f45bd44c1ce2a4c138ba9c583706f4bc4ccbcd5cc171540b2f7c"),
         ),
     ] {
         let recorded = std::fs::read(workspace_root().join(path)).unwrap_or_else(|error| {

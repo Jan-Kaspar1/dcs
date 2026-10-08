@@ -77,7 +77,8 @@ The steps below use the default local launch and helper addresses.
 
 ## Try manual operation and protection
 
-1. Select **Equipment**, then **Pump 1**.
+1. Open the plant overview from the left navigation and click the **Pump 1**
+   symbol. Its equipment drawer contains the pump's controls, status, and alarms.
 2. Select **Manual**, then **Run request**. After the configured protection-clear
    holdout, the command and running contact become true.
 3. In another terminal, inject bad quality on the simulated thermal contact:
@@ -87,9 +88,10 @@ The steps below use the default local launch and helper addresses.
    ```
 
 4. The protection state trips and the command stops. The contact quality and
-   managed thermal alarm identify the cause. Acknowledging the alarm changes
-   its acknowledgment state; it does not clear the bad contact or stop a
-   standing run request.
+   managed thermal alarm identify the cause. The top alarm strip opens the full
+   alarms and events list; selecting a pump alarm opens its owning equipment's
+   control drawer. Acknowledging the alarm changes its acknowledgment state;
+   it does not clear the bad contact or stop a standing run request.
 5. Select **Stop request**, then clear the simulated contact fault:
 
    ```sh
@@ -104,6 +106,36 @@ service can resume a standing demand after the applicable holdout. This slice
 uses the existing automatic recovery policy, with no separate fault-reset
 command. The operator surface exposes command request, actual running feedback,
 and protection/fault state separately.
+
+## Configure the schematic in code
+
+The operator UI provides the plant overview and individual pump areas in the
+left navigation. Click a bound symbol to open its live controls, feedback,
+protection status, and alarms. The top alarm strip opens the complete alarm
+list and the equipment behind an alarm.
+
+The plant composition declares the areas, reusable symbols, model bindings,
+and pipe routes through `PlantBuilder::view`. See
+`crates/dcs-build/examples/pump.rs` for the working configuration. The reusable
+symbol set covers pumps, motors, valves, tanks, numeric measurements, and
+labels. Their state and controls come from the same model as the controller.
+
+For example, after composing the `p101` equipment:
+
+```rust
+let mut area = PlantView::new("pumps", "Pump area");
+let mut symbol = PlantViewNode::new("pump-1", PlantViewSymbol::Pump, "Pump 1", 520, 300);
+symbol.binding = Some(PlantViewBinding::Equipment("p101".into()));
+area.nodes.push(symbol);
+plant.view(area);
+```
+
+Change the view declarations in Rust, rebuild the example, and restart the
+demo to try a different layout. Model validation rejects missing bindings,
+invalid navigation trees, and unsupported geometry before the controller
+starts. Unbound symbols remain drawing elements and show no process values.
+The browser displays the configured plant and submits operator commands
+through the existing validated command path.
 
 ## Try automatic demand
 

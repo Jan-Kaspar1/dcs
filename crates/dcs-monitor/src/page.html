@@ -120,11 +120,61 @@
   #equipment-close { margin-left: 0.5rem; }
   a.nav-equipment { color: inherit; }
 </style>
+<link rel="stylesheet" href="/plant-view.css">
 </head>
-<body>
-<h1>Plant monitoring</h1>
-<p id="status">connecting&hellip;</p>
-<p id="feed-state" hidden></p>
+<body class="workspace-plant">
+<header id="plant-header">
+  <a class="plant-brand" href="#plant" aria-label="Plant overview">DCS</a>
+  <div class="plant-header-title"><h1>Process operations</h1><p>Plant monitoring and control</p></div>
+  <p id="status">Connecting…</p>
+  <p id="feed-state" hidden></p>
+  <div id="plant-alarm-strip" aria-live="polite"><span>Waiting for alarm state…</span></div>
+</header>
+<aside id="plant-sidebar" aria-label="Plant navigation">
+  <div class="plant-sidebar-heading">PLANT</div>
+  <nav id="plant-area-list" aria-label="Plant areas"></nav>
+  <div class="plant-sidebar-heading">OPERATIONS</div>
+  <button type="button" class="plant-nav-button" data-workspace="plant">Schematic</button>
+  <button type="button" class="plant-nav-button" data-workspace="alarms">Alarms and events</button>
+  <div class="plant-sidebar-footer"><span id="plant-connection-state">Connecting</span><p>Live state from the controller</p></div>
+</aside>
+<main id="plant-content">
+  <section id="plant-workspace">
+    <div class="plant-view-heading"><div><p class="plant-eyebrow">PLANT SCHEMATIC</p><h2 id="plant-view-title">Plant overview</h2></div></div>
+    <p id="plant-view-note"></p>
+    <div class="plant-canvas-wrap"><svg id="plant-canvas" viewBox="0 0 1200 760" role="group" aria-label="Live plant schematic"></svg></div>
+  </section>
+  <section id="alarm-workspace" hidden><section id="alarm-pane" hidden>
+<h2>Alarms</h2>
+<p id="alarm-summary"></p>
+<p><label>state
+  <select id="alarm-filter">
+    <option value="all">all</option>
+    <option value="active">active</option>
+    <option value="unacknowledged">unacknowledged</option>
+    <option value="shelved">shelved</option>
+    <option value="suppressed">suppressed</option>
+    <option value="out_of_service">out of service</option>
+  </select></label></p>
+<table>
+  <thead>
+    <tr>
+      <th>Component</th><th>Status</th><th>Value</th><th>Quality</th>
+      <th>Last changed</th><th>Priority</th><th></th>
+    </tr>
+  </thead>
+  <tbody id="alarms"></tbody>
+</table>
+<div id="managed-lists"></div>
+<h3>Alarm journal</h3>
+<table>
+  <thead>
+    <tr><th>Seq</th><th>Tick</th><th>Event</th></tr>
+  </thead>
+  <tbody id="alarm-journal"></tbody>
+</table>
+</section></section>
+<section id="engineering-workspace" hidden>
 
 <section id="overview" hidden>
 <h2>Controller pairs</h2>
@@ -167,36 +217,7 @@
 <div id="equipment-list"></div>
 </section>
 
-<section id="alarm-pane" hidden>
-<h2>Alarms</h2>
-<p id="alarm-summary"></p>
-<p><label>state
-  <select id="alarm-filter">
-    <option value="all">all</option>
-    <option value="active">active</option>
-    <option value="unacknowledged">unacknowledged</option>
-    <option value="shelved">shelved</option>
-    <option value="suppressed">suppressed</option>
-    <option value="out_of_service">out of service</option>
-  </select></label></p>
-<table>
-  <thead>
-    <tr>
-      <th>Component</th><th>Status</th><th>Value</th><th>Quality</th>
-      <th>Last changed</th><th>Priority</th><th></th>
-    </tr>
-  </thead>
-  <tbody id="alarms"></tbody>
-</table>
-<div id="managed-lists"></div>
-<h3>Alarm journal</h3>
-<table>
-  <thead>
-    <tr><th>Seq</th><th>Tick</th><th>Event</th></tr>
-  </thead>
-  <tbody id="alarm-journal"></tbody>
-</table>
-</section>
+
 
 <section id="protection-pane" hidden>
 <h2>Protection layer</h2>
@@ -215,34 +236,7 @@ own surface: the HMI alarm path is never presented as the safeguard.</p>
 </table>
 </section>
 
-<section id="equipment" hidden>
-<h2>Equipment — <span id="equipment-name"></span></h2>
-<p class="equipment-nav"><a href="#alarm-pane">alarms</a>
-<button type="button" id="equipment-close">close</button></p>
-<p id="equipment-pair" class="equipment-line"></p>
-<p id="equipment-io" class="equipment-line"></p>
-<div id="equipment-faceplate"></div>
-<div id="equipment-rationalization"></div>
-<h3>Live points</h3>
-<table>
-  <thead>
-    <tr>
-      <th>Point</th><th>Signal</th><th>Direction</th><th>Type</th>
-      <th>Value</th><th>Quality</th><th>Unit</th><th>Tick</th>
-    </tr>
-  </thead>
-  <tbody id="equipment-points"></tbody>
-</table>
-<h3>Trends</h3>
-<div id="equipment-trends"></div>
-<h3>History</h3>
-<table>
-  <thead>
-    <tr><th>Seq</th><th>Tick</th><th>Event</th></tr>
-  </thead>
-  <tbody id="equipment-journal"></tbody>
-</table>
-</section>
+
 
 <h2>Components</h2>
 <div id="faceplates"></div>
@@ -278,6 +272,37 @@ own surface: the HMI alarm path is never presented as the safeguard.</p>
 <div id="command-actor"></div>
 <pre id="receipt"></pre>
 </div>
+</section>
+</main>
+<section id="equipment" hidden>
+<h2>Equipment — <span id="equipment-name"></span></h2>
+<p class="equipment-nav"><button type="button" data-workspace="alarms">Alarm list</button>
+<button type="button" id="equipment-close">close</button></p>
+<p id="equipment-pair" class="equipment-line"></p>
+<p id="equipment-io" class="equipment-line"></p>
+<div id="equipment-faceplate"></div>
+<div id="equipment-rationalization" hidden></div>
+<details class="equipment-observation"><summary>Measurements and signals</summary>
+<table>
+  <thead>
+    <tr>
+      <th>Point</th><th>Signal</th><th>Direction</th><th>Type</th>
+      <th>Value</th><th>Quality</th><th>Unit</th><th>Tick</th>
+    </tr>
+  </thead>
+  <tbody id="equipment-points"></tbody>
+</table>
+</details><details class="equipment-observation"><summary>Trends</summary>
+<div id="equipment-trends"></div>
+</details><details class="equipment-observation"><summary>History</summary>
+<table>
+  <thead>
+    <tr><th>Seq</th><th>Tick</th><th>Event</th></tr>
+  </thead>
+  <tbody id="equipment-journal"></tbody>
+</table>
+</details><p id="equipment-receipt" aria-live="polite"></p></section>
+<script src="/plant-view.js"></script>
 
 <script>
 "use strict";
@@ -1449,6 +1474,7 @@ async function refreshOverview() {
       new Date().toLocaleTimeString();
   } catch (error) {
     document.getElementById("status").textContent = "poll failed: " + error;
+    renderPlantWorkspace();
   } finally {
     overviewPolling = false;
   }
@@ -1595,6 +1621,7 @@ async function refresh() {
     // its health lines this snapshot's sections and the roles this
     // poll just polled.
     renderEquipment(snapshot, telemetry, forced);
+    renderPlantWorkspace();
   } catch (error) {
     // A poll whose reads fail or abort lands nothing fresh: the values
     // on the page stay last-known, so the standing publication takes
@@ -3016,6 +3043,8 @@ function commandPoint(command) {
 // naming the owning component the delegated handler selects — the
 // pane's composition is the equipment section's note.
 function equipmentLink(component, content) {
+  const owner = declaredEquipment().find(item => equipmentMembers(item).some(member => member.name === component));
+  component = owner ? "equipment:" + owner.id : component;
   return "<a class=\"nav-equipment\" href=\"#equipment\" data-component=\"" +
     esc(component) + "\">" + content + "</a>";
 }
@@ -3073,7 +3102,7 @@ function alarmRow(descriptor, port, sample, telemetry, forced, parameters, actio
     managed: MANAGED_STATES.filter(state => states.has(state)),
     degraded: !sample || !isGood(sample.quality),
     html: "<tr class=\"alarm " + cls + "\">" +
-      "<td>" + equipmentLink(descriptor.name, esc(descriptor.label)) +
+      "<td>" + equipmentLink(descriptor.name, esc(port.point == null ? descriptor.label : pointName(port.point))) +
         rationalizationMarkup(descriptor.name) + "</td>" +
       "<td>" + esc(port.name) + (meta ? " · " + esc(meta.name) : "") +
         truthFlags(descriptor, telemetry) + "</td>" +
@@ -3371,6 +3400,49 @@ function equipmentJournalEntries(descriptor) {
   return journalEntries.filter(attributed).sort((a, b) => a.seq - b.seq);
 }
 
+
+function setPlantWorkspace(mode) {
+  if (!["plant", "alarms", "engineering"].includes(mode)) return;
+  document.body.classList.remove("workspace-plant", "workspace-alarms", "workspace-engineering");
+  document.body.classList.add("workspace-" + mode);
+  for (const name of ["plant", "alarm", "engineering"]) {
+    document.getElementById(name + "-workspace").hidden =
+      (name === "alarm" ? "alarms" : name) !== mode;
+  }
+  for (const button of document.querySelectorAll("[data-workspace]:not(.plant-area)")) {
+    button.classList.toggle("selected", button.dataset.workspace === mode);
+    button.setAttribute("aria-current", button.dataset.workspace === mode ? "page" : "false");
+  }
+}
+
+function renderPlantWorkspace() {
+  if (!rendered.snapshot) return;
+  const snapshot = rendered.snapshot, telemetry = rendered.telemetry;
+  const stale = feed.stale !== null;
+  if (window.DcsPlantViews) {
+    window.DcsPlantViews.update({ index, snapshot, telemetry,
+      descriptors: snapshot.descriptors || [], stale,
+      selectEquipment(selection) { selectEquipment(selection); }
+    });
+  }
+  const io = ioHealthSummary(snapshot.io_health);
+  document.getElementById("plant-connection-state").textContent = stale ? "Connection stale" : io.text;
+  const alarms = alarmJoin(snapshot).standing.map(({descriptor, port}) => ({
+    descriptor, port, active: isAsserted(portSample(port, telemetry)),
+    unack: isAsserted(flagSample(descriptor, telemetry, "unacknowledged"))
+  })).filter(row => row.active || row.unack);
+  const strip = document.getElementById("plant-alarm-strip");
+  const count = "<button type=\"button\" class=\"plant-alarm-count" + (alarms.length ? " is-alarm" : "") + "\" data-workspace=\"alarms\">" +
+    alarms.length + (alarms.length === 1 ? " alarm" : " alarms") + " · Alarm list</button>";
+  strip.innerHTML = count + (stale ? "<span class=\"plant-alarm-item\">Last known state — connection stale</span>" :
+    alarms.length ? alarms.slice(0, 3).map(row => {
+      const owner = declaredEquipment().find(item => equipmentMembers(item).some(member => member.name === row.descriptor.name));
+      const target = owner ? "equipment:" + owner.id : row.descriptor.name;
+      return "<button type=\"button\" class=\"plant-alarm-item bad\" data-alarm-equipment=\"" + esc(target) + "\">" +
+        esc(pointName(row.port.point)) + " · " + (row.unack ? "unacknowledged" : "active") + "</button>";
+    }).join("") : "<span class=\"plant-alarm-clear\">No standing alarms</span>");
+}
+
 function declaredEquipment() {
   return index.equipment || [];
 }
@@ -3436,6 +3508,23 @@ function equipmentControls(equipment, telemetry, forced, members) {
     (alarms.length ? "<h3>Equipment alarms</h3>" + alarmRows : "") + "</section>";
 }
 
+// Ordered, model-declared feedback stays separate from command requests.
+function equipmentFeedback(equipment, telemetry, members) {
+  const commandPoints = new Set(equipment.controls.map(control => control.point));
+  const alarmPoints = new Set(members.filter(member => member.ports.some(port =>
+    port.name === "alarm" && port.direction === "out" && port.kind === "bool"))
+    .flatMap(member => member.ports.map(port => port.point)));
+  const points = equipment.points.filter(point => !commandPoints.has(point) && !alarmPoints.has(point)).slice(0, 6);
+  return "<section class=\"equipment-feedback\"><h3>Live feedback and protection</h3><dl>" + points.map(point => {
+    const meta = metaByPoint.get(point);
+    const sample = (telemetry.get(point) || {}).sample;
+    const trusted = sample && isGood(sample.quality) && feed.stale === null;
+    return "<div><dt title=\"" + esc(meta && meta.description || "") + "\">" + esc(pointName(point)) + "</dt><dd class=\"" +
+      (trusted ? "" : "uncertain") + "\">" + (sample ? esc(formatValue(sample.value)) : "—") +
+      (trusted ? "" : " · " + esc(feed.stale !== null ? "last known / stale" : sample ? formatQuality(sample.quality) : "no sample")) + "</dd></div>";
+  }).join("") + "</dl></section>";
+}
+
 // Renders the pane for the current selection from the poll's inputs —
 // the render refresh() performs and a between-polls navigation repeats
 // from `rendered`. An empty selection, or one the snapshot no longer
@@ -3474,11 +3563,24 @@ function renderEquipment(snapshot, telemetry, forced) {
   const diagnostics = new Map(snapshot.components.map(c => [c.name, c]));
   const parameters = new Map(
     (snapshot.parameters || []).map(p => [p.name, p.values]));
-  document.getElementById("equipment-faceplate").innerHTML =
-    equipment ? equipmentControls(equipment, telemetry, forced, members) +
-      "<details class=\"equipment-internals\"><summary>Internal components and tuning</summary>" +
-      members.map(member => faceplateMarkup(member, diagnostics.get(member.name), telemetry, forced, parameters)).join("") +
-      "</details>" : faceplateMarkup(descriptor, diagnostics.get(descriptor.name), telemetry, forced, parameters);
+  const surface = document.getElementById("equipment-faceplate");
+  const markup = equipment ? equipmentFeedback(equipment, telemetry, members) +
+    equipmentControls(equipment, telemetry, forced, members) :
+    faceplateMarkup(descriptor, diagnostics.get(descriptor.name), telemetry, forced, parameters);
+  // Keep operator buttons in place between actual state changes. A poll must
+  // not replace a button under a pointer or repeatedly discard keyboard focus.
+  if (surface.renderedMarkup !== markup) {
+    const focused = surface.contains(document.activeElement) ? document.activeElement : null;
+    const focusPoint = focused && focused.dataset.point;
+    const focusLevel = focused && focused.dataset.level;
+    surface.innerHTML = markup;
+    surface.renderedMarkup = markup;
+    if (focusPoint != null && focused.tagName === "BUTTON") {
+      const replacement = Array.from(surface.querySelectorAll("button[data-point]"))
+        .find(button => button.dataset.point === focusPoint && button.dataset.level === focusLevel);
+      if (replacement) replacement.focus({ preventScroll: true });
+    }
+  }
   restoreEdits("#equipment-faceplate", captured);
   document.getElementById("equipment-rationalization").innerHTML =
     equipment ? members.map(member => rationalizationMarkup(member.name)).join("") :
@@ -4512,11 +4614,30 @@ async function submitUnforce(button) {
 }
 
 async function init() {
+  setPlantWorkspace("plant");
+  document.addEventListener("click", event => {
+    const navigation = event.target.closest("[data-workspace]");
+    if (navigation) setPlantWorkspace(navigation.dataset.workspace);
+    const alarm = event.target.closest("[data-alarm-equipment]");
+    if (alarm) selectEquipment(alarm.dataset.alarmEquipment);
+    if (event.target.closest(".plant-brand")) {
+      setPlantWorkspace("plant");
+      if (window.DcsPlantViews) window.DcsPlantViews.selectArea("overview");
+      selectEquipment(null);
+    }
+    if (event.target.closest(".plant-area")) { setPlantWorkspace("plant"); selectEquipment(null); }
+  });
+  const receipt = document.getElementById("receipt");
+  new MutationObserver(() => {
+    document.getElementById("equipment-receipt").textContent = receipt.textContent;
+  }).observe(receipt, { childList: true, characterData: true, subtree: true });
+
   // Overview mode: configured ?pair= parameters switch the page to the
   // plant overview — the per-pair detail surface stays hidden and the
   // cards poll each pair's own endpoints, so the serving origin's model
   // never loads here.
   if (overviewPairs.length > 0) {
+    setPlantWorkspace("engineering");
     document.getElementById("detail").hidden = true;
     document.getElementById("overview").hidden = false;
     renderOverview();
@@ -4536,6 +4657,7 @@ async function init() {
   renderEquipmentList();
   document.getElementById("equipment-list").addEventListener("click", event => {
     const choice = event.target.closest("a.equipment-choice");
+    if (choice) event.preventDefault();
     if (choice) selectEquipment("equipment:" + choice.dataset.equipment);
   });
   const select = document.getElementById("command-point");
@@ -4675,6 +4797,7 @@ async function init() {
   document.getElementById("alarm-pane").addEventListener("click", async event => {
     const nav = event.target.closest("a.nav-equipment");
     if (nav) {
+      event.preventDefault();
       const owner = declaredEquipment().find(item => equipmentMembers(item)
         .some(member => member.name === nav.dataset.component));
       selectEquipment(owner ? "equipment:" + owner.id : nav.dataset.component);

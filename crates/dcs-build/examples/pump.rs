@@ -6,7 +6,10 @@
 
 use dcs_build::pump::{PumpConfig, PumpInputs, PumpLinks, pump};
 use dcs_build::specs::DigitalInputSpec;
-use dcs_build::{Direction, PlantBuilder, PointId, SignalId, Value, parameters, unit};
+use dcs_build::{
+    Direction, PlantBuilder, PlantView, PlantViewBinding, PlantViewNode, PlantViewPipe,
+    PlantViewPort, PlantViewSymbol, PointId, SignalId, Value, parameters, unit,
+};
 
 fn main() {
     let mut plant = PlantBuilder::new();
@@ -21,6 +24,10 @@ fn main() {
     let anchor = plant.internal_input::<f64>(PointId(5), 0.0, false);
     let trusted = plant.internal_input::<bool>(PointId(6), true, false);
     plant.unit(measurement, unit::M);
+    plant
+        .signal(SignalId(4), "protective-measurement", measurement)
+        .unit(unit::M)
+        .description("Simulated protective measurement");
     let healthy_power = plant.add(DigitalInputSpec::new(parameters([(
         "invert",
         Value::Bool(true),
@@ -77,8 +84,130 @@ fn main() {
         plant.connect(run, command);
     }
 
+    // The operator schematic is configured by this plant's Rust composition.
+    // Symbols bind to declared equipment and signals; geometry does not wire
+    // control logic. The two independent test loops are shown explicitly.
+    plant.view(PlantView {
+        id: "overview".into(),
+        label: "Pump test rig".into(),
+        parent: None,
+        nodes: vec![
+            symbol(
+                "feedback-1",
+                PlantViewSymbol::Label,
+                "Running contact",
+                100,
+                220,
+                None,
+            ),
+            symbol(
+                "pump-1",
+                PlantViewSymbol::Pump,
+                "Pump 1",
+                520,
+                220,
+                Some(PlantViewBinding::Equipment("p101".into())),
+            ),
+            symbol(
+                "output-1",
+                PlantViewSymbol::Label,
+                "Motor output",
+                850,
+                220,
+                None,
+            ),
+            symbol(
+                "feedback-2",
+                PlantViewSymbol::Label,
+                "Running contact",
+                100,
+                450,
+                None,
+            ),
+            symbol(
+                "pump-2",
+                PlantViewSymbol::Pump,
+                "Pump 2",
+                520,
+                450,
+                Some(PlantViewBinding::Equipment("p102".into())),
+            ),
+            symbol(
+                "output-2",
+                PlantViewSymbol::Label,
+                "Motor output",
+                850,
+                450,
+                None,
+            ),
+            symbol(
+                "protection-input",
+                PlantViewSymbol::Measurement,
+                "Protection input",
+                505,
+                65,
+                Some(PlantViewBinding::Point(measurement.id())),
+            ),
+        ],
+        pipes: vec![
+            pipe("feedback-1", "pump-1"),
+            pipe("pump-1", "output-1"),
+            pipe("feedback-2", "pump-2"),
+            pipe("pump-2", "output-2"),
+        ],
+    });
+    for (index, tag) in ["p101", "p102"].into_iter().enumerate() {
+        plant.view(PlantView {
+            id: tag.into(),
+            label: format!("Pump {}", index + 1),
+            parent: Some("overview".into()),
+            nodes: vec![symbol(
+                "pump",
+                PlantViewSymbol::Pump,
+                &format!("Pump {}", index + 1),
+                520,
+                300,
+                Some(PlantViewBinding::Equipment(tag.into())),
+            )],
+            pipes: vec![],
+        });
+    }
+
     let model = plant
         .build()
         .expect("the pump demonstration model validates");
     println!("{}", serde_json::to_string_pretty(&model).unwrap());
+}
+
+fn symbol(
+    id: &str,
+    symbol: PlantViewSymbol,
+    label: &str,
+    x: u32,
+    y: u32,
+    binding: Option<PlantViewBinding>,
+) -> PlantViewNode {
+    PlantViewNode {
+        id: id.into(),
+        symbol,
+        label: label.into(),
+        x,
+        y,
+        binding,
+    }
+}
+
+fn pipe(from: &str, to: &str) -> PlantViewPipe {
+    // Ports and paths describe only the drawing. The loopbacks above are the
+    // actual simulated field wiring.
+    PlantViewPipe {
+        from: dcs_build::PlantViewPipeEnd {
+            node: from.into(),
+            port: PlantViewPort::E,
+        },
+        to: dcs_build::PlantViewPipeEnd {
+            node: to.into(),
+            port: PlantViewPort::W,
+        },
+    }
 }

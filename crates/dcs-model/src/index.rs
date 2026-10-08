@@ -113,6 +113,9 @@ pub struct SignalIndex {
     /// component identities rather than introducing another value schema.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub equipment: Vec<Equipment>,
+    /// Read-only process drawings referencing this index's model entities.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub views: Vec<crate::PlantView>,
 }
 
 impl SignalIndex {
@@ -191,6 +194,7 @@ impl PlantModel {
             points,
             components,
             equipment: self.equipment.clone(),
+            views: self.views.clone(),
         }
     }
 }

@@ -63,6 +63,13 @@ impl fmt::Display for End {
 /// offending element by id, name, or connection index.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ValidationError {
+    /// A code-engineered process drawing has invalid geometry or references.
+    InvalidPlantView {
+        /// View identity, or empty for a document-wide bound.
+        view: String,
+        /// Concrete violation within the drawing contract.
+        reason: String,
+    },
     /// An equipment declaration omits a meaningful identity or member set.
     EmptyEquipmentField {
         /// The declared equipment id, possibly empty.
@@ -373,6 +380,9 @@ pub enum ValidationError {
 impl fmt::Display for ValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidPlantView { view, reason } => {
+                write!(f, "plant view {view:?} is invalid: {reason}")
+            }
             Self::EmptyEquipmentField { equipment, field } => {
                 write!(f, "equipment {equipment:?} has empty {field}")
             }
@@ -753,6 +763,7 @@ impl PlantModel {
     /// Returns every error found; an empty vector means the model is valid.
     pub fn validate(&self) -> Vec<ValidationError> {
         let mut errors = Vec::new();
+        crate::views::validate(self, &mut errors);
 
         let devices = index_by_id(
             IdCollection::Device,

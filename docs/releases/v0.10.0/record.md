@@ -24,7 +24,7 @@ carried.
 | Commit | *pending* — the tagged `main` commit carrying this record, the revision this record's schemas are emitted at. A commit cannot name its own sha, so the supervisor's publication commit fills this field; the cut lands on it and `reference-plant/Cargo.lock` is re-resolved against it in the same step (see the post-cut checklist) |
 | Crate versions | `0.10.0` for every crate in the release set — one workspace version covers `dcs-build`, `dcs-core`, `dcs-model` (and the `dcs-model` / `dcs-controller` binaries built from it), `dcs-monitor` (shipping `dcs-ctl` and `dcs-alarm-report`), `dcs-plant` (`dcs-plant-server`), and `dcs-sim-net` (`dcs-plant-ctl`); the `[workspace.package]` bump and the regenerated workspace `Cargo.lock` land with this publication |
 | Plant-model JSON Schema | `plant-model.schema.json` beside this record — `dcs-model schema` emitted at the recorded commit, pinned byte-for-byte with its sha256 by the schema drift test in `crates/dcs-model/tests/schema.rs`. Includes optional equipment ownership, ordered summary points, and labeled controls; pending artifact copies track this emission under the existing drift-test procedure |
-| Plant-model schema sha256 | `ad3550f3d30ee9b0bbe16744aa92e51f1f95cf7d9c2a35381c945575d4361b1c` |
+| Plant-model schema sha256 | `91f175fa58b2f45bd44c1ce2a4c138ba9c583706f4bc4ccbcd5cc171540b2f7c` |
 | Served-registry JSON Schema | `block-interfaces.schema.json` beside this record — `dcs-model interface-schema` emitted at the recorded commit, pinned byte-for-byte with its sha256 by the drift test in `crates/dcs-model/tests/interface_schema.rs`. Byte-identical to `v0.9.0`'s recorded artifact. Unchanged since `v0.3.0`'s recorded commit — decision 108's `usurped` sync state and `standby_usurped` pair-fault kind are payload values the registry's kinds do not enumerate |
 | Served-registry schema sha256 | `ddc00496814a4e8cd0d6ec8a5d9fbb95e83f518dcd927b17a4802f13ac84013a` |
 | Dynamics-document JSON Schema | `dynamics.schema.json` beside this record — `dcs-plant-server --dynamics-schema` emitted at the recorded commit, pinned byte-for-byte with its sha256 by the drift test in `crates/dcs-plant/tests/dynamics_schema.rs`. Byte-identical to `v0.9.0`'s recorded artifact. Unchanged since `v0.3.0`'s recorded commit |
@@ -97,6 +97,15 @@ the `v0.9.0` record landed:
   `SignalIndex` carries the same equipment declaration and optional
   `ComponentRecord.id` identities for descriptor joins. Equipment-only
   changes also appear in `ModelDiff` and the model CLI's diff listing.
+- Code-engineered process drawings: `PlantBuilder::view` registers typed
+  `PlantView` areas, library symbols, and presentation pipework. Optional
+  `PlantModel.views` and `SignalIndex.views` carry the same read-only
+  declarations, referencing existing equipment, components, and numeric
+  points. Validation rejects missing or incompatible bindings, invalid
+  geometry, broken area hierarchies, and pipe ends outside their view.
+  Views grant no command authority and change no control wiring. Model
+  diffs include them, and the library-plant merge remaps live references
+  and namespaces area identities with their parent links.
 
 The equipment amendment grows the supported engineering surface and
 the optional model and signal-index metadata. It uses existing point
@@ -168,8 +177,8 @@ The determination:
 - `MODEL_VERSION` holds at `1`; `PlantModel::load` still accepts
   exactly that version. A `version: 1` document written against
   `v0.9.0` validates unchanged under `v0.10.0` tooling. The new schema
-  adds optional `equipment`; older documents omit it and decode an
-  empty list, and empty lists serialize without that key.
+  adds optional `equipment` and `views`; older documents omit them and
+  decode empty lists, and empty lists serialize without those keys.
 - The checkpoint format set holds: `Checkpoint.format_version` still
   negotiates against `SUPPORTED_FORMAT_VERSIONS` (`{0, 1}`; absent
   reads as `0`), and `CHECKPOINT_FORMAT_VERSION` is still `1`.
@@ -180,14 +189,14 @@ The determination:
 - Existing `PlantBuilder` compositions keep their signatures and
   emit flat documents until they register equipment. Direct Rust
   literals of `PlantModel`, `SignalIndex`, and `ModelDiff` must supply
-  `equipment: Vec::new()` when unused; a `ComponentRecord` literal
+  `equipment: Vec::new()` and `views: Vec::new()` when unused; a `ComponentRecord` literal
   supplies `id: None` when no model identity is available. These source
   additions are named under the `0.x` minor-release policy. Exhaustive
   matches on `BuildError` must handle `InvalidConfiguration`, and
   exhaustive matches on `ValidationError` must handle the new equipment
-  validation variants. Non-Rust
+  validation variants and `InvalidPlantView`. Non-Rust
   consumers use this record's updated plant-model schema when screening
-  equipment-bearing documents; the other three schemas are unchanged.
+  equipment- or view-bearing documents; the other three schemas are unchanged.
 - The served signal index adds optional equipment metadata and
   component identities. Legacy indexes deserialize with those fields
   absent, and existing consumers that ignore additional JSON fields

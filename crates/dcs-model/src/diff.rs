@@ -99,6 +99,9 @@ pub struct ModelDiff {
     /// Added, removed, and changed equipment, ordered by string identity.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub equipment: Vec<ElementChange>,
+    /// Added, removed, and changed process drawings, ordered by identity.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub views: Vec<ElementChange>,
 }
 
 impl ModelDiff {
@@ -110,6 +113,7 @@ impl ModelDiff {
             && self.components.is_empty()
             && self.connections.is_empty()
             && self.equipment.is_empty()
+            && self.views.is_empty()
     }
 }
 
@@ -158,6 +162,13 @@ impl PlantModel {
                 &revised.equipment,
                 |equipment| equipment.id.clone(),
                 |equipment| format!("equipment {:?}", equipment.id),
+                |_| None,
+            ),
+            views: diff_elements(
+                &self.views,
+                &revised.views,
+                |view| view.id.clone(),
+                |view| format!("plant view {:?}", view.id),
                 |_| None,
             ),
         }

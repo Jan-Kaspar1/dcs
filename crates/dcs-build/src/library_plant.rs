@@ -276,6 +276,7 @@ pub fn library_plant(config: &LibraryPlantConfig) -> Result<LibraryPlant, BuildE
         components: Vec::new(),
         connections: Vec::new(),
         equipment: Vec::new(),
+        views: Vec::new(),
     };
     for (frame, train) in [
         (STATION_FRAME, &station.model),
@@ -322,6 +323,32 @@ pub fn library_plant(config: &LibraryPlantConfig) -> Result<LibraryPlant, BuildE
 /// unrenamed, so the merged document cannot carry a dangling reference
 /// into another train's id space.
 fn merge(plant: &mut PlantModel, frame: IdFrame, train: &PlantModel) {
+    let namespace = |id: &str| {
+        if frame == PLANT_FRAMES[0] {
+            id.to_string()
+        } else {
+            format!("{}:{id}", frame.components)
+        }
+    };
+    for view in &train.views {
+        let mut view = view.clone();
+        view.id = namespace(&view.id);
+        view.parent = view.parent.as_deref().map(namespace);
+        for node in &mut view.nodes {
+            node.binding = node.binding.as_ref().map(|binding| match binding {
+                dcs_model::PlantViewBinding::Equipment(id) => {
+                    dcs_model::PlantViewBinding::Equipment(namespace(id))
+                }
+                dcs_model::PlantViewBinding::Component(id) => {
+                    dcs_model::PlantViewBinding::Component(frame.component(*id))
+                }
+                dcs_model::PlantViewBinding::Point(id) => {
+                    dcs_model::PlantViewBinding::Point(frame.point(*id))
+                }
+            });
+        }
+        plant.views.push(view);
+    }
     for equipment in &train.equipment {
         let mut equipment = equipment.clone();
         if frame != PLANT_FRAMES[0] {
@@ -378,6 +405,70 @@ fn shift_endpoint(frame: IdFrame, endpoint: &Endpoint) -> Endpoint {
             component: frame.component(*component),
             name: name.clone(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod view_tests {
+    use super::*;
+    use dcs_model::{Equipment, PlantView, PlantViewBinding, PlantViewNode, PlantViewSymbol};
+
+    #[test]
+    fn merging_views_preserves_navigation_and_remaps_all_live_bindings() {
+        let mut train =
+            PlantModel::load(include_str!("../../dcs-model/fixtures/minimal.json")).unwrap();
+        train.equipment.push(Equipment {
+            id: "feed".to_string(),
+            label: "Feed".to_string(),
+            kind: "actuator".to_string(),
+            components: vec![ComponentId(1)],
+            points: vec![PointId(10)],
+            controls: Vec::new(),
+        });
+        let mut view = PlantView::new("overview", "Train");
+        for (id, symbol, binding) in [
+            (
+                "equipment",
+                PlantViewSymbol::Pump,
+                PlantViewBinding::Equipment("feed".to_string()),
+            ),
+            (
+                "component",
+                PlantViewSymbol::Motor,
+                PlantViewBinding::Component(ComponentId(1)),
+            ),
+            (
+                "measurement",
+                PlantViewSymbol::Measurement,
+                PlantViewBinding::Point(PointId(10)),
+            ),
+        ] {
+            let mut node = PlantViewNode::new(id, symbol, id, 100, 100);
+            node.binding = Some(binding);
+            view.nodes.push(node);
+        }
+        let mut detail = PlantView::new("detail", "Train detail");
+        detail.parent = Some("overview".to_string());
+        train.views = vec![view, detail];
+        let mut plant = crate::PlantBuilder::new().build().unwrap();
+        merge(&mut plant, STATION_FRAME, &train);
+        merge(&mut plant, DOSING_FRAME, &train);
+        assert!(plant.validate().is_empty());
+        assert_eq!(plant.views[0], train.views[0]);
+        assert_eq!(plant.views[2].id, "10000:overview");
+        assert_eq!(plant.views[3].parent.as_deref(), Some("10000:overview"));
+        assert_eq!(
+            plant.views[2].nodes[0].binding,
+            Some(PlantViewBinding::Equipment("10000:feed".to_string()))
+        );
+        assert_eq!(
+            plant.views[2].nodes[1].binding,
+            Some(PlantViewBinding::Component(ComponentId(10001)))
+        );
+        assert_eq!(
+            plant.views[2].nodes[2].binding,
+            Some(PlantViewBinding::Point(PointId(1000010)))
+        );
     }
 }
 

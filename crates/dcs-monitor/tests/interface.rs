@@ -249,6 +249,7 @@ fn signal_index() -> SignalIndex {
         ],
         components: vec![],
         equipment: vec![],
+        views: vec![],
     }
 }
 

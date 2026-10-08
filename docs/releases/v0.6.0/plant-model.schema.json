@@ -978,6 +978,48 @@
       ],
       "type": "object"
     },
+    "plant-view": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/view-id"
+        },
+        "label": {
+          "$ref": "#/$defs/view-label"
+        },
+        "nodes": {
+          "items": {
+            "$ref": "#/$defs/view-node"
+          },
+          "maxItems": 512,
+          "type": "array"
+        },
+        "parent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/view-id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pipes": {
+          "items": {
+            "$ref": "#/$defs/view-pipe"
+          },
+          "maxItems": 1024,
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "nodes",
+        "pipes"
+      ],
+      "type": "object"
+    },
     "port": {
       "additionalProperties": false,
       "properties": {
@@ -1183,11 +1225,254 @@
         "int",
         "float"
       ]
+    },
+    "view-entity-binding": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "equipment": {
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          "required": [
+            "equipment"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "component": {
+              "$ref": "#/$defs/id"
+            }
+          },
+          "required": [
+            "component"
+          ],
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "view-id": {
+      "maxLength": 96,
+      "minLength": 1,
+      "pattern": "^[a-zA-Z0-9_.:-]+$",
+      "type": "string"
+    },
+    "view-label": {
+      "maxLength": 120,
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": "string"
+    },
+    "view-node": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "symbol": {
+                "enum": [
+                  "pump",
+                  "motor",
+                  "valve"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "binding": {
+                "$ref": "#/$defs/view-entity-binding"
+              },
+              "x": {
+                "maximum": 1040
+              },
+              "y": {
+                "maximum": 620
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "symbol": {
+                "const": "tank"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "binding": {
+                "$ref": "#/$defs/view-entity-binding"
+              },
+              "x": {
+                "maximum": 1050
+              },
+              "y": {
+                "maximum": 565
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "symbol": {
+                "const": "measurement"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "binding": {
+                "$ref": "#/$defs/view-point-binding"
+              },
+              "x": {
+                "maximum": 1010
+              },
+              "y": {
+                "maximum": 660
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "symbol": {
+                "const": "label"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "binding": {
+                "type": "null"
+              },
+              "x": {
+                "maximum": 900
+              },
+              "y": {
+                "maximum": 710
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "binding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/view-entity-binding"
+            },
+            {
+              "$ref": "#/$defs/view-point-binding"
+            }
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/view-id"
+        },
+        "label": {
+          "$ref": "#/$defs/view-label"
+        },
+        "symbol": {
+          "enum": [
+            "pump",
+            "motor",
+            "valve",
+            "tank",
+            "measurement",
+            "label"
+          ]
+        },
+        "x": {
+          "maximum": 1200,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "y": {
+          "maximum": 760,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "symbol",
+        "label",
+        "x",
+        "y"
+      ],
+      "type": "object"
+    },
+    "view-pipe": {
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "$ref": "#/$defs/view-pipe-end"
+        },
+        "to": {
+          "$ref": "#/$defs/view-pipe-end"
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "type": "object"
+    },
+    "view-pipe-end": {
+      "additionalProperties": false,
+      "properties": {
+        "node": {
+          "$ref": "#/$defs/view-id"
+        },
+        "port": {
+          "enum": [
+            "n",
+            "e",
+            "s",
+            "w"
+          ]
+        }
+      },
+      "required": [
+        "node",
+        "port"
+      ],
+      "type": "object"
+    },
+    "view-point-binding": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "point": {
+              "$ref": "#/$defs/id"
+            }
+          },
+          "required": [
+            "point"
+          ],
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "The versioned plant-model document: devices, logical io_points, signals, components, connections, and optional equipment surfaces. The schema covers structure, field types, and intra-element rules; cross-reference and wiring checks remain with the Rust validator (docs/architecture.md).",
+  "description": "The versioned plant-model document: devices, logical io_points, signals, components, connections, and optional equipment surfaces and code-engineered process views. The schema covers structure, field types, and intra-element rules; cross-reference and wiring checks remain with the Rust validator (docs/architecture.md).",
   "properties": {
     "components": {
       "items": {
@@ -1231,6 +1516,13 @@
     },
     "version": {
       "const": 1
+    },
+    "views": {
+      "items": {
+        "$ref": "#/$defs/plant-view"
+      },
+      "maxItems": 64,
+      "type": "array"
     }
   },
   "required": [
