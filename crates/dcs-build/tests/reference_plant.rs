@@ -250,12 +250,135 @@ mod common;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::{Duration, Instant};
 
 use common::{CARGO, PIN_UNRESOLVABLE, root};
 
 /// The remote the published tree records — the string the materialized
 /// copy's `Cargo.toml` rewrites to the `file://` stand-in.
 const PUBLISHED_REMOTE: &str = "https://github.com/Jan-Kaspar1/dcs.git";
+
+/// Bound for one network fetch attempt in `serve_pinned_rev`'s seed
+/// fallback: a stalled remote must fail the test naming the remote,
+/// never hang the `rust-tests` leg to the platform's job cap.
+/// Overridable via `DCS_FETCH_TIMEOUT_SECS` for harness-level fakes.
+fn fetch_timeout() -> Duration {
+    std::env::var("DCS_FETCH_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(120))
+}
+
+/// Bound for the nested `ci/check.sh` run: the stage's baseline is
+/// ~30min but shared CI runners under parallel shards have needed well
+/// past 60min, so the default (5h) leaves headroom while still failing
+/// with a diagnostic before the 6h platform cap. Overridable via
+/// `DCS_CHECK_TIMEOUT_SECS` for harness-level fakes.
+fn check_timeout() -> Duration {
+    std::env::var("DCS_CHECK_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(5 * 3600))
+}
+
+/// Runs `cmd` to completion, killing it after `timeout`. `Ok` carries
+/// the completed output (even on nonzero status); `Err` names the
+/// timeout and what was running.
+///
+/// Output is captured to scratch files, never pipes: the poll loop
+/// below cannot drain pipes while waiting, so a verbose child (the
+/// nested `ci/check.sh` transcript is megabytes) would fill the pipe
+/// buffer and block forever — the bound itself becoming the hang it
+/// guards against. Files also free the reaper from grandchildren
+/// holding inherited descriptors open.
+fn run_bounded(cmd: &mut Command, timeout: Duration, what: &str) -> Result<Output, String> {
+    let capture = std::env::temp_dir().join(format!(
+        "dcs-bounded-run-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&capture)
+        .unwrap_or_else(|error| panic!("failed to create {what} capture dir: {error}"));
+    let stdout_path = capture.join("stdout");
+    let stderr_path = capture.join("stderr");
+    cmd.stdout(
+        std::fs::File::create(&stdout_path)
+            .unwrap_or_else(|error| panic!("failed to capture {what} stdout: {error}")),
+    )
+    .stderr(
+        std::fs::File::create(&stderr_path)
+            .unwrap_or_else(|error| panic!("failed to capture {what} stderr: {error}")),
+    );
+    let mut child = cmd
+        .spawn()
+        .unwrap_or_else(|error| panic!("failed to spawn {what}: {error}"));
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stdout = std::fs::read(&stdout_path).unwrap_or_default();
+                let stderr = std::fs::read(&stderr_path).unwrap_or_default();
+                let _ = std::fs::remove_dir_all(&capture);
+                return Ok(Output {
+                    status,
+                    stdout,
+                    stderr,
+                });
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    // Kill and reap the direct child only: orphans keep
+                    // their own file descriptors, so reaping never blocks
+                    // on grandchildren the way draining pipes would.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = std::fs::remove_dir_all(&capture);
+                    return Err(format!("{what} timed out after {}s", timeout.as_secs()));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => panic!("failed waiting on {what}: {error}"),
+        }
+    }
+}
+
+/// One bounded `git fetch --depth 1 <source> <object>` into `remote_dir`.
+/// Returns `true` only when the fetch completed with success; a stall
+/// (or any transport failure) is `false` and names the source in the
+/// returned note so the caller can report which remote stalled.
+fn fetch_one(remote_dir: &Path, source: &str, object: &str, timeout: Duration) -> bool {
+    let mut cmd = Command::new("git");
+    cmd.args(["fetch", "--depth", "1", source, object])
+        .current_dir(remote_dir);
+    let what = format!("git fetch --depth 1 {source} {object}");
+    match run_bounded(&mut cmd, timeout, &what) {
+        Ok(output) => output.status.success(),
+        Err(note) => {
+            eprintln!("bounded fetch: {note}");
+            false
+        }
+    }
+}
+
+/// Runs a nested `ci/check.sh` `cmd` to completion under the harness
+/// bound: a stall inside the check (e.g. a hung `cargo fetch` against
+/// an unreachable remote) fails naming the remote, never hangs the
+/// merge-gated leg to the platform cap. `Ok` carries the completed
+/// output unchanged so existing lockfile-stage diagnostics are
+/// preserved.
+fn run_check(cmd: &mut Command, remote: &str) -> Output {
+    let timeout = check_timeout();
+    let what = format!("ci/check.sh with DCS_REMOTE={remote}");
+    match run_bounded(cmd, timeout, &what) {
+        Ok(output) => output,
+        Err(note) => panic!("{PIN_UNRESOLVABLE}: {note} (DCS_REMOTE={remote})"),
+    }
+}
 
 /// The workspace's build target directory, resolved through cargo so a
 /// `CARGO_TARGET_DIR` override is honored.
@@ -429,19 +552,14 @@ fn serve_pinned_rev(scratch: &Path) -> String {
     git(scratch, &["init", "--bare", "dcs-remote.git"]);
     // The local transport serves the object directly when the
     // checkout's store holds it; the published origin is the fallback
-    // when the shallow store cannot.
+    // when the shallow store cannot. Each attempt is bounded so a
+    // stalled remote fails naming the remote instead of hanging to
+    // the platform's job cap.
+    let timeout = fetch_timeout();
     let seed = |object: &str| {
         [root().display().to_string(), PUBLISHED_REMOTE.to_string()]
             .iter()
-            .any(|source| {
-                Command::new("git")
-                    .args(["fetch", "--depth", "1", source, object])
-                    .current_dir(&remote)
-                    .output()
-                    .expect("git fetch runs")
-                    .status
-                    .success()
-            })
+            .any(|source| fetch_one(&remote, source, object, timeout))
     };
     if pin.len() == 40 && pin.chars().all(|c| c.is_ascii_hexdigit()) {
         assert!(
@@ -565,7 +683,7 @@ impl Materialized {
         if let Some(tools) = tools {
             check.env("DCS_TOOLS", tools);
         }
-        check.output().expect("ci/check.sh runs")
+        run_check(&mut check, &self.remote)
     }
 }
 
@@ -1338,14 +1456,14 @@ fn the_committed_lockfile_satisfies_the_declared_pin() {
         "the committed lockfile records no `?tag={pin}#{precise}` source to doctor"
     );
     std::fs::write(&lock, &stale).unwrap();
-    let refused = Command::new("bash")
+    let mut refused_cmd = Command::new("bash");
+    refused_cmd
         .arg("ci/check.sh")
         .current_dir(&copy.dir)
         .env("DCS_REMOTE", &copy.remote)
         .env("DCS_RECORD_DIR", root().join("docs/releases"))
-        .env("CARGO_TARGET_DIR", copy.dir.join("target"))
-        .output()
-        .expect("ci/check.sh runs");
+        .env("CARGO_TARGET_DIR", copy.dir.join("target"));
+    let refused = run_check(&mut refused_cmd, &copy.remote);
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(
         !refused.status.success(),
@@ -1678,14 +1796,14 @@ fn an_unanswerable_tag_query_is_unverifiable_not_absent() {
 
     // Through the shipped check the same state names its diagnostic
     // before the resolve stage can rewrite the artifact.
-    let refused = Command::new("bash")
+    let mut refused_cmd = Command::new("bash");
+    refused_cmd
         .arg("ci/check.sh")
         .current_dir(&copy.dir)
         .env("DCS_REMOTE", &copy.remote)
         .env("CARGO_TARGET_DIR", copy.dir.join("target"))
-        .env("PATH", &path)
-        .output()
-        .expect("ci/check.sh runs");
+        .env("PATH", &path);
+    let refused = run_check(&mut refused_cmd, &copy.remote);
     let stdout = String::from_utf8_lossy(&refused.stdout);
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(
@@ -1721,6 +1839,98 @@ fn an_unanswerable_tag_query_is_unverifiable_not_absent() {
     assert!(
         stderr.contains(&format!("but {pin} lands on {precise}")),
         "the wrong-target record was refused without naming the tag's target:\n{stderr}"
+    );
+}
+
+/// A stalled network fetch fallback fails fast naming the remote,
+/// never hanging the merge-gated leg: the harness bounds both the
+/// `git fetch --depth 1 <remote> <sha>` seed fallback and the nested
+/// `ci/check.sh` run. This test uses harness-level fakes — an
+/// unroutable remote and a hanging command — at short bounds beside
+/// the positive foreign-pin leg below.
+#[test]
+fn a_stalled_fetch_fallback_fails_fast_naming_the_remote() {
+    use std::time::Instant;
+    // An unreachable remote on a closed loopback port: the transport
+    // refuses immediately, so the fallback returns without touching the
+    // network, while the hanging-command legs below prove the explicit
+    // bound kills a genuine stall. (A documentation-routable address
+    // would exercise git's own minute-scale TCP timeout instead.)
+    let unreachable = "http://127.0.0.1:9/unreachable/dcs.git";
+    let object = "0".repeat(40);
+    let dir = std::env::temp_dir().join(format!(
+        "dcs-bounded-fetch-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    git(&dir, &["init", "--bare", "probe.git"]);
+    let probe = dir.join("probe.git");
+    let bound = Duration::from_secs(5);
+    let started = Instant::now();
+    let served = fetch_one(&probe, unreachable, &object, bound);
+    let elapsed = started.elapsed();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !served,
+        "a stalled remote {unreachable} was reported as served"
+    );
+    assert!(
+        elapsed < bound + Duration::from_secs(30),
+        "the stalled fetch did not fail fast: took {elapsed:?} against a {bound:?} bound"
+    );
+    // The bound names the remote in its diagnostic: the same `what`
+    // string the seed fallback logs on a stall.
+    let mut hanging = Command::new("sleep");
+    hanging.arg("60");
+    let what = format!("git fetch --depth 1 {unreachable} {object}");
+    let timed_out = run_bounded(&mut hanging, Duration::from_secs(2), &what);
+    let Err(note) = timed_out else {
+        panic!("a hanging fetch survived its bound");
+    };
+    assert!(
+        note.contains(unreachable),
+        "the stall diagnostic did not name the remote:\n{note}"
+    );
+    // Equivalent bound on the nested check subprocess: a hanging child
+    // is killed at the bound instead of waiting unbounded.
+    let mut stalled_check = Command::new("sleep");
+    stalled_check.arg("60");
+    let started = Instant::now();
+    let timed_out = run_bounded(
+        &mut stalled_check,
+        Duration::from_secs(2),
+        "ci/check.sh with DCS_REMOTE=stalled-remote",
+    );
+    assert!(
+        timed_out.is_err_and(|note| note.contains("stalled-remote")),
+        "the nested check bound did not name the remote"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "the nested check bound did not fail fast"
+    );
+    // A verbose child must still complete: the bound polls without
+    // draining pipes, so piped capture would deadlock once a transcript
+    // like the nested check's (megabytes) fills the pipe buffer — the
+    // bound itself becoming the hang. `seq` emits ~1.4MB here, far past
+    // any pipe buffer, and must arrive intact.
+    let mut verbose = Command::new("seq");
+    verbose.args(["1", "200000"]);
+    let completed = run_bounded(&mut verbose, Duration::from_secs(60), "verbose child");
+    let Ok(output) = completed else {
+        panic!("a verbose child did not survive the bound");
+    };
+    assert!(
+        output.status.success(),
+        "a verbose child failed under the bound"
+    );
+    assert!(
+        output.stdout.ends_with(b"200000\n"),
+        "a verbose child's transcript was truncated under the bound"
     );
 }
 
@@ -2391,14 +2601,14 @@ fn toml_equivalent_respellings_pass_the_lockfile_leg() {
         "a release crate recorded with no source is not the leak finding's exit status:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let refused = Command::new("bash")
+    let mut refused_cmd = Command::new("bash");
+    refused_cmd
         .arg("ci/check.sh")
         .current_dir(&copy.dir)
         .env("DCS_REMOTE", &copy.remote)
         .env("DCS_RECORD_DIR", root().join("docs/releases"))
-        .env("CARGO_TARGET_DIR", copy.dir.join("target"))
-        .output()
-        .expect("ci/check.sh runs");
+        .env("CARGO_TARGET_DIR", copy.dir.join("target"));
+    let refused = run_check(&mut refused_cmd, &copy.remote);
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(
         !refused.status.success(),
