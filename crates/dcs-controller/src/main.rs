@@ -2147,6 +2147,155 @@ struct RestartConsult {
     /// adjudication a tracking peer's adoption runs, so the receipts
     /// never vanish unaudited and the journal's settle dedup applies.
     superseded: Vec<(u64, CommandReceipt)>,
+    /// Settled submissions the adopted line carries past this run's own
+    /// admission high-water — zero for a field owner's plain newer
+    /// document, and the count that names a stood-down ex-owner's
+    /// receipted state in the launch log: the tuning, forces, and held
+    /// values a silent revert to the resumed checkpoint would have
+    /// discarded.
+    carried: u64,
+}
+
+/// What this restart resumed as — the three positions its own baseline
+/// stands at, and the three the consulted peer's document is read
+/// against. Kept as its own type so the verdict
+/// ([`consult_verdict`]) is a pure function of two documents' evidence,
+/// legible and provable on its own rather than entangled with the pull
+/// and the adoption around it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ResumedBaseline {
+    /// Where the resumed run's own clock stands — the journal and
+    /// history attribution domain, which no adoption rewinds.
+    tick: Tick,
+    /// The tick-domain generation the resumed baseline carries — the
+    /// line's identity, and the only domain two documents' positions
+    /// compare within.
+    generation: Option<u64>,
+    /// How far the line's command audit had come when the baseline was
+    /// captured: the count of settlements the run has admitted, so a
+    /// document standing strictly ahead of it carries verdicts this
+    /// baseline cannot have produced.
+    admitted: u64,
+}
+
+impl ResumedBaseline {
+    /// The baseline this run actually stands on: the executor's own
+    /// resumed position, its generation, and its admission high-water.
+    fn of(executor: &Executor<'_>) -> Self {
+        Self {
+            tick: executor.tick(),
+            generation: executor.generation(),
+            admitted: executor.admitted_commands(),
+        }
+    }
+}
+
+/// What the consult concluded about the consulted peer's checkpoint —
+/// the pre-claim decision, split from the pull that fetched it and the
+/// adoption that lands it.
+///
+/// The ownership stamp alone is not the gate. `source_owns_field:
+/// false` names a *tracker*, and a tracker admits no command of its own
+/// (a standby's receipt log converges by adoption), so its admission
+/// high-water never stands ahead of the baseline it tracks: there is
+/// nothing in its document the resumed run lacks, and declining it
+/// rolls nothing back. A peer that *held the field and stood down* — the
+/// demoted ex-owner of the demote-then-restart shape — serves that
+/// same stamp while carrying every receipt it settled as owner, tuning,
+/// forces, and held values among them. Declining its document on the
+/// stamp alone is the silent rollback the restart-as-active consult
+/// exists to prevent: the peer was alive, pullable, and carrying the
+/// newer checkpoint the field was actually running. So the stamp
+/// selects the *proof* demanded, not the verdict: a non-owning peer is
+/// adoptable exactly when its document shows it is this run's own line
+/// (the same tick-domain generation, the only domain two documents'
+/// positions compare within) and strictly ahead of the baseline's
+/// command audit (settlements the baseline cannot have produced — and
+/// only a field owner produces them). A foreign or unidentified
+/// generation, or a peer carrying nothing settled beyond the baseline,
+/// is the tracker shape the refusal was written for and still declines.
+#[derive(Debug, Clone, PartialEq)]
+enum ConsultVerdict {
+    /// The peer's document is this run's line, strictly newer, and
+    /// carries state the resumed baseline lacks: adopt it in place of
+    /// the baseline before the claim.
+    Adopting {
+        /// How many settlements the adopted line carries past the
+        /// resumed baseline's admission high-water — the receipted
+        /// commands whose effects a silent revert would discard.
+        carried: u64,
+    },
+    /// The peer answered and holds nothing newer: the restart proceeds
+    /// on the baseline it resumed.
+    Standing {
+        /// Where the peer's stream stood.
+        at: Tick,
+    },
+    /// The peer is reachable but its document proves no continuation
+    /// of this run's line — the tracker shape, or a foreign tick
+    /// domain. `detail` names which, for the durable record.
+    Declining { detail: String },
+}
+
+/// The consult's pre-claim verdict over one served document: the whole
+/// of the restart-as-active continuity decision, as a pure function of
+/// the peer's checkpoint and the baseline it is read against.
+fn consult_verdict(incumbent: &Checkpoint, baseline: &ResumedBaseline) -> ConsultVerdict {
+    // A strictly-newer check answers "does this line hold anything the
+    // baseline lacks" for a field owner with no further proof: a run
+    // owning the field is the line's authority, and its newer document
+    // carries whatever it settled since.
+    if incumbent.source_owns_field != Some(false) {
+        return if incumbent.tick > baseline.tick {
+            ConsultVerdict::Adopting { carried: 0 }
+        } else {
+            ConsultVerdict::Standing { at: incumbent.tick }
+        };
+    }
+    // The peer declares it writes nothing, so its stream is this same
+    // line continued rather than an independent authority. It is still
+    // this run's line to adopt when its document proves it: the same
+    // tick-domain generation the baseline carries, and settled command
+    // verdicts past the baseline's admission high-water — the shape a
+    // peer that held the field, settled operator commands, and stood
+    // down leaves behind, and the shape no quiesced tracker produces.
+    if incumbent.generation.is_none() || incumbent.generation != baseline.generation {
+        return ConsultVerdict::Declining {
+            detail: "the consulted peer reports it does not own the field and names no \
+                     continuation of this run's tick-domain line"
+                .to_string(),
+        };
+    }
+    let carried = incumbent
+        .command_admission
+        .attempts
+        .saturating_sub(baseline.admitted);
+    if carried == 0 {
+        return ConsultVerdict::Declining {
+            detail: "the consulted peer reports it does not own the field and carries no \
+                     settled command the resumed checkpoint lacks"
+                .to_string(),
+        };
+    }
+    if incumbent.tick <= baseline.tick {
+        // The peer's audit is ahead while its stream position is not:
+        // the line settled commands the baseline never saw, but the
+        // two documents' positions do not order, and the adoption
+        // lands the run clock at the peer's — rewinding the journal and
+        // history attribution domain, which no adoption does. Declined
+        // by name rather than guessed at; the settlements stay on the
+        // peer's own journal, and a later pull from it converges the
+        // pair the ordinary way.
+        return ConsultVerdict::Declining {
+            detail: format!(
+                "the consulted peer reports it does not own the field and stands at tick {} \
+                 with {} settled submissions past this run's, no stream position of its own \
+                 ahead of the resumed baseline's {}",
+                incumbent.tick.0, carried, baseline.tick.0
+            ),
+        };
+    }
+    ConsultVerdict::Adopting { carried }
 }
 
 /// The restart-as-active incumbent consult — run before a relaunched
@@ -2156,28 +2305,29 @@ struct RestartConsult {
 /// the field — the difference being exactly whether the incumbent's
 /// line moved ahead of the restartee's persisted checkpoint across the
 /// gap. So the restart pulls `source`'s served checkpoint first: a
-/// strictly newer one from a run that *owns the field* carries the
-/// receipts, forces, and tuning the gap accumulated, and adopting it in
-/// place — through the same
+/// strictly newer one carries the receipts, forces, and tuning the gap
+/// accumulated, and adopting it in place — through the same
 /// [`Executor::apply`]/[`Executor::reinitialize`] routing the state-file
 /// resume runs — keeps the takeover from rolling the field back.
 ///
-/// Ownership is the gate, because a tracker is not an incumbent: a peer
-/// that reports `source_owns_field: false` serves this same line's
-/// state continued by its own quiesced scans, and adopting that would
-/// move the resumed run's tick axis onto a tracker's local ticks —
-/// decision 26's own-tick-ahead rule forbids exactly that — while
-/// rolling nothing back, the field having no owner to take state from.
+/// Which documents are adoptable is [`consult_verdict`]'s decision, and
+/// its second clause is the demote-then-restart shape: the claim's own
+/// gate (a live peer holding it) covers the window before the incumbent
+/// stands down, while the field stays unheld after, so the ex-owner's
+/// restart cannot be stopped there. The consult must therefore carry the
+/// demoted ex-owner's settled state across too — the ownership stamp
+/// alone never did that, and the line it left behind is the same one its
+/// checkpoint continues.
 ///
 /// The answer classifies for the durable record:
-/// [`RestartConsultOutcome::Adopted`] a newer field-owning incumbent's
-/// checkpoint landed, [`RestartConsultOutcome::Standing`] the incumbent
-/// answered but held nothing newer than the resumed state, and
+/// [`RestartConsultOutcome::Adopted`] a newer peer line landed,
+/// [`RestartConsultOutcome::Standing`] the peer answered but held
+/// nothing newer than the resumed state, and
 /// [`RestartConsultOutcome::Unadopted`] no adoptable checkpoint
-/// arrived — the pull failed, the peer declared itself a non-owner, or
-/// the strict restore negotiation refused it — in which case the
-/// restart proceeds on its own persisted state exactly as before, the
-/// consult's audit being the difference.
+/// arrived — the pull failed, the peer served no continuation of this
+/// run's line, or the strict restore negotiation refused it — in which
+/// case the restart proceeds on its own persisted state exactly as
+/// before, the consult's audit being the difference.
 /// `resumed` marks whether a state file was restored at all, so the
 /// outcome can tell "superseded a resumed checkpoint" from "cold start
 /// that found a live incumbent". A foreign-fingerprint incumbent on a
@@ -2194,6 +2344,7 @@ fn consult_incumbent(
         outcome: RestartConsultOutcome::Unadopted { detail },
         crossing: None,
         superseded: Vec::new(),
+        carried: 0,
     };
     let incumbent = match MonitorClient::with_timeout(source, RESTART_CONSULT_TIMEOUT).checkpoint()
     {
@@ -2202,29 +2353,21 @@ fn consult_incumbent(
             return unadopted(format!("incumbent checkpoint pull failed: {error}"));
         }
     };
-    // A peer that positively reports it does not own the field is not
-    // an incumbent: it is this run's own line continued by a tracker,
-    // whose stream leads the persisted checkpoint only because it
-    // scanned on past a frozen or unclaimed field with its writes
-    // quiesced. Adopting it would rewrite this run's tick axis onto a
-    // tracker's local scans — decision 26's own-tick-ahead rule and the
-    // warm-resume contract both forbid that — and nothing is rolled back
-    // by declining: the field has no owner to take state from. Only a
-    // positive non-ownership statement refuses; an unstamped checkpoint
-    // carries no ownership claim at all and stays adoptable.
-    if incumbent.source_owns_field == Some(false) {
-        return unadopted("the consulted peer reports it does not own the field".to_string());
-    }
-    if incumbent.tick <= executor.tick() {
-        return RestartConsult {
-            source,
-            outcome: RestartConsultOutcome::Standing {
-                incumbent_at: incumbent.tick,
-            },
-            crossing: None,
-            superseded: Vec::new(),
-        };
-    }
+    // Which document this run may adopt, and why it declines the rest.
+    let verdict = consult_verdict(&incumbent, &ResumedBaseline::of(executor));
+    let carried = match verdict {
+        ConsultVerdict::Adopting { carried } => carried,
+        ConsultVerdict::Standing { at } => {
+            return RestartConsult {
+                source,
+                outcome: RestartConsultOutcome::Standing { incumbent_at: at },
+                crossing: None,
+                superseded: Vec::new(),
+                carried: 0,
+            };
+        }
+        ConsultVerdict::Declining { detail } => return unadopted(detail),
+    };
     let superseded_at = resumed.then_some(executor.tick());
     // The pending set the adoption below either covers or abandons —
     // the same reconciliation `Peer::apply` runs on a tracked pull.
@@ -2295,6 +2438,7 @@ fn consult_incumbent(
         },
         crossing,
         superseded,
+        carried,
     }
 }
 
@@ -2631,6 +2775,19 @@ fn main() -> ExitCode {
                 RestartConsultOutcome::Unadopted { detail } => {
                     eprintln!("restart consult {source}: {detail}")
                 }
+            }
+            // A stood-down peer's adoption is the demote-then-restart
+            // shape — the claim's own live-holder gate cannot cover the
+            // window after its release, so the receipted state it
+            // carried across is named here rather than left as an
+            // unexplained adoption of a peer's ticks.
+            if consult.carried > 0 {
+                eprintln!(
+                    "restart consult {}: the peer had stood down from the field carrying {} \
+                     settled submissions past this run's checkpoint; its tuning, forces, and \
+                     held values carry into the claim",
+                    consult.source, consult.carried
+                );
             }
             for (_, receipt) in &consult.superseded {
                 eprintln!(
@@ -3766,6 +3923,7 @@ fn scan_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dcs_runtime::{CHECKPOINT_FORMAT_VERSION, CommandAdmissionCounts};
 
     /// A writer whose every write blocks forever — the consumer that
     /// stopped draining, finding #545's stall reproduced as a type.
@@ -4185,5 +4343,150 @@ mod tests {
             .collect();
         assert_eq!(drains.len(), 1, "{reports:?}");
         assert!(drains[0].contains("stdout_snapshot_drops="));
+    }
+
+    /// A served checkpoint carrying only the fields the consult's
+    /// verdict reads — the rest of the document is a capture's, not the
+    /// decision's, business.
+    fn served_document(
+        tick: u64,
+        generation: Option<u64>,
+        owns_field: Option<bool>,
+        attempts: u64,
+    ) -> Checkpoint {
+        Checkpoint {
+            format_version: CHECKPOINT_FORMAT_VERSION,
+            model_fingerprint: None,
+            generation,
+            anchor: None,
+            tick: Tick(tick),
+            stream_tick: Some(Tick(tick)),
+            components: BTreeMap::new(),
+            driver: None,
+            outputs: BTreeMap::new(),
+            internal: BTreeMap::new(),
+            forces: BTreeMap::new(),
+            receipts: Vec::new(),
+            command_admission: CommandAdmissionCounts {
+                attempts,
+                ..Default::default()
+            },
+            tracking_source: None,
+            source_owns_field: owns_field,
+            line_owner: None,
+            line_proof: None,
+        }
+    }
+
+    /// The baseline a run resumes at tick 40 on generation 7 with 12
+    /// submissions admitted — the `Restartee` half of every verdict.
+    fn resumed_baseline() -> ResumedBaseline {
+        ResumedBaseline {
+            tick: Tick(40),
+            generation: Some(7),
+            admitted: 12,
+        }
+    }
+
+    /// A field owner's plain newer document is adopted with nothing
+    /// carried past the baseline — the #735 shape, where the peer's
+    /// ownership is its own proof and the adoption exists to keep the
+    /// claim off its live line.
+    #[test]
+    fn a_field_owners_newer_line_is_adopted_on_its_ownership_alone() {
+        assert_eq!(
+            consult_verdict(
+                &served_document(50, Some(7), Some(true), 12),
+                &resumed_baseline()
+            ),
+            ConsultVerdict::Adopting { carried: 0 }
+        );
+    }
+
+    /// The demote-then-restart shape: the peer stood down from the
+    /// field, so its stamp reads a tracker — but it is this run's own
+    /// line and it settled submissions the resumed baseline cannot
+    /// have. Adopting it is the fix: the tuning and forces those
+    /// receipts applied survive the reclaim instead of reverting.
+    #[test]
+    fn a_stood_down_peer_settling_past_the_baseline_is_adopted() {
+        assert_eq!(
+            consult_verdict(
+                &served_document(50, Some(7), Some(false), 14),
+                &resumed_baseline()
+            ),
+            ConsultVerdict::Adopting { carried: 2 }
+        );
+    }
+
+    /// The refusal the ownership stamp was written for, and the shape
+    /// it must keep refusing: a quiesced tracker admits no command of
+    /// its own, so its log converges to the baseline's and there is
+    /// nothing of the line's in its document to carry.
+    #[test]
+    fn a_tracker_carrying_nothing_the_baseline_lacks_still_declines() {
+        match consult_verdict(
+            &served_document(50, Some(7), Some(false), 12),
+            &resumed_baseline(),
+        ) {
+            ConsultVerdict::Declining { detail } => assert!(
+                detail.contains("does not own the field"),
+                "the decline must name the stamp it read: {detail}"
+            ),
+            other => panic!("a tracker must not be adopted: {other:?}"),
+        }
+    }
+
+    /// A peer's own tick domain is not this run's line: its state would
+    /// rewrite the resumed run's generation and anchor, and its audit
+    /// counts nothing of this line's submissions. Declined by name, so
+    /// the record says which of the two proofs was missing.
+    #[test]
+    fn a_non_owning_peer_on_another_generation_declines() {
+        for generation in [None, Some(8)] {
+            match consult_verdict(
+                &served_document(50, generation, Some(false), 14),
+                &resumed_baseline(),
+            ) {
+                ConsultVerdict::Declining { detail } => assert!(
+                    detail.contains("does not own the field")
+                        && detail.contains("tick-domain line"),
+                    "the decline must name the missing continuation proof: {detail}"
+                ),
+                other => panic!("a foreign generation must not be adopted: {other:?}"),
+            }
+        }
+    }
+
+    /// Settled commands past the baseline with no stream position ahead
+    /// of it: the two documents' positions do not order, so the
+    /// adoption would land the peer's state on the baseline's clock.
+    /// Declined rather than guessed at, and named for the record.
+    #[test]
+    fn an_ahead_audit_behind_the_stream_declines() {
+        match consult_verdict(
+            &served_document(40, Some(7), Some(false), 14),
+            &resumed_baseline(),
+        ) {
+            ConsultVerdict::Declining { detail } => assert!(
+                detail.contains('2') && detail.contains("no stream position of its own"),
+                "the decline must name the gap it declined across: {detail}"
+            ),
+            other => panic!("an unordered pair must not be adopted: {other:?}"),
+        }
+    }
+
+    /// A field owner at or behind the baseline holds nothing newer: the
+    /// restart stands on the state it resumed, which is the recorded
+    /// `Standing` outcome and never a rollback.
+    #[test]
+    fn a_field_owner_at_or_behind_the_baseline_stands() {
+        assert_eq!(
+            consult_verdict(
+                &served_document(40, Some(7), Some(true), 12),
+                &resumed_baseline()
+            ),
+            ConsultVerdict::Standing { at: Tick(40) }
+        );
     }
 }
