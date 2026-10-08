@@ -125,7 +125,7 @@
 <body class="workspace-plant">
 <header id="plant-header">
   <a class="plant-brand" href="#plant" aria-label="Plant overview">DCS</a>
-  <div class="plant-header-title"><h1>Process operations</h1><p>Plant monitoring and control</p></div>
+  <div class="plant-header-title"><h1>Operations</h1></div>
   <p id="status">Connecting…</p>
   <p id="feed-state" hidden></p>
   <div id="plant-alarm-strip" aria-live="polite"><span>Waiting for alarm state…</span></div>
@@ -135,12 +135,12 @@
   <nav id="plant-area-list" aria-label="Plant areas"></nav>
   <div class="plant-sidebar-heading">OPERATIONS</div>
   <button type="button" class="plant-nav-button" data-workspace="plant">Schematic</button>
-  <button type="button" class="plant-nav-button" data-workspace="alarms">Alarms and events</button>
-  <div class="plant-sidebar-footer"><span id="plant-connection-state">Connecting</span><p>Live state from the controller</p></div>
+  <button type="button" class="plant-nav-button" data-workspace="alarms">Alarms</button>
+  <div class="plant-sidebar-footer"><span id="plant-connection-state">Connecting</span></div>
 </aside>
 <main id="plant-content">
   <section id="plant-workspace">
-    <div class="plant-view-heading"><div><p class="plant-eyebrow">PLANT SCHEMATIC</p><h2 id="plant-view-title">Plant overview</h2></div></div>
+    <div class="plant-view-heading"><h2 id="plant-view-title">Plant overview</h2></div>
     <p id="plant-view-note"></p>
     <div class="plant-canvas-wrap"><svg id="plant-canvas" viewBox="0 0 1200 760" role="group" aria-label="Live plant schematic"></svg></div>
   </section>
@@ -161,8 +161,8 @@
 <table>
   <thead>
     <tr>
-      <th>Component</th><th>Status</th><th>Value</th><th>Quality</th>
-      <th>Last changed</th><th>Priority</th><th></th>
+      <th>Priority</th><th>Alarm</th><th>State</th><th>Quality</th>
+      <th>Changed</th><th>Actions</th>
     </tr>
   </thead>
   <tbody id="alarms"></tbody>
@@ -277,7 +277,7 @@ own surface: the HMI alarm path is never presented as the safeguard.</p>
 </section>
 </main>
 <section id="equipment" hidden>
-<h2>Equipment — <span id="equipment-name"></span></h2>
+<h2><span id="equipment-name"></span></h2>
 <p class="equipment-nav"><button type="button" data-workspace="alarms">Alarm list</button>
 <button type="button" id="equipment-close">close</button></p>
 <p id="equipment-pair" class="equipment-line"></p>
@@ -707,6 +707,7 @@ const PENDING_LIMIT = 16;
 // alarm-surface navigation named, or null while none stands: the pane
 // stays hidden until a row or journal entry selects its owner.
 let equipmentSelection = null;
+let equipmentCommandReceipt = null;
 let alarmSelection = null;
 let alarmCommandReceipt = null;
 const alarmReasonDrafts = new Map();
@@ -1240,7 +1241,14 @@ function renderFeed() {
       ? "gap"
       : feed.stale !== null || feed.history !== null ||
         feed.journal !== null ? "stale" : "";
-  line.textContent = notices.join("; ");
+  line.title = notices.join("; ");
+  line.textContent = [
+    feed.stale !== null ? "STALE · last known values" : "",
+    feed.restart !== null ? "Source restarted" : "",
+    feed.gap !== null ? "Data gap" : "",
+    feed.history !== null ? "History incomplete" : "",
+    feed.journal !== null ? "Journal incomplete" : "",
+  ].filter(Boolean).join(" · ");
 }
 
 // ---- Plant overview ----
@@ -1523,8 +1531,8 @@ async function refresh() {
     }
     const peerNote = sourcePeerNote();
     document.getElementById("status").textContent =
-      "tick " + snapshot.tick + peerNote + " — polled " +
-      new Date().toLocaleTimeString();
+      "Live" + peerNote + " · " + new Date().toLocaleTimeString();
+    document.getElementById("status").title = "Controller tick " + snapshot.tick;
     renderIoHealth(snapshot.io_health, snapshot.command_queue);
     renderSinkHealth(snapshot.publication);
     const telemetry = new Map(snapshot.points.map(p => [p.point, p]));
@@ -1978,10 +1986,12 @@ function roleElement(port, telemetry, forced) {
       ? sample.value.bool : null;
     const text = on === null
       ? port.name + ": " + (sample ? formatValue(sample.value) : "—")
-      : port.name;
+      : port.name + ": " + (on ? "on" : "off");
+    const dataNote = feed.stale !== null ? " · last known / stale" :
+      !sample ? " · no sample" : !isGood(sample.quality) ? " · " + formatQuality(sample.quality) : "";
     return "<span class=\"flag" + (on ? " on" : "") + "\" title=\"" +
       esc(port.name) + (sample ? " — " + esc(formatQuality(sample.quality)) : "") +
-      "\">" + esc(text) + "</span>" + forcedBadge(port.point, forced) +
+      "\">" + esc(text + dataNote) + "</span>" + forcedBadge(port.point, forced) +
       commandAffordance(port, sample, forced);
   }
   return "<div class=\"role role-" + esc(port.role) + "\">" +
@@ -2771,7 +2781,7 @@ function alarmRecords(snapshot, telemetry) {
 
 function alarmLabel(descriptor, port) {
   const meta = port.point == null ? null : metaByPoint.get(port.point);
-  return meta ? meta.name : descriptor.label;
+  return meta ? meta.description || meta.name : descriptor.label;
 }
 
 function compareAlarmPriority(a, b) {
@@ -2799,6 +2809,9 @@ function alarmLifecycle(row) {
 // moves its row to another list.
 function updateAlarmMarkup(container, html) {
   if (alarmMarkupCache.get(container) === html) return;
+  const detailKey = element => (element.closest("[data-alarm-name]")?.dataset.alarmName || "") +
+    ":" + element.className + ":" + element.querySelector("summary")?.textContent;
+  const expanded = new Set(Array.from(container.querySelectorAll("details[open]")).map(detailKey));
   const focused = container.contains(document.activeElement) ? document.activeElement : null;
   const name = focused && focused.closest("[data-alarm-name]")?.dataset.alarmName;
   const className = focused && focused.className;
@@ -2807,6 +2820,7 @@ function updateAlarmMarkup(container, html) {
     ? [focused.selectionStart, focused.selectionEnd] : null;
   container.innerHTML = html;
   alarmMarkupCache.set(container, html);
+  for (const detail of container.querySelectorAll("details")) detail.open = expanded.has(detailKey(detail));
   if (!focused) return;
   const replacement = Array.from(container.querySelectorAll("input, button, a")).find(element =>
     element.className === className && element.dataset.point === point &&
@@ -2966,22 +2980,6 @@ function alarmRowStates(descriptor, telemetry) {
   return states;
 }
 
-// The two-flag truth every row still reports: the component's live
-// `alarm` and `unacknowledged` flags drawn on or off, so a routed row
-// keeps reporting process truth and its latch — a managed state
-// reroutes the presentation, never the record. A kind declaring
-// neither port draws no flags.
-function truthFlags(descriptor, telemetry) {
-  return ["alarm", "unacknowledged"].map(name => {
-    const port = descriptor.ports.find(p =>
-      p.name === name && p.role === "status" && p.direction === "out");
-    if (!port) return "";
-    return " <span class=\"flag" +
-      (isAsserted(portSample(port, telemetry)) ? " on" : "") + "\">" +
-      esc(name) + "</span>";
-  }).join("");
-}
-
 // The instance's declared `priority`, joined from the snapshot's
 // parameters section by component name — the same join the parameter
 // tables use — and mapped through the declared PRIORITY_VOCABULARY to
@@ -3039,8 +3037,8 @@ function managedListMarkup(state, rows) {
     rows.join("") + "</tbody></table></section>";
 }
 const ALARM_HEADINGS =
-  "<th>Component</th><th>Status</th><th>Value</th><th>Quality</th>" +
-  "<th>Last changed</th><th>Priority</th><th></th>";
+  "<th>Priority</th><th>Alarm</th><th>State</th><th>Quality</th>" +
+  "<th>Changed</th><th>Actions</th>";
 
 // Whether a journal entry belongs to the alarm surface: a value
 // transition on a status-bound journaled point — the alarm
@@ -3177,27 +3175,27 @@ function alarmRow(descriptor, port, sample, telemetry, forced, parameters, actio
   // The row carries the quality class: a Bad or Uncertain value draws
   // degraded — italic, tinted — instead of as a clean assertion, so a
   // bad sensor reads as uncertainty rather than a hidden alarm state.
-  const priority = priorityMarkup(descriptor.name, parameters);
+  const priority = (parameters.get(descriptor.name) || {}).priority?.int ?? null;
+  const owner = declaredEquipment().find(item => equipmentMembers(item).some(member => member.name === descriptor.name));
+  const lifecycle = alarmLifecycle({ descriptor, active: isAsserted(sample),
+    unacknowledged: states.has("unacknowledged") });
   return {
     name: descriptor.name,
-    priority: (parameters.get(descriptor.name) || {}).priority?.int ?? null,
+    priority,
     states,
     managed: MANAGED_STATES.filter(state => states.has(state)),
     degraded: !sample || !isGood(sample.quality),
     html: "<tr data-alarm-name=\"" + esc(descriptor.name) + "\" class=\"alarm " + cls +
       (alarmSelection === descriptor.name ? " is-selected" : "") + "\">" +
-      "<td><button type=\"button\" class=\"alarm-open\" data-manage-alarm=\"" + esc(descriptor.name) + "\">" +
-        esc(alarmLabel(descriptor, port)) + "</button>" +
-        rationalizationMarkup(descriptor.name) + "</td>" +
-      "<td>" + esc(port.name) + (meta ? " · " + esc(meta.name) : "") +
-        truthFlags(descriptor, telemetry) + "</td>" +
-      "<td class=\"value " + cls + "\">" + (sample ? esc(formatValue(sample.value)) : "—") +
-        forcedBadge(port.point, forced) + "</td>" +
+      "<td>" + alarmPriorityBadge(priority) + "</td>" +
+      "<td><button type=\"button\" class=\"alarm-open\" data-manage-alarm=\"" + esc(descriptor.name) +
+        "\" title=\"" + esc(meta ? meta.name : descriptor.name) + "\">" +
+        (owner ? esc(owner.label) + " · " : "") + esc(alarmLabel(descriptor, port)) + "</button></td>" +
+      "<td>" + esc(lifecycle) +
+        (feed.stale !== null ? " · last known / stale" : "") + forcedBadge(port.point, forced) + "</td>" +
       "<td class=\"" + cls + "\">" + (sample ? esc(formatQuality(sample.quality)) : "no sample") +
       "</td>" +
       "<td>" + (sample ? lastChangedTick(port.point, sample) : "—") + "</td>" +
-      "<td>" + (priority === ""
-        ? "" : equipmentLink(descriptor.name, priority)) + "</td>" +
       "<td>" + actions + "</td></tr>",
   };
 }
@@ -3295,14 +3293,13 @@ function renderSelectedAlarm(records, telemetry) {
   const state = alarmLifecycle(row) + (row.degraded ? " · data degraded" : "") +
     (feed.stale !== null ? " · last known / connection stale" : "");
   const managed = MANAGED_STATES.filter(name => row.states.has(name)).map(name => MANAGED_LABELS[name]);
-  const guidance = response ? "<dl class=\"alarm-guidance\"><dt>Required action</dt><dd>" +
-    esc(response.required_action) + "</dd><dt>Consequence</dt><dd>" + esc(response.consequence) +
-    "</dd><dt>Reference</dt><dd>" + esc(response.reference) + "</dd></dl>" : "";
+  const guidance = response ? "<dl class=\"alarm-guidance\"><dt>Action</dt><dd>" +
+    esc(response.required_action) + "</dd></dl>" : "";
   const measurements = row.descriptor.ports.filter(port => port.direction === "in" && port.role === "process_value");
   const values = measurements.map(port => {
     const sample = portSample(port, telemetry);
     const meta = portMeta(port);
-    return "<dt>" + esc(meta ? meta.name : port.name) + "</dt><dd>" +
+    return "<dt>Value</dt><dd>" +
       (sample ? esc(formatValue(sample.value)) + (meta && meta.unit ? " " + esc(meta.unit) : "") +
         " · " + esc(formatQuality(sample.quality)) : "No sample") + "</dd>";
   }).join("");
@@ -3310,15 +3307,24 @@ function renderSelectedAlarm(records, telemetry) {
   const limits = ["low_limit", "high_limit", "hysteresis"].filter(name => parameters[name])
     .map(name => "<dt>" + esc(name.replace(/_/g, " ")) + "</dt><dd>" +
       esc(formatValue(parameters[name])) + "</dd>").join("");
+  const meta = portMeta(row.port);
+  const information = "<details class=\"alarm-information\"><summary>Alarm details</summary><dl class=\"alarm-guidance\">" +
+    "<dt>Signal</dt><dd>" + esc(meta ? meta.name : row.name) + "</dd>" +
+    "<dt>Source</dt><dd>" + esc(row.name) + "</dd>" +
+    (response ? "<dt>Consequence</dt><dd>" + esc(response.consequence) +
+      "</dd><dt>Reference</dt><dd>" + esc(response.reference) + "</dd>" : "") +
+    ["class", "response_ticks"].filter(name => parameters[name]).map(name =>
+      "<dt>" + esc(name.replace(/_/g, " ")) + "</dt><dd>" + esc(formatValue(parameters[name])) + "</dd>").join("") +
+    "</dl></details>";
   updateAlarmMarkup(pane, "<div data-alarm-name=\"" + esc(row.name) + "\">" +
     "<h3 tabindex=\"-1\" id=\"selected-alarm-title\">" + alarmPriorityBadge(row.priority) + " " + esc(row.label) + "</h3>" +
     "<p>" + esc(state) + (managed.length ? " · " + esc(managed.join(" · ")) : "") + "</p>" +
     (owner ? "<p>Equipment: " + equipmentLink(row.name, esc(owner.label)) + "</p>" : "") +
     (values ? "<dl class=\"alarm-guidance\">" + values + "</dl>" : "") +
     (limits ? "<details class=\"alarm-limits\"><summary>Configured limits</summary><dl class=\"alarm-guidance\">" + limits + "</dl></details>" : "") +
-    guidance + "<div class=\"alarm-management-actions\">" +
+    guidance + information + "<div class=\"alarm-management-actions\">" +
     ackAffordance(row.descriptor, row.unacknowledged) + managedAffordance(row.descriptor, telemetry) + "</div>" +
-    "<p>Acknowledgment records awareness. An active condition stays visible until it returns to normal.</p></div>");
+    "</div>");
 }
 
 function openAlarmManagement(name = null) {
@@ -3341,18 +3347,28 @@ function alarmCommandMessage(text) {
     if ("accepted" in outcome) return "Request accepted; awaiting controller settlement.";
     if ("applied" in outcome) return "Request applied by the controller.";
     if ("rejected" in outcome) return "Request refused: " + JSON.stringify(outcome.rejected);
+    if ("indeterminate" in outcome) return "Outcome unknown; awaiting confirmation. Check live feedback.";
   } catch (_) { /* Text notices include missing reasons and connection errors. */ }
   return text;
 }
 
-function renderAlarmCommandStatus() {
-  if (!alarmCommandReceipt) return;
-  const submission = alarmCommandReceipt.submission;
+function settledCommandReceipt(receipt) {
+  const submission = receipt.submission;
   const settled = submission && journalEntries.map(entry => entry.event.command_settled?.receipt)
     .find(receipt => receipt && receipt.submission &&
       receipt.submission.origin === submission.origin && receipt.submission.seq === submission.seq);
+  return settled || receipt;
+}
+
+function renderEquipmentCommandStatus() {
+  if (equipmentCommandReceipt) document.getElementById("equipment-receipt").textContent =
+    alarmCommandMessage(JSON.stringify(settledCommandReceipt(equipmentCommandReceipt)));
+}
+
+function renderAlarmCommandStatus() {
+  if (!alarmCommandReceipt) return;
   document.getElementById("alarm-command-status").textContent =
-    alarmCommandMessage(JSON.stringify(settled || alarmCommandReceipt));
+    alarmCommandMessage(JSON.stringify(settledCommandReceipt(alarmCommandReceipt)));
 }
 
 // The independent protection layer's declared points — every index
@@ -3601,8 +3617,9 @@ function renderPlantWorkspace() {
   const active = alarms.filter(row => row.active).length;
   const strip = document.getElementById("plant-alarm-strip");
   const count = "<button type=\"button\" class=\"plant-alarm-count" + (unacknowledged.length ? " is-alarm" : "") +
-    "\" data-workspace=\"alarms\">" + unacknowledged.length + " unacknowledged<br><small>" +
-    active + " active · Alarm management</small></button>";
+    "\" data-workspace=\"alarms\" aria-label=\"Alarm management: " + unacknowledged.length +
+    " unacknowledged, " + active + " active\">" + unacknowledged.length + " unack<br><small>" +
+    active + " active</small></button>";
   const limit = Math.max(2, Math.min(4, ALARM_PRESENTATION.maxUnacknowledged));
   const cards = unacknowledged.slice(0, limit).map(row => {
     const owner = declaredEquipment().find(item => equipmentMembers(item).some(member => member.name === row.name));
@@ -3611,16 +3628,16 @@ function renderPlantWorkspace() {
       (row.active ? " is-active" : "") + (row.degraded ? " is-degraded" : "") +
       (stale ? " is-stale" : "") + (managed.length ? " is-managed" : "") +
       (alarmSelection === row.name ? " is-selected" : "") + "\" data-manage-alarm=\"" + esc(row.name) + "\" " +
-      "title=\"Open alarm management: " + esc(row.label) + "\">" + alarmPriorityBadge(row.priority) +
+      "title=\"Open alarm management: " + esc(row.label) + " · " + esc(portMeta(row.port)?.name || row.name) + "\">" + alarmPriorityBadge(row.priority) +
       "<span class=\"plant-alarm-copy\"><span class=\"plant-alarm-title\">" +
       (owner ? esc(owner.label) + " · " : "") + esc(row.label) + "</span>" +
       "<span class=\"plant-alarm-state\">" + (stale ? "Last known · stale" :
-        row.degraded ? "Unacknowledged · data degraded" : row.active ? "Active · unacknowledged" : "Returned · unacknowledged") +
+        row.degraded ? "Unack · data degraded" : row.active ? "Active · unack" : "Returned · unack") +
       (managed.length ? " · " + esc(managed.map(name => MANAGED_LABELS[name]).join(" · ")) : "") +
       "</span></span></button>";
   }).join("");
   const empty = "<span class=\"plant-alarm-clear\">" + (stale ? "Last known alarm state · connection stale" :
-    active ? "No unacknowledged alarms · active conditions remain in the plant" : "No unacknowledged alarms") + "</span>";
+    active ? "All acknowledged · " + active + " active" : "No alarms") + "</span>";
   updateAlarmMarkup(strip, count + "<div class=\"plant-alarm-cards\">" + (cards || empty) + "</div>");
 }
 
@@ -3658,7 +3675,11 @@ function equipmentControls(equipment, telemetry, forced, members) {
     const current = sample && sample.value && "bool" in sample.value
       ? (sample.value.bool ? control.true_label : control.false_label) || formatValue(sample.value)
       : sample ? formatValue(sample.value) : "no sample";
-    const caption = "<div class=\"role\"><span>" + esc(control.label) + " — " + esc(current) + "</span> ";
+    const known = sample && isGood(sample.quality) && feed.stale === null &&
+      sample.value && typeof sample.value.bool === "boolean";
+    const state = meta.value_type !== "bool" ? " · " + current : known ? "" :
+      feed.stale !== null ? " · last known / stale" : " · data unknown";
+    const caption = "<div class=\"role\"><span>" + esc(control.label + state) + "</span> ";
     const reason = meta.requires_reason ? "<input class=\"equipment-reason\" data-point=\"" +
       control.point + "\" placeholder=\"reason\" title=\"Required command reason\"> " : "";
     if (meta.value_type !== "bool") {
@@ -3667,12 +3688,17 @@ function equipmentControls(equipment, telemetry, forced, members) {
     const buttons = [false, true].map(level => {
       const label = level ? (control.true_label || "Set true") : (control.false_label || "Set false");
       return "<button type=\"button\" class=\"equipment-write\" data-point=\"" +
-        control.point + "\" data-level=\"" + level + "\">" + esc(label) + "</button>";
+        control.point + "\" data-level=\"" + level + "\" aria-pressed=\"" +
+        (known ? String(sample.value.bool === level) : "mixed") + "\" title=\"" +
+        esc(control.label + ": " + current + " · " + meta.name) + "\">" + esc(label) + "</button>";
     }).join(" ");
     return caption + reason + buttons + forcedBadge(control.point, forced) + "</div>";
   }).join("");
   const alarms = members.filter(descriptor => descriptor.ports.some(port =>
-    port.name === "alarm" && port.direction === "out" && port.kind === "bool"));
+    port.name === "alarm" && port.direction === "out" && port.kind === "bool")).filter(descriptor => {
+      const sample = flagSample(descriptor, telemetry, "alarm");
+      return !sample || !isGood(sample.quality) || alarmRowStates(descriptor, telemetry).size > 0;
+    });
   const alarmRows = alarms.map(descriptor => {
     const alarm = descriptor.ports.find(port => port.name === "alarm" && port.direction === "out");
     const label = alarmLabel(descriptor, alarm);
@@ -3684,9 +3710,8 @@ function equipmentControls(equipment, telemetry, forced, members) {
       (isAsserted(unack) ? " · unacknowledged" : "") + "</span> " +
       ackAffordance(descriptor) + "</div>";
   }).join("");
-  return "<section class=\"faceplate\"><h3>Operator controls</h3>" + rows +
-    "<p>A command receipt confirms the request. Check the driven output and running feedback to confirm operation.</p>" +
-    (alarms.length ? "<h3>Equipment alarms</h3>" + alarmRows : "") + "</section>";
+  return "<section class=\"faceplate\"><h3>Controls</h3>" + rows +
+    (alarms.length ? "<h3>Alarms</h3>" + alarmRows : "") + "</section>";
 }
 
 // Ordered, model-declared feedback stays separate from command requests.
@@ -3696,12 +3721,15 @@ function equipmentFeedback(equipment, telemetry, members) {
     port.name === "alarm" && port.direction === "out" && port.kind === "bool"))
     .flatMap(member => member.ports.map(port => port.point)));
   const points = equipment.points.filter(point => !commandPoints.has(point) && !alarmPoints.has(point)).slice(0, 6);
-  return "<section class=\"equipment-feedback\"><h3>Live feedback and protection</h3><dl>" + points.map(point => {
+  return "<section class=\"equipment-feedback\"><h3>Feedback</h3><dl>" + points.map(point => {
     const meta = metaByPoint.get(point);
     const sample = (telemetry.get(point) || {}).sample;
     const trusted = sample && isGood(sample.quality) && feed.stale === null;
-    return "<div><dt title=\"" + esc(meta && meta.description || "") + "\">" + esc(pointName(point)) + "</dt><dd class=\"" +
-      (trusted ? "" : "uncertain") + "\">" + (sample ? esc(formatValue(sample.value)) : "—") +
+    const label = meta ? meta.description || meta.name : "Feedback";
+    const value = sample ? typeof sample.value?.bool === "boolean" ?
+      sample.value.bool ? "Yes" : "No" : formatValue(sample.value) : "—";
+    return "<div><dt title=\"" + esc(meta ? meta.name + " · " + (meta.description || "") : "") + "\">" + esc(label) + "</dt><dd class=\"" +
+      (trusted ? "" : "uncertain") + "\">" + esc(value) +
       (trusted ? "" : " · " + esc(feed.stale !== null ? "last known / stale" : sample ? formatQuality(sample.quality) : "no sample")) + "</dd></div>";
   }).join("") + "</dl></section>";
 }
@@ -3721,12 +3749,11 @@ function renderEquipment(snapshot, telemetry, forced) {
   }
   const captured = captureEdits("#equipment-faceplate");
   pane.hidden = false;
-  document.getElementById("equipment-name").textContent =
-    (equipment ? equipment.label : descriptor.label) + " (" +
-      (equipment ? equipment.kind : descriptor.kind) + ")";
+  document.getElementById("equipment-name").textContent = equipment ? equipment.label : descriptor.label;
   // The pair-health line — the pair section's own verdict, so the
   // navigation surface carries the same redundancy reading.
   const pairLine = document.getElementById("equipment-pair");
+  pairLine.hidden = peers.length <= 1;
   if (peers.length > 1) {
     const health = pairHealth(peers, peerState);
     pairLine.textContent = pairSummary(health);
@@ -3739,6 +3766,7 @@ function renderEquipment(snapshot, telemetry, forced) {
   // the one-line verdict the overview cards use.
   const io = ioHealthSummary(snapshot.io_health);
   const ioLine = document.getElementById("equipment-io");
+  ioLine.hidden = !io.bad;
   ioLine.textContent = io.text;
   ioLine.className = io.bad ? "bad" : "good";
   const diagnostics = new Map(snapshot.components.map(c => [c.name, c]));
@@ -3776,6 +3804,7 @@ function renderEquipment(snapshot, telemetry, forced) {
       .sort((a, b) => a.seq - b.seq) : equipmentJournalEntries(descriptor)).map(entry =>
       "<tr><td>" + entry.seq + "</td><td>" + entry.tick + "</td><td>" +
       esc(describeEvent(entry.event)) + "</td></tr>").join("");
+  renderEquipmentCommandStatus();
 }
 
 // One inline-SVG trend panel per point, built once from the signal index.
@@ -4810,7 +4839,8 @@ async function init() {
   });
   const receipt = document.getElementById("receipt");
   new MutationObserver(() => {
-    document.getElementById("equipment-receipt").textContent = receipt.textContent;
+    document.getElementById("equipment-receipt").textContent = alarmCommandMessage(receipt.textContent);
+    renderEquipmentCommandStatus();
     document.getElementById("alarm-command-status").textContent = alarmCommandMessage(receipt.textContent);
     renderAlarmCommandStatus();
   }).observe(receipt, { childList: true, characterData: true, subtree: true });
@@ -4892,6 +4922,7 @@ async function init() {
     }
     const equipmentWrite = event.target.closest("button.equipment-write");
     if (equipmentWrite) {
+      equipmentCommandReceipt = null;
       const point = Number(equipmentWrite.dataset.point);
       const meta = metaByPoint.get(point);
       if (!meta || !meta.writable || meta.direction !== "in" || meta.value_type !== "bool") return;
@@ -4902,7 +4933,7 @@ async function init() {
         return;
       }
       try {
-        await submitCommand({ write_value: { point: point, kind: "bool",
+        equipmentCommandReceipt = await submitCommand({ write_value: { point: point, kind: "bool",
           value: { bool: equipmentWrite.dataset.level === "true" } } }, reason);
       } catch (error) {
         document.getElementById("receipt").textContent = "command failed: " + error;

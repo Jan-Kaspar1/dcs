@@ -7,7 +7,7 @@
   const SIZES = { pump: [160, 140], motor: [160, 140], valve: [160, 140],
     tank: [150, 195], measurement: [190, 100], label: [300, 50] };
   const state = { roots: null, context: null, model: null, views: [], signature: null,
-    view: null, selected: null, elements: new Map() };
+    view: null, selected: null, bounds: null, elements: new Map() };
 
   function element(tag, attributes, text, namespace) {
     const node = namespace ? document.createElementNS(namespace, tag) : document.createElement(tag);
@@ -18,7 +18,11 @@
   function svg(tag, attributes, text) {
     return element(tag, attributes, text, "http://www.w3.org/2000/svg");
   }
-  function note(text) { if (state.roots) state.roots.note.textContent = text; }
+  function note(text) {
+    if (!state.roots) return;
+    state.roots.note.textContent = text;
+    state.roots.note.hidden = !text;
+  }
   function modelMap(context) {
     const index = context.index;
     const descriptors = context.descriptors instanceof Map ? Array.from(context.descriptors.values())
@@ -70,6 +74,7 @@
     roots.canvas.setAttribute("viewBox", "0 0 " + WIDTH + " " + HEIGHT);
     roots.canvas.setAttribute("role", "group");
     roots.canvas.setAttribute("aria-label", "Plant schematic; select equipment to open its controls");
+    window.addEventListener("resize", updateViewport);
     return true;
   }
   function renderNavigation() {
@@ -113,12 +118,12 @@
     } else if (node.symbol === "tank") {
       group.append(svg("path", { d: "M 18 20 L 18 110 Q " + x + " 130 " + (width - 18) + " 110 L " + (width - 18) + " 20 M 18 20 Q " + x + " 0 " + (width - 18) + " 20 M 18 20 Q " + x + " 40 " + (width - 18) + " 20", class: "plant-symbol-body plant-tank" }));
     } else if (node.symbol === "measurement") group.append(svg("rect", { x: 6, y: 4, width: width - 12, height: 62, rx: 2, class: "plant-measurement-body" }));
-    const labelY = node.symbol === "label" ? 26 : node.symbol === "tank" ? 143 : node.symbol === "measurement" ? 25 : 94;
+    const labelY = node.symbol === "label" ? 26 : node.symbol === "tank" ? 143 : node.symbol === "measurement" ? 25 : 91;
     group.append(svg("text", { x, y: labelY, "text-anchor": "middle", class: "plant-label" }, node.label));
     if (node.symbol !== "label") {
-      group.append(svg("text", { x, y: node.symbol === "tank" ? 162 : node.symbol === "measurement" ? 50 : 117,
+      group.append(svg("text", { x, y: node.symbol === "tank" ? 162 : node.symbol === "measurement" ? 50 : 111,
         "text-anchor": "middle", class: node.symbol === "measurement" ? "plant-value" : "plant-status" }, ""));
-      group.append(svg("text", { x, y: node.symbol === "measurement" ? 83 : node.symbol === "tank" ? 183 : 137,
+      group.append(svg("text", { x, y: node.symbol === "measurement" ? 83 : node.symbol === "tank" ? 183 : 129,
         "text-anchor": "middle", class: "plant-tag" }, ""));
     }
   }
@@ -131,16 +136,49 @@
     return { x: node.x + (port === "e" ? width : port === "w" ? 0 : width / 2),
       y: node.y + (port === "n" ? 0 : port === "s" ? height : height / 2) };
   }
-  function pipePath(pipe, nodes) {
+  function pipePoints(pipe, nodes) {
     const fromNode = nodes.get(pipe.from.node), toNode = nodes.get(pipe.to.node);
     if (!fromNode || !toNode) return null;
     const from = portPosition(fromNode, pipe.from.port), to = portPosition(toNode, pipe.to.port);
     if (pipe.from.port === "e" || pipe.from.port === "w") {
       const middle = Math.round((from.x + to.x) / 2);
-      return "M " + from.x + " " + from.y + " H " + middle + " V " + to.y + " H " + to.x;
+      return [from, { x: middle, y: from.y }, { x: middle, y: to.y }, to];
     }
     const middle = Math.round((from.y + to.y) / 2);
-    return "M " + from.x + " " + from.y + " V " + middle + " H " + to.x + " V " + to.y;
+    return [from, { x: from.x, y: middle }, { x: to.x, y: middle }, to];
+  }
+  function pipePath(pipe, nodes) {
+    const points = pipePoints(pipe, nodes);
+    return points && points.map((point, index) => (index ? "L " : "M ") + point.x + " " + point.y).join(" ");
+  }
+  function viewBounds(view, nodes) {
+    if (!nodes.size) return null;
+    let left = WIDTH, top = HEIGHT, right = 0, bottom = 0;
+    function include(x, y) { left = Math.min(left, x); top = Math.min(top, y); right = Math.max(right, x); bottom = Math.max(bottom, y); }
+    nodes.forEach(node => {
+      const [width, height] = SIZES[node.symbol];
+      include(node.x, node.y); include(node.x + width, node.y + height);
+    });
+    (view.pipes || []).forEach(pipe => (pipePoints(pipe, nodes) || []).forEach(point => include(point.x, point.y)));
+    // The drawing's geometry stays on the declared coordinate plane. Cropping
+    // empty margins is a viewport choice and includes full symbols and pipes.
+    const padding = 24;
+    return { x: left - padding, y: top - padding, width: right - left + padding * 2, height: bottom - top + padding * 2 };
+  }
+  function updateViewport() {
+    if (!state.roots) return;
+    const canvas = state.roots.canvas, bounds = state.bounds;
+    if (window.matchMedia("(max-width: 700px)").matches && bounds) {
+      canvas.setAttribute("viewBox", [bounds.x, bounds.y, bounds.width, bounds.height].join(" "));
+      // Preserve readable SVG text on narrow displays. Wider drawings pan in
+      // the existing scroll container; individual area views still fit.
+      canvas.style.minWidth = bounds.width + "px";
+      canvas.style.minHeight = bounds.height + "px";
+    } else {
+      canvas.setAttribute("viewBox", "0 0 " + WIDTH + " " + HEIGHT);
+      canvas.style.removeProperty("min-width");
+      canvas.style.removeProperty("min-height");
+    }
   }
   function renderCanvas() {
     const view = currentView(), canvas = state.roots.canvas;
@@ -149,6 +187,8 @@
     canvas.replaceChildren(); state.elements.clear();
     const defs = svg("defs"); canvas.append(defs);
     const nodes = new Map(view.nodes.filter(node => SIZES[node.symbol]).map(node => [node.id, node]));
+    state.bounds = viewBounds(view, nodes);
+    updateViewport();
     (view.pipes || []).forEach(pipe => {
       const d = pipePath(pipe, nodes);
       if (d) canvas.append(svg("path", { d, class: "plant-pipe", "aria-hidden": "true" }));
@@ -169,7 +209,8 @@
         const indicator = svg("g", { transform: "translate(" + (width - 58) + " 2)", class: "plant-alarm-indicator", hidden: "" });
         indicator.append(svg("title", {}));
         indicator.append(svg("rect", { x: 0, y: 0, width: 56, height: 34, rx: 3, class: "plant-alarm-badge" }));
-        indicator.append(svg("text", { x: 28, y: 14, "text-anchor": "middle", class: "plant-alarm-badge-label" }));
+        indicator.append(svg("path", { class: "plant-alarm-priority-mark", "aria-hidden": "true" }));
+        indicator.append(svg("text", { x: 34, y: 14, "text-anchor": "middle", class: "plant-alarm-badge-label" }));
         indicator.append(svg("text", { x: 28, y: 28, "text-anchor": "middle", class: "plant-alarm-badge-priority" }));
         group.append(indicator);
       }
@@ -182,7 +223,7 @@
       state.elements.set(node.id, group); canvas.append(group);
     });
     updateLive();
-    note("Select a pump, motor, or valve to view its feedback, alarms, and controls.");
+    note("");
   }
   function openNode(node) {
     const binding = node.binding;
@@ -218,7 +259,8 @@
   function liveState(node) {
     const binding = node.binding;
     if (!binding) return { text: "", tag: "", running: false, fault: false, degraded: false };
-    if (state.context.stale) return { text: "Data stale", tag: "Connection lost", running: false, fault: false, degraded: true };
+    if (state.context.stale) return { text: "Data stale", tag: "Offline", description: "Connection lost; current data is stale",
+      running: false, fault: false, degraded: true };
     if (binding.point != null) {
       const reading = sample(binding.point), meta = state.model.points.get(binding.point);
       const current = value(reading);
@@ -242,14 +284,14 @@
       if (port.name === "tripped" && port.direction === "out") { tripped = tripped || current === true; important.push(reading); }
     }));
     const degraded = !descriptors.length || important.length === 0 || important.some(reading => !good(reading));
-    let text = tripped ? "Protection tripped" : fault ? "Feedback fault" : degraded ? "Data degraded"
+    let text = tripped ? "Tripped" : fault ? "Feedback fault" : degraded ? "Data uncertain"
       : running === true ? "Running" : running === false ? "Stopped" : position != null ? "Position " + position.toLocaleString(undefined, { maximumFractionDigits: 1 }) + (positionUnit ? " " + positionUnit : "")
-      : command === true ? "Output on" : command === false ? "Output off" : "Live component";
+      : command === true ? "On" : command === false ? "Off" : "Live";
     if (!fault && !tripped && !degraded) {
       if (running === true && command === false) text = "Stop requested";
       if (running === false && command === true) text = "Start requested";
     }
-    let tag = degraded && (fault || tripped) ? "Data degraded" : "";
+    let tag = degraded && (fault || tripped) ? "Data uncertain" : "";
     if (binding.equipment != null) {
       const equipment = state.model.equipment.get(binding.equipment);
       const mode = equipment && (equipment.controls || []).find(control => /mode/i.test(control.label || ""));
@@ -258,7 +300,8 @@
         if (good(reading) && typeof value(reading) === "boolean") tag += (tag ? " · " : "") + (value(reading) ? mode.true_label || "On" : mode.false_label || "Off");
       }
     }
-    return { text, tag, running: running === true && !degraded, fault: fault || tripped, degraded };
+    const description = tripped ? "Protection tripped" : fault ? "Actuator feedback fault" : text;
+    return { text, tag, description, running: running === true && !degraded, fault: fault || tripped, degraded };
   }
   function alarmSummary(node) {
     const binding = node.binding;
@@ -298,10 +341,11 @@
       const descriptor = state.model.descriptors.get(alarm.name);
       return descriptor && (descriptor.ports || []).some(port => port.name === "unacknowledged" && port.direction === "out");
     });
-    let label = unacknowledged ? unacknowledged + " UNACK" : active ? active + " ACTIVE" : "ALARM ?";
-    let detail = priorityLabel + (fullyManaged ? " · MGD" : returned === standing.length && returned > 0 ? " · RET" : acknowledged ? " · ACK" : "");
-    if (stale) { label = standing.length ? standing.length + " LAST" : "ALARM ?"; detail = "STALE"; }
-    else if (degraded) detail = standing.length ? priorityLabel + " · ?" : "DATA ?";
+    const label = priorityLabel + (standing.length ? "×" + standing.length : "");
+    let detail = fullyManaged ? "MGD" : returned === standing.length && returned > 0 ? "RET/U"
+      : unacknowledged ? "UNACK" : acknowledged ? "ACK" : active ? "ACTIVE" : "ALARM ?";
+    if (stale) detail = "STALE";
+    else if (degraded) detail = "DATA ?";
     let description = standing.length
       ? standing.length + (standing.length === 1 ? " alarm" : " alarms") + ": " + active + " active, " + unacknowledged + " unacknowledged"
         + (returned ? ", " + returned + " returned" : "") + (managed ? ", " + managed + " managed" : "")
@@ -334,6 +378,11 @@
       indicator.querySelector(".plant-alarm-badge").classList.toggle(priority, selected);
     });
     if (!visible) return "";
+    // Priority remains distinguishable without color. Shapes are redundant
+    // with the explicit P-code; lifecycle is kept on a separate text line.
+    const shapes = { p1: "M 5 13 L 10 4 L 15 13 Z", p2: "M 10 3 L 15 8 L 10 13 L 5 8 Z",
+      p3: "M 5 4 H 15 V 14 H 5 Z", other: "M 10 4 A 5 5 0 1 0 10 14 A 5 5 0 1 0 10 4" };
+    indicator.querySelector(".plant-alarm-priority-mark").setAttribute("d", shapes[alarms.priorityClass]);
     indicator.querySelector(".plant-alarm-badge-label").textContent = alarms.label;
     indicator.querySelector(".plant-alarm-badge-priority").textContent = alarms.detail;
     indicator.querySelector("title").textContent = alarms.description;
@@ -355,7 +404,7 @@
       if (status) status.textContent = live.text;
       if (tag) tag.textContent = live.tag;
       const alarmDescription = updateAlarmIndicator(node, element);
-      const description = node.label + (live.text ? " · " + live.text : "") + (live.tag ? " · " + live.tag : "")
+      const description = node.label + (live.description || live.text ? " · " + (live.description || live.text) : "") + (live.tag ? " · " + live.tag : "")
         + (alarmDescription ? " · " + alarmDescription : "");
       element.setAttribute("aria-label", description);
       element.querySelector("title").textContent = description;

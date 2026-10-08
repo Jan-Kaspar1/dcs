@@ -805,6 +805,7 @@ pub fn pump(
         fault_sup_in,
         &format!("{tag}-fault"),
         &group_name,
+        "Feedback mismatch",
     );
     plant.connect(fault_alarm_in, &fault_alarm.input);
     let thermal_alarm_layout = pump_alarm(
@@ -820,6 +821,7 @@ pub fn pump(
         fault_sup_in,
         &format!("{tag}-thermal"),
         &group_name,
+        "Thermal trip",
     );
     let moisture_alarm_layout = pump_alarm(
         plant,
@@ -834,6 +836,7 @@ pub fn pump(
         fault_sup_in,
         &format!("{tag}-moisture"),
         &group_name,
+        "Moisture detected",
     );
 
     let layout = PumpLayout {
@@ -1049,6 +1052,7 @@ fn pump_alarm(
     suppress_in: InPoint<bool>,
     prefix: &str,
     group: &str,
+    label: &str,
 ) -> ManagedAlarmLayout {
     let ack = plant.internal_input::<bool>(PointId(base), false, true);
     let alarm = plant.internal_output::<bool>(PointId(base + 3), false);
@@ -1086,11 +1090,7 @@ fn pump_alarm(
         group,
     );
     for (offset, suffix, description) in [
-        (
-            3,
-            "alarm",
-            "Standing alarm state — process truth under every managed flag",
-        ),
+        (3, "alarm", label),
         (
             4,
             "unacknowledged",

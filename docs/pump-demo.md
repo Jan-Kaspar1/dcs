@@ -79,9 +79,16 @@ python3 scripts/pump_demo.py --monitor http://192.168.178.107:9080 fault p101
 
 The steps below use the default local launch and helper addresses.
 
+The compact operator layout follows the documented
+[HMI presentation policy](research/operator-hmi.md): neutral normal equipment,
+priority-coded alarm badges, and details on selection. Alarm descriptions come
+from the model's signal metadata; signal identities remain available in alarm
+details and tooltips. The demo labels its pumps **P-101** and **P-102** consistently
+across navigation, alarms, and controls.
+
 ## Try manual operation and protection
 
-1. Open the plant overview from the left navigation and click the **Pump 1**
+1. Open the plant overview from the left navigation and click the **P-101**
    symbol. Its equipment drawer contains the pump's controls, status, and alarms.
 2. Select **Manual**, then **Run request**. After the configured protection-clear
    holdout, the command and running contact become true.

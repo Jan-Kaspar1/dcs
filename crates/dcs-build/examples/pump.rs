@@ -8,7 +8,7 @@ use dcs_build::pump::{PumpConfig, PumpInputs, PumpLinks, pump};
 use dcs_build::specs::{DigitalInputSpec, ManagedInputs, ManagedLatchingAlarmSpec};
 use dcs_build::{
     ComponentId, Direction, InPoint, PlantBuilder, PlantView, PlantViewBinding, PlantViewNode,
-    PlantViewPipe, PlantViewPort, PlantViewSymbol, PointId, SignalId, Value, parameters, unit,
+    PlantViewSymbol, PointId, SignalId, Value, parameters, unit,
 };
 use dcs_model::Rationalization;
 
@@ -66,7 +66,7 @@ fn main() {
             .description("Supervisory demand; the pump still applies modes and protections");
 
         let mut config = PumpConfig::new(tag, 1000 + index as u64 * 32, 5000 + index as u64 * 30);
-        config.label = format!("Pump {}", index + 1);
+        config.label = format!("P-{}", 101 + index);
         config.min_off_ticks = 5;
         config.motor_fault_ticks = 10;
         config.thermal_priority = 1 + index as i64;
@@ -112,96 +112,76 @@ fn main() {
 
     // The operator schematic is configured by this plant's Rust composition.
     // Symbols bind to declared equipment and signals; geometry does not wire
-    // control logic. The two independent test loops are shown explicitly.
+    // control logic. The two pumps are independent test loops, so the display
+    // does not invent a process pipe between their simulated I/O contacts.
     plant.view(PlantView {
         id: "overview".into(),
-        label: "Pump test rig".into(),
+        label: "Pumps".into(),
         parent: None,
         nodes: vec![
             symbol(
-                "feedback-1",
-                PlantViewSymbol::Label,
-                "Running contact",
-                100,
-                220,
-                None,
-            ),
-            symbol(
                 "pump-1",
                 PlantViewSymbol::Pump,
-                "Pump 1",
-                520,
-                220,
+                "P-101",
+                330,
+                300,
                 Some(PlantViewBinding::Equipment("p101".into())),
             ),
             symbol(
-                "output-1",
-                PlantViewSymbol::Label,
-                "Motor output",
-                850,
-                220,
-                None,
-            ),
-            symbol(
-                "feedback-2",
-                PlantViewSymbol::Label,
-                "Running contact",
-                100,
+                "bearing-temperature-1",
+                PlantViewSymbol::Measurement,
+                "Bearing T",
+                315,
                 450,
-                None,
+                Some(PlantViewBinding::Point(PointId(15))),
             ),
             symbol(
                 "pump-2",
                 PlantViewSymbol::Pump,
-                "Pump 2",
-                520,
-                450,
+                "P-102",
+                710,
+                300,
                 Some(PlantViewBinding::Equipment("p102".into())),
             ),
             symbol(
-                "output-2",
-                PlantViewSymbol::Label,
-                "Motor output",
-                850,
+                "bearing-temperature-2",
+                PlantViewSymbol::Measurement,
+                "Bearing T",
+                695,
                 450,
-                None,
+                Some(PlantViewBinding::Point(PointId(25))),
             ),
             symbol(
                 "protection-input",
                 PlantViewSymbol::Measurement,
-                "Protection input",
+                "Guard level",
                 505,
-                65,
+                160,
                 Some(PlantViewBinding::Point(measurement.id())),
             ),
         ],
-        pipes: vec![
-            pipe("feedback-1", "pump-1"),
-            pipe("pump-1", "output-1"),
-            pipe("feedback-2", "pump-2"),
-            pipe("pump-2", "output-2"),
-        ],
+        pipes: vec![],
     });
     for (index, tag) in ["p101", "p102"].into_iter().enumerate() {
         plant.view(PlantView {
             id: tag.into(),
-            label: format!("Pump {}", index + 1),
+            label: format!("P-{}", 101 + index),
             parent: Some("overview".into()),
             nodes: vec![
                 symbol(
                     "pump",
                     PlantViewSymbol::Pump,
-                    &format!("Pump {}", index + 1),
+                    &format!("P-{}", 101 + index),
                     520,
-                    300,
+                    340,
                     Some(PlantViewBinding::Equipment(tag.into())),
                 ),
                 symbol(
                     "bearing-temperature",
                     PlantViewSymbol::Measurement,
-                    "Bearing temperature",
+                    "Bearing T",
                     505,
-                    140,
+                    230,
                     Some(PlantViewBinding::Point(PointId(15 + index as u64 * 10))),
                 ),
             ],
@@ -319,7 +299,11 @@ fn bearing_warning(
                 point,
             )
             .group(&group)
-            .description("Managed bearing-temperature warning lifecycle");
+            .description(if offset == 3 {
+                "Bearing temperature high"
+            } else {
+                "Managed bearing-temperature warning lifecycle"
+            });
         points.push(point.id());
     }
     (warning.id, points)
@@ -340,20 +324,5 @@ fn symbol(
         x,
         y,
         binding,
-    }
-}
-
-fn pipe(from: &str, to: &str) -> PlantViewPipe {
-    // Ports and paths describe only the drawing. The loopbacks above are the
-    // actual simulated field wiring.
-    PlantViewPipe {
-        from: dcs_build::PlantViewPipeEnd {
-            node: from.into(),
-            port: PlantViewPort::E,
-        },
-        to: dcs_build::PlantViewPipeEnd {
-            node: to.into(),
-            port: PlantViewPort::W,
-        },
     }
 }
