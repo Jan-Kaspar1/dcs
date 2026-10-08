@@ -52,7 +52,7 @@ python3 scripts/pump_demo.py run --listen 192.168.178.107:9080 --no-browser
 
 The Lenovo installation is available at
 [dcs-demo.home.arpa](https://dcs-demo.home.arpa/) through the home lab's configured
-DNS and Caddy route. DNS and HTTPS were checked from the Lenovo on 2026-10-07.
+DNS and Caddy route. DNS and HTTPS were checked from the Lenovo on 2026-10-08.
 Other home-network devices can also open
 [the monitor directly](http://192.168.178.107:9080/). The simulated plant service
 remains on local port 9011; fault injection runs on the Lenovo. The new demo's
@@ -92,8 +92,8 @@ The steps below use the default local launch and helper addresses.
    ```
 
 4. The protection state trips and the command stops. The contact quality and
-   managed thermal alarm identify the cause. The top alarm strip opens the full
-   alarms and events list; selecting a pump alarm opens its owning equipment's
+   managed thermal alarm identify the cause. A top alarm card opens that alarm
+   in **Alarm management**. The selected alarm's equipment link opens its pump's
    control drawer. Acknowledging the alarm changes its acknowledgment state;
    it does not clear the bad contact or stop a standing run request.
 5. Select **Stop request**, then clear the simulated contact fault:
