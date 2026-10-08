@@ -235,12 +235,89 @@ mod common;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::{Duration, Instant};
 
 use common::{CARGO, PIN_UNRESOLVABLE, root};
 
 /// The remote the published tree records — the string the materialized
 /// copy's `Cargo.toml` rewrites to the `file://` stand-in.
 const PUBLISHED_REMOTE: &str = "https://github.com/Jan-Kaspar1/dcs.git";
+
+/// Bound for one network fetch attempt in `serve_pinned_rev`'s seed
+/// fallback: a stalled remote must fail the test naming the remote,
+/// never hang the `rust-tests` leg to the platform's job cap.
+/// Overridable via `DCS_FETCH_TIMEOUT_SECS` for harness-level fakes.
+fn fetch_timeout() -> Duration {
+    std::env::var("DCS_FETCH_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(120))
+}
+
+/// Bound for the nested `ci/check.sh` run: the stage's baseline is
+/// ~30min, so the default (60min) leaves headroom while still failing
+/// before the 6h platform cap. Overridable via
+/// `DCS_CHECK_TIMEOUT_SECS` for harness-level fakes.
+fn check_timeout() -> Duration {
+    std::env::var("DCS_CHECK_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(3600))
+}
+
+/// Runs `cmd` to completion, killing it after `timeout`. `Ok` carries
+/// the completed output (even on nonzero status); `Err` names the
+/// timeout and what was running.
+fn run_bounded(cmd: &mut Command, timeout: Duration, what: &str) -> Result<Output, String> {
+    use std::process::Stdio;
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .unwrap_or_else(|error| panic!("failed to spawn {what}: {error}"));
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child
+                    .wait_with_output()
+                    .map_err(|error| format!("failed waiting on {what}: {error}"));
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    // Kill and reap the direct child only: `wait_with_output`
+                    // would also wait for grandchildren holding the pipes
+                    // (e.g. `git-remote-https`), turning the bound itself
+                    // into the stall it guards against.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("{what} timed out after {}s", timeout.as_secs()));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => panic!("failed waiting on {what}: {error}"),
+        }
+    }
+}
+
+/// One bounded `git fetch --depth 1 <source> <object>` into `remote_dir`.
+/// Returns `true` only when the fetch completed with success; a stall
+/// (or any transport failure) is `false` and names the source in the
+/// returned note so the caller can report which remote stalled.
+fn fetch_one(remote_dir: &Path, source: &str, object: &str, timeout: Duration) -> bool {
+    let mut cmd = Command::new("git");
+    cmd.args(["fetch", "--depth", "1", source, object])
+        .current_dir(remote_dir);
+    let what = format!("git fetch --depth 1 {source} {object}");
+    match run_bounded(&mut cmd, timeout, &what) {
+        Ok(output) => output.status.success(),
+        Err(note) => {
+            eprintln!("bounded fetch: {note}");
+            false
+        }
+    }
+}
 
 /// The workspace's build target directory, resolved through cargo so a
 /// `CARGO_TARGET_DIR` override is honored.
@@ -414,19 +491,14 @@ fn serve_pinned_rev(scratch: &Path) -> String {
     git(scratch, &["init", "--bare", "dcs-remote.git"]);
     // The local transport serves the object directly when the
     // checkout's store holds it; the published origin is the fallback
-    // when the shallow store cannot.
+    // when the shallow store cannot. Each attempt is bounded so a
+    // stalled remote fails naming the remote instead of hanging to
+    // the platform's job cap.
+    let timeout = fetch_timeout();
     let seed = |object: &str| {
         [root().display().to_string(), PUBLISHED_REMOTE.to_string()]
             .iter()
-            .any(|source| {
-                Command::new("git")
-                    .args(["fetch", "--depth", "1", source, object])
-                    .current_dir(&remote)
-                    .output()
-                    .expect("git fetch runs")
-                    .status
-                    .success()
-            })
+            .any(|source| fetch_one(&remote, source, object, timeout))
     };
     if pin.len() == 40 && pin.chars().all(|c| c.is_ascii_hexdigit()) {
         assert!(
@@ -550,7 +622,16 @@ impl Materialized {
         if let Some(tools) = tools {
             check.env("DCS_TOOLS", tools);
         }
-        check.output().expect("ci/check.sh runs")
+        // The nested check is bounded like the fetch fallback: a stall
+        // inside `ci/check.sh` (e.g. a hung `cargo fetch` against an
+        // unreachable remote) must fail naming the remote, never hang
+        // the merge-gated leg to the platform cap.
+        let timeout = check_timeout();
+        let what = format!("ci/check.sh with DCS_REMOTE={}", self.remote);
+        match run_bounded(&mut check, timeout, &what) {
+            Ok(output) => output,
+            Err(note) => panic!("{PIN_UNRESOLVABLE}: {note} (DCS_REMOTE={})", self.remote),
+        }
     }
 }
 
@@ -1647,6 +1728,79 @@ fn an_unanswerable_tag_query_is_unverifiable_not_absent() {
     assert!(
         stderr.contains(&format!("but {pin} lands on {precise}")),
         "the wrong-target record was refused without naming the tag's target:\n{stderr}"
+    );
+}
+
+/// A stalled network fetch fallback fails fast naming the remote,
+/// never hanging the merge-gated leg: the harness bounds both the
+/// `git fetch --depth 1 <remote> <sha>` seed fallback and the nested
+/// `ci/check.sh` run. This test uses harness-level fakes — an
+/// unroutable remote and a hanging command — at short bounds beside
+/// the positive foreign-pin leg below.
+#[test]
+fn a_stalled_fetch_fallback_fails_fast_naming_the_remote() {
+    use std::time::Instant;
+    // An unreachable remote on a closed loopback port: the transport
+    // refuses immediately, so the fallback returns without touching the
+    // network, while the hanging-command legs below prove the explicit
+    // bound kills a genuine stall. (A documentation-routable address
+    // would exercise git's own minute-scale TCP timeout instead.)
+    let unreachable = "http://127.0.0.1:9/unreachable/dcs.git";
+    let object = "0".repeat(40);
+    let dir = std::env::temp_dir().join(format!(
+        "dcs-bounded-fetch-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    git(&dir, &["init", "--bare", "probe.git"]);
+    let probe = dir.join("probe.git");
+    let bound = Duration::from_secs(5);
+    let started = Instant::now();
+    let served = fetch_one(&probe, unreachable, &object, bound);
+    let elapsed = started.elapsed();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !served,
+        "a stalled remote {unreachable} was reported as served"
+    );
+    assert!(
+        elapsed < bound + Duration::from_secs(30),
+        "the stalled fetch did not fail fast: took {elapsed:?} against a {bound:?} bound"
+    );
+    // The bound names the remote in its diagnostic: the same `what`
+    // string the seed fallback logs on a stall.
+    let mut hanging = Command::new("sleep");
+    hanging.arg("60");
+    let what = format!("git fetch --depth 1 {unreachable} {object}");
+    let timed_out = run_bounded(&mut hanging, Duration::from_secs(2), &what);
+    let Err(note) = timed_out else {
+        panic!("a hanging fetch survived its bound");
+    };
+    assert!(
+        note.contains(unreachable),
+        "the stall diagnostic did not name the remote:\n{note}"
+    );
+    // Equivalent bound on the nested check subprocess: a hanging child
+    // is killed at the bound instead of waiting unbounded.
+    let mut stalled_check = Command::new("sleep");
+    stalled_check.arg("60");
+    let started = Instant::now();
+    let timed_out = run_bounded(
+        &mut stalled_check,
+        Duration::from_secs(2),
+        "ci/check.sh with DCS_REMOTE=stalled-remote",
+    );
+    assert!(
+        timed_out.is_err_and(|note| note.contains("stalled-remote")),
+        "the nested check bound did not name the remote"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "the nested check bound did not fail fast"
     );
 }
 
