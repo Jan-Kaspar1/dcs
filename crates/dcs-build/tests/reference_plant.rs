@@ -271,15 +271,16 @@ fn fetch_timeout() -> Duration {
 }
 
 /// Bound for the nested `ci/check.sh` run: the stage's baseline is
-/// ~30min, so the default (60min) leaves headroom while still failing
-/// before the 6h platform cap. Overridable via
+/// ~30min but shared CI runners under parallel shards have needed well
+/// past 60min, so the default (5h) leaves headroom while still failing
+/// with a diagnostic before the 6h platform cap. Overridable via
 /// `DCS_CHECK_TIMEOUT_SECS` for harness-level fakes.
 fn check_timeout() -> Duration {
     std::env::var("DCS_CHECK_TIMEOUT_SECS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .map(Duration::from_secs)
-        .unwrap_or_else(|| Duration::from_secs(3600))
+        .unwrap_or_else(|| Duration::from_secs(5 * 3600))
 }
 
 /// Runs `cmd` to completion, killing it after `timeout`. `Ok` carries
@@ -331,6 +332,21 @@ fn fetch_one(remote_dir: &Path, source: &str, object: &str, timeout: Duration) -
             eprintln!("bounded fetch: {note}");
             false
         }
+    }
+}
+
+/// Runs a nested `ci/check.sh` `cmd` to completion under the harness
+/// bound: a stall inside the check (e.g. a hung `cargo fetch` against
+/// an unreachable remote) fails naming the remote, never hangs the
+/// merge-gated leg to the platform cap. `Ok` carries the completed
+/// output unchanged so existing lockfile-stage diagnostics are
+/// preserved.
+fn run_check(cmd: &mut Command, remote: &str) -> Output {
+    let timeout = check_timeout();
+    let what = format!("ci/check.sh with DCS_REMOTE={remote}");
+    match run_bounded(cmd, timeout, &what) {
+        Ok(output) => output,
+        Err(note) => panic!("{PIN_UNRESOLVABLE}: {note} (DCS_REMOTE={remote})"),
     }
 }
 
@@ -637,16 +653,7 @@ impl Materialized {
         if let Some(tools) = tools {
             check.env("DCS_TOOLS", tools);
         }
-        // The nested check is bounded like the fetch fallback: a stall
-        // inside `ci/check.sh` (e.g. a hung `cargo fetch` against an
-        // unreachable remote) must fail naming the remote, never hang
-        // the merge-gated leg to the platform cap.
-        let timeout = check_timeout();
-        let what = format!("ci/check.sh with DCS_REMOTE={}", self.remote);
-        match run_bounded(&mut check, timeout, &what) {
-            Ok(output) => output,
-            Err(note) => panic!("{PIN_UNRESOLVABLE}: {note} (DCS_REMOTE={})", self.remote),
-        }
+        run_check(&mut check, &self.remote)
     }
 }
 
@@ -1419,14 +1426,14 @@ fn the_committed_lockfile_satisfies_the_declared_pin() {
         "the committed lockfile records no `?tag={pin}#{precise}` source to doctor"
     );
     std::fs::write(&lock, &stale).unwrap();
-    let refused = Command::new("bash")
+    let mut refused_cmd = Command::new("bash");
+    refused_cmd
         .arg("ci/check.sh")
         .current_dir(&copy.dir)
         .env("DCS_REMOTE", &copy.remote)
         .env("DCS_RECORD_DIR", root().join("docs/releases"))
-        .env("CARGO_TARGET_DIR", copy.dir.join("target"))
-        .output()
-        .expect("ci/check.sh runs");
+        .env("CARGO_TARGET_DIR", copy.dir.join("target"));
+    let refused = run_check(&mut refused_cmd, &copy.remote);
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(
         !refused.status.success(),
@@ -1759,14 +1766,14 @@ fn an_unanswerable_tag_query_is_unverifiable_not_absent() {
 
     // Through the shipped check the same state names its diagnostic
     // before the resolve stage can rewrite the artifact.
-    let refused = Command::new("bash")
+    let mut refused_cmd = Command::new("bash");
+    refused_cmd
         .arg("ci/check.sh")
         .current_dir(&copy.dir)
         .env("DCS_REMOTE", &copy.remote)
         .env("CARGO_TARGET_DIR", copy.dir.join("target"))
-        .env("PATH", &path)
-        .output()
-        .expect("ci/check.sh runs");
+        .env("PATH", &path);
+    let refused = run_check(&mut refused_cmd, &copy.remote);
     let stdout = String::from_utf8_lossy(&refused.stdout);
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(
@@ -2545,14 +2552,14 @@ fn toml_equivalent_respellings_pass_the_lockfile_leg() {
         "a release crate recorded with no source is not the leak finding's exit status:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let refused = Command::new("bash")
+    let mut refused_cmd = Command::new("bash");
+    refused_cmd
         .arg("ci/check.sh")
         .current_dir(&copy.dir)
         .env("DCS_REMOTE", &copy.remote)
         .env("DCS_RECORD_DIR", root().join("docs/releases"))
-        .env("CARGO_TARGET_DIR", copy.dir.join("target"))
-        .output()
-        .expect("ci/check.sh runs");
+        .env("CARGO_TARGET_DIR", copy.dir.join("target"));
+    let refused = run_check(&mut refused_cmd, &copy.remote);
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(
         !refused.status.success(),
