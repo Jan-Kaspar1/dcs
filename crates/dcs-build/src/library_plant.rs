@@ -408,70 +408,6 @@ fn shift_endpoint(frame: IdFrame, endpoint: &Endpoint) -> Endpoint {
     }
 }
 
-#[cfg(test)]
-mod view_tests {
-    use super::*;
-    use dcs_model::{Equipment, PlantView, PlantViewBinding, PlantViewNode, PlantViewSymbol};
-
-    #[test]
-    fn merging_views_preserves_navigation_and_remaps_all_live_bindings() {
-        let mut train =
-            PlantModel::load(include_str!("../../dcs-model/fixtures/minimal.json")).unwrap();
-        train.equipment.push(Equipment {
-            id: "feed".to_string(),
-            label: "Feed".to_string(),
-            kind: "actuator".to_string(),
-            components: vec![ComponentId(1)],
-            points: vec![PointId(10)],
-            controls: Vec::new(),
-        });
-        let mut view = PlantView::new("overview", "Train");
-        for (id, symbol, binding) in [
-            (
-                "equipment",
-                PlantViewSymbol::Pump,
-                PlantViewBinding::Equipment("feed".to_string()),
-            ),
-            (
-                "component",
-                PlantViewSymbol::Motor,
-                PlantViewBinding::Component(ComponentId(1)),
-            ),
-            (
-                "measurement",
-                PlantViewSymbol::Measurement,
-                PlantViewBinding::Point(PointId(10)),
-            ),
-        ] {
-            let mut node = PlantViewNode::new(id, symbol, id, 100, 100);
-            node.binding = Some(binding);
-            view.nodes.push(node);
-        }
-        let mut detail = PlantView::new("detail", "Train detail");
-        detail.parent = Some("overview".to_string());
-        train.views = vec![view, detail];
-        let mut plant = crate::PlantBuilder::new().build().unwrap();
-        merge(&mut plant, STATION_FRAME, &train);
-        merge(&mut plant, DOSING_FRAME, &train);
-        assert!(plant.validate().is_empty());
-        assert_eq!(plant.views[0], train.views[0]);
-        assert_eq!(plant.views[2].id, "10000:overview");
-        assert_eq!(plant.views[3].parent.as_deref(), Some("10000:overview"));
-        assert_eq!(
-            plant.views[2].nodes[0].binding,
-            Some(PlantViewBinding::Equipment("10000:feed".to_string()))
-        );
-        assert_eq!(
-            plant.views[2].nodes[1].binding,
-            Some(PlantViewBinding::Component(ComponentId(10001)))
-        );
-        assert_eq!(
-            plant.views[2].nodes[2].binding,
-            Some(PlantViewBinding::Point(PointId(1000010)))
-        );
-    }
-}
-
 /// The merged dynamics declaration for the composed plant: each train's
 /// checked-in `*_dynamics.json` list, parsed as `dcs-plant-server
 /// --dynamics` parses it and rewritten into that train's frame, in
@@ -559,5 +495,69 @@ fn shift_element(frame: IdFrame, element: DynamicsElement) -> DynamicsElement {
             e.output = frame.point(e.output);
             Threshold(e)
         }
+    }
+}
+
+#[cfg(test)]
+mod view_tests {
+    use super::*;
+    use dcs_model::{Equipment, PlantView, PlantViewBinding, PlantViewNode, PlantViewSymbol};
+
+    #[test]
+    fn merging_views_preserves_navigation_and_remaps_all_live_bindings() {
+        let mut train =
+            PlantModel::load(include_str!("../../dcs-model/fixtures/minimal.json")).unwrap();
+        train.equipment.push(Equipment {
+            id: "feed".to_string(),
+            label: "Feed".to_string(),
+            kind: "actuator".to_string(),
+            components: vec![ComponentId(1)],
+            points: vec![PointId(10)],
+            controls: Vec::new(),
+        });
+        let mut view = PlantView::new("overview", "Train");
+        for (id, symbol, binding) in [
+            (
+                "equipment",
+                PlantViewSymbol::Pump,
+                PlantViewBinding::Equipment("feed".to_string()),
+            ),
+            (
+                "component",
+                PlantViewSymbol::Motor,
+                PlantViewBinding::Component(ComponentId(1)),
+            ),
+            (
+                "measurement",
+                PlantViewSymbol::Measurement,
+                PlantViewBinding::Point(PointId(10)),
+            ),
+        ] {
+            let mut node = PlantViewNode::new(id, symbol, id, 100, 100);
+            node.binding = Some(binding);
+            view.nodes.push(node);
+        }
+        let mut detail = PlantView::new("detail", "Train detail");
+        detail.parent = Some("overview".to_string());
+        train.views = vec![view, detail];
+        let mut plant = crate::PlantBuilder::new().build().unwrap();
+        merge(&mut plant, STATION_FRAME, &train);
+        merge(&mut plant, DOSING_FRAME, &train);
+        assert!(plant.validate().is_empty());
+        assert_eq!(plant.views[0], train.views[0]);
+        assert_eq!(plant.views[2].id, "10000:overview");
+        assert_eq!(plant.views[3].parent.as_deref(), Some("10000:overview"));
+        assert_eq!(
+            plant.views[2].nodes[0].binding,
+            Some(PlantViewBinding::Equipment("10000:feed".to_string()))
+        );
+        assert_eq!(
+            plant.views[2].nodes[1].binding,
+            Some(PlantViewBinding::Component(ComponentId(10001)))
+        );
+        assert_eq!(
+            plant.views[2].nodes[2].binding,
+            Some(PlantViewBinding::Point(PointId(1000010)))
+        );
     }
 }

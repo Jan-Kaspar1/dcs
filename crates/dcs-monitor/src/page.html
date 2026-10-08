@@ -1632,6 +1632,8 @@ async function refresh() {
       renderFeed();
     }
     document.getElementById("status").textContent = "poll failed: " + error;
+    renderPlantWorkspace();
+    if (rendered.snapshot) renderEquipment(rendered.snapshot, rendered.telemetry, rendered.forced);
   } finally {
     polling = false;
   }
