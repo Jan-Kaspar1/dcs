@@ -534,6 +534,16 @@ pub struct Station {
     pub layout: StationLayout,
 }
 
+/// The in-service revision's added internal point — the compatible
+/// change the `revision-roll` clean-CI leg rolls through the pair's
+/// `--revised` path: a held operator note the revision initializes
+/// fresh, wired to nothing, so the carryover report names it under
+/// `initialized` while every control point carries unchanged. The id
+/// sits below the alarm blocks and outside every declared block, so
+/// the synthesized-link allocation base does not shift and no
+/// unrelated element is renamed across the boundary.
+pub const REVISION_NOTE: PointId = PointId(245);
+
 /// Composes the station under `config` and emits its [`PlantModel`].
 ///
 /// # Panics
@@ -543,6 +553,29 @@ pub struct Station {
 /// lag_start < high` is a `threshold-chain` parameter error at
 /// `build`.
 pub fn lift_station(config: &SiteConfig) -> Result<Station, BuildError> {
+    compose_station(config, false)
+}
+
+/// Composes the station's in-service revision 2 under `config` — the
+/// same composition plus [`REVISION_NOTE`], the compatible change the
+/// `revision-roll` clean-CI leg rolls in service through the pair's
+/// `--revised` standby path. The revision keeps every field channel,
+/// component, connection, and declared parameter identical, so the
+/// carryover rule carries all run state and initializes only the
+/// added point; its fingerprint differs by design.
+///
+/// # Panics
+///
+/// Like [`lift_station`].
+pub fn lift_station_revision2(config: &SiteConfig) -> Result<Station, BuildError> {
+    compose_station(config, true)
+}
+
+/// The shared composition: `revised` adds [`REVISION_NOTE`] just
+/// before `build`, so the default emit is byte-identical to the
+/// checked-in `model/plant.json` while the revision emits the
+/// compatible document the roll exercises.
+fn compose_station(config: &SiteConfig, revised: bool) -> Result<Station, BuildError> {
     assert!(
         (1..=20).contains(&config.pumps),
         "the station's point-id scheme admits 1..=20 pumps, got {}",
@@ -1330,6 +1363,22 @@ pub fn lift_station(config: &SiteConfig) -> Result<Station, BuildError> {
             points::draw(index),
             REPORT_RECORD_TICKS,
             REPORT_RETAIN_DAYS,
+        );
+    }
+
+    // The in-service revision's compatible change: the held
+    // revision note stands at its declared initial while every other
+    // element carries across the boundary. Declared only on the
+    // revised composition, so the default emit never carries it.
+    if revised {
+        plant.internal_input::<bool>(REVISION_NOTE, false, true);
+        signal(
+            &mut plant,
+            REVISION_NOTE,
+            "revision-note",
+            "",
+            "Held operator note the in-service revision initializes",
+            "station",
         );
     }
 

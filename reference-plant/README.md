@@ -937,6 +937,94 @@ diverging is `event-parity-nondeterministic`;
 a consumer schedule changing the driven run's
 outputs or receipts — or failing its own evidence — is
 `consumer-interference`; and two consumer-stage passes diverging is
-`consumer-nondeterministic`. The names are recorded in the platform's
+`consumer-nondeterministic`. A revision roll failing to hold — the
+composed revision not validating, the revised peer never reporting the
+named crossing with its carryover report, the served fingerprint not
+advancing, the switch not settling the revised peer `active` with
+control continuing, or the incompatible revision not refused with its
+named diagnostic — is `revision-roll-failed`; two revision-roll
+passes diverging is `revision-roll-nondeterministic`. A backup drill
+failing to hold — the backup record disagreeing with the deployment,
+a missing artifact restoring silently, a relaunched peer resuming at
+the wrong tick or not at all, the receipt log or journal order not
+continuing, or the rejoined pair not reconverging — is
+`backup-restore-failed`; two backup-drill passes diverging is
+`backup-restore-nondeterministic`. The names are recorded in the platform's
 `docs/release-contract.md` — the same vocabulary the platform's own
 consumer-boundary checks report.
+
+### 8. Roll a compatible revision in service
+
+A customer plant that cannot roll a revised model in service has no
+lifecycle answer beyond redeploy. The roll runs through the generic
+controller image — no customer-specific rebuild, no platform source —
+and `ci/check.sh` proves it on every clean pass through the
+`revision-roll` pair leg (`ci/legs/revision_roll.py`).
+
+Compose the revision in `src/station.rs` as a compatible change that
+keeps the contract carryable: a retuned declared parameter or an
+added internal point — never a removed point or a kind change. This
+tree's own revision 2 is the pattern: `lift_station_revision2` adds
+one held revision-note point (`pump-station --revision-2` emits it,
+`pump-station --revision-2 --fingerprint` prints its fingerprint),
+and `dcs-model diff` against `model/plant.json` names exactly that
+addition. Then roll it the way the leg does:
+
+```sh
+cargo run -- --revision-2 > model-revision-2.json
+dcs-controller model-revision-2.json --check
+dcs-controller model-revision-2.json --remote <plant>:9001 --driven \
+    --standby <active-monitor> --revised --listen 127.0.0.1:0
+```
+
+Drive scans until `GET /role` on the revised peer reports `standby` +
+`reinitialized` carrying the carryover report — the old fingerprint
+as `from`, the revision's as `to`, retained operator state under
+`carried`, the added point under `initialized` — then switch in the
+documented order: `POST /demote` on the field owner, `POST /promote`
+on the reinitialized peer. Control continues on the revised model at
+the continuing tick; the served checkpoint's fingerprint advances to
+the revision's.
+
+There is no `POST /revision` endpoint by design: each process runs
+the document its deployment binds, and the pair agrees on which
+revision runs by fingerprint negotiation. An incompatible revision —
+a retyped carried point, an unservable force — is refused the same
+way the upgrade stage's doctored version is: the `--revised` peer
+reports `standby` + `degraded` naming the element and the kind, and
+`POST /promote` answers `409 not_converged` while the old active
+keeps the field.
+
+### 9. Back up and restore the deployment
+
+The configuration-backup artifact set the pilot retains —
+`docs/releases/backup-record.md` in the platform repository names it —
+is the model document, the dynamics document, each declared
+controller's state, journal, and history files, and the manifest pin.
+The `backup-restore` pair leg (`ci/legs/backup_restore.py`) drills it
+on every clean pass: it backs the running pair up beside the live
+deployment, audits the backup whole — a set missing a named artifact
+fails naming it — wipes the pair's volumes, restores the set onto
+fresh volumes, and resumes at the persisted tick with the receipt log
+and journal order continuing.
+
+Run the drill yourself the way the leg does: with the pair converged
+and at least one applied receipt in the log, copy the documents and
+each controller's durability files aside with the manifest pin, stop
+both controllers, replay the set onto fresh volumes at the
+manifest-declared paths, and relaunch — the duty first, then the
+standby at the duty's monitor. Each peer must report its resume at
+its persisted tick, serve the pre-wipe receipt log verbatim, and
+replay the pre-wipe journal behind the restart's `run_boundary`
+entry; the rejoined pair reconverges to `active` + `tracking` and
+continues.
+
+Rollback across a repin has two named forms. A compatible repin —
+only the release pin moves while the model fingerprint stands —
+rolls back by repinning the manifest to the retained prior release
+and relaunching onto the retained files: the run resumes at its
+persisted tick. A revised model rolls back by aborting the roll
+before promotion — stop the `--revised` peer while the old active
+still owns the field — or, after promotion, by restoring the
+pre-roll backup set; runtime state does not carry backward across
+the revision boundary.
