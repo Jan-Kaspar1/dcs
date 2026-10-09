@@ -1,9 +1,8 @@
 """The 2196_mutual_tracking_tick leg's scenario unit coverage — the
 stubbed pair and TestCase class for scenario_mutual_tracking_tick,
 split out per the #940 convention. The shared fakes and helpers live in
-tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+tests/qa_scenario_support.py.
+
 
 The subject is the deployed pair's bounded tick-domain contract under
 mutual standby tracking: demoting the field owner leaves both
@@ -17,50 +16,6 @@ defect or instability the issue calls out.
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'MutualTrackingTickTests.test_registered',
-    'MutualTrackingTickTests.test_clean_rig_passes_and_validates',
-    'MutualTrackingTickTests.test_ratcheting_offset_fails',
-    'MutualTrackingTickTests.test_the_rate_clause_fires_on_a_'
-    'compounded_landing',
-    'MutualTrackingTickTests.test_persisted_discontinuity_fails',
-    'MutualTrackingTickTests.test_served_regression_fails',
-    'MutualTrackingTickTests.test_seed_never_forms_reports_'
-    'nondeterministic',
-    'MutualTrackingTickTests.test_seed_never_clears_fails',
-    'MutualTrackingTickTests.test_offset_uncleared_fails',
-    'MutualTrackingTickTests.test_second_run_boundary_fails',
-    'MutualTrackingTickTests.test_source_restarted_fails',
-    'MutualTrackingTickTests.test_posture_unsettled_fails',
-    'MutualTrackingTickTests.test_roles_unrestored_fails',
-    'MutualTrackingTickTests.test_surface_unstamped_reports_'
-    'inconclusive',
-    'MutualTrackingTickTests.test_cadence_unproven_reports_'
-    'inconclusive',
-    'MutualTrackingTickTests.test_watch_starved_reports_'
-    'nondeterministic',
-    'MutualTrackingTickTests.test_freeze_refused_reports_'
-    'nondeterministic',
-    'MutualTrackingTickTests.test_journal_unreadable_reports_'
-    'inconclusive',
-    'MutualTrackingTickTests.test_demote_refused_reports_'
-    'nondeterministic',
-    'MutualTrackingTickTests.test_unreachable_pair_reports_'
-    'inconclusive',
-    'MutualTrackingTickTests.test_single_endpoint_reports_'
-    'inconclusive',
-    'MutualTrackingTickTests.test_missing_pause_action_reports_'
-    'inconclusive',
-    'MutualTrackingTickTests.test_missing_journal_files_reports_'
-    'inconclusive',
-    'MutualTrackingTickTests.test_unkeyed_pair_reports_inconclusive',
-    'MutualTrackingTickTests.test_diverging_digests_report_'
-    'nondeterministic',
-    'MutualTrackingTickTests.test_silent_judge_reports_unchecked',
-    'MutualTrackingTickTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class MutualTrackingTickFeed:

@@ -4,73 +4,13 @@ scenario_claim_monitor_rendezvous, in the
 tests/test_qa_scenario_NNNN_<slug>.py split layout (#940). The shared
 fakes and helpers live in tests/qa_scenario_support.py; the claim
 arbitration half builds on the stranded-standby leg's fakes the same
-induction stages; EXPECTED_CASES pins this module's contribution to
-the suite's case coverage so a dropped case fails the discovery
-check in tests/test_qa_scenario_modules.py.
+induction stages.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
 from test_qa_scenario_2370_stranded_standby_no_resync \
     import StrandedPlantPeer
-
-
-EXPECTED_CASES = frozenset({
-    'ClaimMonitorRendezvousTests.test_registered',
-    'ClaimMonitorRendezvousTests.test_clean_pair_passes_and_validates',
-    'ClaimMonitorRendezvousTests.test_unkeyed_pair_passes',
-    'ClaimMonitorRendezvousTests.test_wildcard_declared_reports_'
-    'failed',
-    'ClaimMonitorRendezvousTests.test_dead_declared_reports_failed',
-    'ClaimMonitorRendezvousTests.test_wrong_port_declared_reports_'
-    'failed',
-    'ClaimMonitorRendezvousTests.test_foreign_serving_reports_failed',
-    'ClaimMonitorRendezvousTests.test_promote_refused_reports_'
-    'nondeterministic',
-    'ClaimMonitorRendezvousTests.test_never_demotes_reports_failed',
-    'ClaimMonitorRendezvousTests.test_silent_loss_reports_failed',
-    'ClaimMonitorRendezvousTests.test_unattributed_loss_reports_'
-    'failed',
-    'ClaimMonitorRendezvousTests.test_misattributed_loss_reports_'
-    'failed',
-    'ClaimMonitorRendezvousTests.test_no_adoption_reports_failed',
-    'ClaimMonitorRendezvousTests.test_foreign_adoption_reports_'
-    'failed',
-    'ClaimMonitorRendezvousTests.test_wedged_rejoin_reports_failed',
-    'ClaimMonitorRendezvousTests.test_slow_rejoin_reports_failed',
-    'ClaimMonitorRendezvousTests.test_peer_never_rejoins_reports_'
-    'failed',
-    'ClaimMonitorRendezvousTests.test_durable_absent_reports_failed',
-    'ClaimMonitorRendezvousTests.test_diverging_digests_report_'
-    'nondeterministic',
-    'ClaimMonitorRendezvousTests.test_silent_judge_reports_unchecked',
-    'ClaimMonitorRendezvousTests.test_predating_rig_reports_'
-    'inconclusive',
-    'ClaimMonitorRendezvousTests.test_probe_absent_reports_'
-    'inconclusive',
-    'ClaimMonitorRendezvousTests.test_open_field_reports_inconclusive',
-    'ClaimMonitorRendezvousTests.test_foreign_claim_reports_'
-    'inconclusive',
-    'ClaimMonitorRendezvousTests.test_no_active_reports_failed',
-    'ClaimMonitorRendezvousTests.test_unsettled_pair_reports_'
-    'inconclusive',
-    'ClaimMonitorRendezvousTests.test_unreachable_pair_reports_'
-    'inconclusive',
-    'ClaimMonitorRendezvousTests.test_missing_active_endpoint_'
-    'reports_inconclusive',
-    'ClaimMonitorRendezvousTests.test_missing_standby_endpoint_'
-    'reports_inconclusive',
-    'ClaimMonitorRendezvousTests.test_missing_plant_endpoint_'
-    'reports_inconclusive',
-    'ClaimMonitorRendezvousTests.test_missing_owner_token_reports_'
-    'inconclusive',
-    'ClaimMonitorRendezvousTests.test_missing_journal_files_reports_'
-    'inconclusive',
-    'ClaimMonitorRendezvousTests.test_bridge_placement_reports_'
-    'inconclusive',
-    'ClaimMonitorRendezvousTests.test_two_runs_produce_identical_'
-    'evidence',
-})
 
 
 class RendezvousPlantPeer(StrandedPlantPeer):

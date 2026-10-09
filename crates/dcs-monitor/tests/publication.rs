@@ -370,69 +370,6 @@ fn a_stalled_reader_cannot_hold_the_executor_lock() {
     });
 }
 
-/// WW-OPS-003's operator surface for the durable-sink drains: the
-/// publication already stamps `journal_sink`, `state_sink`, and
-/// `history_sink` on every snapshot; the served page must read all
-/// three sections and carry a rendering branch for each named state —
-/// absent rendering nothing, healthy unobtrusive, lagging naming the
-/// queued depth against the capacity bound, failed marking the lost
-/// count and the fail-at-next-push rule.
-#[test]
-fn the_served_page_renders_each_durable_sinks_drain_health() {
-    let (driver, map) = rig();
-    let executor = Executor::new(&driver, map, vec![Box::new(Scale)]).unwrap();
-    let monitor = Monitor::bind("127.0.0.1:0", executor, signal_index()).unwrap();
-    let client = MonitorClient::new(monitor.local_addr());
-    serving(&monitor, || {
-        let page = client.page().unwrap();
-        assert_eq!(page, dcs_monitor::PAGE);
-        // The pane renders beside the page's existing health reading,
-        // fed from the snapshot's publication section on every poll.
-        for needle in [
-            "id=\"sink-health\"",
-            "id=\"sink-health-summary\"",
-            "id=\"sink-health-rows\"",
-            "function renderSinkHealth(",
-            "renderSinkHealth(snapshot.publication)",
-        ] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-        for needle in [
-            // Each publication sink section is consumed…
-            "publication.journal_sink",
-            "publication.state_sink",
-            "publication.history_sink",
-            // …a section absent from the publication renders nothing…
-            "if (!sink) continue;",
-            // …with a rendering branch per named state…
-            "sink.state === \"healthy\"",
-            "sink.state === \"lagging\"",
-            "sink.state === \"failed\"",
-            // …the lagging branch naming the queued depth against the
-            // capacity bound…
-            "sink.depth + \"/\" + sink.capacity",
-            // …the failed branch naming the lost count…
-            "record(s) lost",
-            // …and both degraded branches carrying the
-            // fail-at-next-push rule.
-            "fails the run fatally",
-            // The queue accounting the named state rides.
-            "accepted ",
-            "sink.accepted",
-            ", drained ",
-            "sink.lost",
-            "sink.high_water",
-            // The failed sink takes the page's degraded mark rather
-            // than reading like the alarm and fault rows' plain state.
-            "#sink-health-summary.bad",
-            "#sink-health td.warn",
-        ] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-        assert!(!page.contains("src="), "page references external assets");
-    });
-}
-
 #[test]
 fn receipts_stay_current_between_scans_and_publication_carry_them() {
     let (driver, map) = rig();

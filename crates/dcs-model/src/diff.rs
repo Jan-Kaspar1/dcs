@@ -96,6 +96,12 @@ pub struct ModelDiff {
     /// Added and removed connections; a connection is its endpoints, so it
     /// cannot change in place — rewiring removes one and adds another.
     pub connections: Vec<ElementChange>,
+    /// Added, removed, and changed equipment, ordered by string identity.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub equipment: Vec<ElementChange>,
+    /// Added, removed, and changed process drawings, ordered by identity.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub views: Vec<ElementChange>,
 }
 
 impl ModelDiff {
@@ -106,6 +112,8 @@ impl ModelDiff {
             && self.signals.is_empty()
             && self.components.is_empty()
             && self.connections.is_empty()
+            && self.equipment.is_empty()
+            && self.views.is_empty()
     }
 }
 
@@ -125,26 +133,44 @@ impl PlantModel {
                 &revised.devices,
                 |device| device.id.0,
                 describe_device,
+                Some,
             ),
             io_points: diff_elements(
                 &self.io_points,
                 &revised.io_points,
                 |point| point.id.0,
                 describe_point,
+                Some,
             ),
             signals: diff_elements(
                 &self.signals,
                 &revised.signals,
                 |signal| signal.id.0,
                 describe_signal,
+                Some,
             ),
             components: diff_elements(
                 &self.components,
                 &revised.components,
                 |component| component.id.0,
                 describe_component,
+                Some,
             ),
             connections: diff_connections(&self.connections, &revised.connections),
+            equipment: diff_elements(
+                &self.equipment,
+                &revised.equipment,
+                |equipment| equipment.id.clone(),
+                |equipment| format!("equipment {:?}", equipment.id),
+                |_| None,
+            ),
+            views: diff_elements(
+                &self.views,
+                &revised.views,
+                |view| view.id.clone(),
+                |view| format!("plant view {:?}", view.id),
+                |_| None,
+            ),
         }
     }
 }
@@ -152,28 +178,29 @@ impl PlantModel {
 /// Diffs one id-keyed element class: elements present in only one document
 /// are added or removed; elements present in both but serializing
 /// differently are changed, with [`field_changes`] naming the fields.
-fn diff_elements<T: Serialize>(
+fn diff_elements<T: Serialize, K: Ord + Clone>(
     old: &[T],
     new: &[T],
-    id: impl Fn(&T) -> u64,
+    id: impl Fn(&T) -> K,
     describe: impl Fn(&T) -> String,
+    numeric_id: impl Fn(K) -> Option<u64>,
 ) -> Vec<ElementChange> {
-    let old_by_id: BTreeMap<u64, &T> = old.iter().map(|element| (id(element), element)).collect();
-    let new_by_id: BTreeMap<u64, &T> = new.iter().map(|element| (id(element), element)).collect();
-    let ids: BTreeSet<u64> = old_by_id.keys().chain(new_by_id.keys()).copied().collect();
+    let old_by_id: BTreeMap<K, &T> = old.iter().map(|element| (id(element), element)).collect();
+    let new_by_id: BTreeMap<K, &T> = new.iter().map(|element| (id(element), element)).collect();
+    let ids: BTreeSet<K> = old_by_id.keys().chain(new_by_id.keys()).cloned().collect();
     let mut changes = Vec::new();
     for key in ids {
         match (old_by_id.get(&key), new_by_id.get(&key)) {
             (Some(old), None) => changes.push(ElementChange {
                 change: ChangeKind::Removed,
                 element: describe(old),
-                id: Some(key),
+                id: numeric_id(key),
                 fields: Vec::new(),
             }),
             (None, Some(new)) => changes.push(ElementChange {
                 change: ChangeKind::Added,
                 element: describe(new),
-                id: Some(key),
+                id: numeric_id(key),
                 fields: Vec::new(),
             }),
             (Some(old), Some(new)) => {
@@ -182,7 +209,7 @@ fn diff_elements<T: Serialize>(
                     changes.push(ElementChange {
                         change: ChangeKind::Changed,
                         element: describe(new),
-                        id: Some(key),
+                        id: numeric_id(key),
                         fields,
                     });
                 }

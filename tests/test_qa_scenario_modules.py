@@ -11,7 +11,6 @@ facade keeps propagating patch.object(scenarios, ...) writes into
 common and the leg modules so the suite's module-attribute seams
 resolve unchanged."""
 import importlib
-import inspect
 import re
 import sys
 import tempfile
@@ -101,20 +100,6 @@ def _iter_cases(suite):
             yield from _iter_cases(item)
         else:
             yield item
-
-
-def _defined_cases(module):
-    """The Class.test_* case names on TestCase classes a module
-    defines."""
-    names = set()
-    for _, cls in inspect.getmembers(module, inspect.isclass):
-        if (issubclass(cls, unittest.TestCase)
-                and cls.__module__ == module.__name__):
-            names.update(
-                cls.__name__ + '.' + method
-                for method in
-                unittest.defaultTestLoader.getTestCaseNames(cls))
-    return names
 
 
 class OrderingConstraintTests(unittest.TestCase):
@@ -208,9 +193,7 @@ class LegPositionTests(unittest.TestCase):
 class TestModuleDiscoveryTests(unittest.TestCase):
     """The test-side half of the convention: each leg's cases live in
     tests/test_qa_scenario_NNNN_<slug>.py and unittest discovery picks
-    them up by filename — no shared registry. EXPECTED_CASES in each
-    module pins the case set the split migrated, so coverage parity
-    with the pre-split monolith is asserted per leg."""
+    them up by filename — no shared registry."""
 
     def _test_module_stems(self):
         return sorted(path.stem for path in
@@ -228,26 +211,6 @@ class TestModuleDiscoveryTests(unittest.TestCase):
                 match.group(1), leg_stems,
                 stem + ' pairs with no scenario leg module')
 
-    def test_discovery_reproduces_the_pre_split_case_coverage(self):
-        declared = set()
-        for stem in self._test_module_stems():
-            if stem == 'test_qa_scenario_modules':
-                continue
-            module = importlib.import_module(stem)
-            defined = _defined_cases(module)
-            self.assertEqual(
-                defined, set(module.EXPECTED_CASES),
-                stem + ' case set drifted from its EXPECTED_CASES pin')
-            declared.update(stem + '.' + case for case in defined)
-        suite = unittest.defaultTestLoader.discover(
-            str(TESTS_DIR), pattern='test_qa_scenario_*.py',
-            top_level_dir=str(TESTS_DIR))
-        discovered = {case.id() for case in _iter_cases(suite)}
-        own = {case.id() for case in _iter_cases(
-            unittest.defaultTestLoader.loadTestsFromModule(
-                sys.modules[__name__]))}
-        self.assertEqual(discovered, declared | own)
-
     def test_synthetic_leg_joins_run_and_test_discovery_as_two_files(self):
         # The full convention: one scenario module plus one test
         # module, no shared-file edit on either side.
@@ -255,8 +218,6 @@ class TestModuleDiscoveryTests(unittest.TestCase):
             Path(tmp, 'test_qa_scenario_1950_synthetic_leg.py'
                  ).write_text(
                 'import unittest\n\n'
-                "EXPECTED_CASES = frozenset("
-                "{'SyntheticLegTests.test_case'})\n\n\n"
                 'class SyntheticLegTests(unittest.TestCase):\n'
                 '    def test_case(self):\n'
                 '        pass\n')

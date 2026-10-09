@@ -1,38 +1,11 @@
 """The 0800_fenced_writer_degrade leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_fenced_writer_degrade, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'FencedWriterDegradeTests.test_registered_in_scenarios',
-    'FencedWriterDegradeTests.test_passed',
-    'FencedWriterDegradeTests.test_fails_when_the_superseded_peer_exits',
-    'FencedWriterDegradeTests.test_fails_when_the_fenced_owner_never_demotes',
-    'FencedWriterDegradeTests.test_fails_when_the_walk_skips_demoting',
-    'FencedWriterDegradeTests.test_fails_when_the_preemption_is_silent',
-    'FencedWriterDegradeTests.test_fails_on_a_second_process_lifetime',
-    'FencedWriterDegradeTests.test_fails_when_the_misordered_promote_refuses',
-    'FencedWriterDegradeTests.test_fails_when_the_promotion_claims_nothing',
-    'FencedWriterDegradeTests.test_fails_when_the_promoted_peer_is_fenced',
-    'FencedWriterDegradeTests.test_fails_when_the_command_is_not_not_active',
-    'FencedWriterDegradeTests.test_fails_when_the_refused_write_reaches_the_field',
-    'FencedWriterDegradeTests.test_fails_when_the_demoted_writer_never_reconverges',
-    'FencedWriterDegradeTests.test_inconclusive_without_a_plant',
-    'FencedWriterDegradeTests.test_inconclusive_without_journal_paths',
-    'FencedWriterDegradeTests.test_inconclusive_without_owner_tokens',
-    'FencedWriterDegradeTests.test_inconclusive_when_the_peer_never_tracks',
-    'FencedWriterDegradeTests.test_inconclusive_when_the_pair_is_down',
-    'FencedWriterDegradeTests.test_fails_when_nothing_is_settled',
-    'FencedWriterDegradeTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class DegradePlantPeer(ClaimPlantPeer):

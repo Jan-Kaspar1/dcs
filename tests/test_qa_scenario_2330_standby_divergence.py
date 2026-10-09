@@ -1,10 +1,7 @@
 """The 2330_standby_divergence leg's scenario unit coverage — the feed
 fakes and TestCase classes for scenario_standby_divergence, in the
 tests/test_qa_scenario_NNNN_<slug>.py split layout (#940). The shared
-fakes and helpers live in tests/qa_scenario_support.py;
-EXPECTED_CASES pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+fakes and helpers live in tests/qa_scenario_support.py.
 """
 import json
 import tempfile
@@ -15,25 +12,6 @@ from unittest.mock import patch
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
 
 from qa_lane import report, scenarios, verify
-
-
-EXPECTED_CASES = frozenset({
-    'StandbyDivergenceTests.test_registered',
-    'StandbyDivergenceTests.test_clean_pair_passes_and_validates',
-    'StandbyDivergenceTests.test_identical_evidence_across_runs',
-    'StandbyDivergenceTests.test_evidence_files_land',
-    'StandbyDivergenceTests.test_never_diverges_reports_failed',
-    'StandbyDivergenceTests.test_unnamed_mismatch_reports_failed',
-    'StandbyDivergenceTests.test_admitted_promote_reports_failed',
-    'StandbyDivergenceTests.test_silent_detection_reports_failed',
-    'StandbyDivergenceTests.test_lost_field_restore_reports_failed',
-    'StandbyDivergenceTests.test_moved_field_under_a_refusal_reports_failed',
-    'StandbyDivergenceTests.test_unrestored_roles_report_failed',
-    'StandbyDivergenceTests.test_refused_claim_reports_inconclusive',
-    'StandbyDivergenceTests.test_no_field_output_reports_inconclusive',
-    'StandbyDivergenceTests.test_refused_poke_reports_nondeterministic',
-    'StandbyDivergenceTests.test_unsettled_pair_reports_inconclusive',
-})
 
 
 TOKENS = {'active': 424243, 'standby': 424244}

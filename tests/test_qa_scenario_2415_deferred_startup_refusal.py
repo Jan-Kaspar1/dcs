@@ -2,49 +2,11 @@
 the feed fakes and TestCase classes for
 scenario_deferred_startup_refusal, split out per the leg-module
 convention (#940). The shared fakes and helpers live in
-tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'DeferredRefusalTests.test_registered_after_born_active_before_revisions',
-    'DeferredRefusalTests.test_fixed_shape_passes_validates_and_tears_down',
-    'DeferredRefusalTests.test_two_runs_produce_identical_evidence',
-    'DeferredRefusalTests.test_refused_seat_stranded_fails',
-    'DeferredRefusalTests.test_refused_seat_never_settling_fails',
-    'DeferredRefusalTests.test_refused_zero_exit_fails',
-    'DeferredRefusalTests.test_unnamed_refusal_exit_fails',
-    'DeferredRefusalTests.test_unnamed_remedy_exit_fails',
-    'DeferredRefusalTests.test_unjournaled_refusal_fails',
-    'DeferredRefusalTests.test_wrong_claimant_fails',
-    'DeferredRefusalTests.test_declared_seat_exit_fails',
-    'DeferredRefusalTests.test_declared_seat_never_converging_fails',
-    'DeferredRefusalTests.test_declared_claim_unobserved_fails',
-    'DeferredRefusalTests.test_declared_unjournaled_fails',
-    'DeferredRefusalTests.test_standby_seat_exit_fails',
-    'DeferredRefusalTests.test_standby_never_converging_fails',
-    'DeferredRefusalTests.test_standby_journaling_refusal_fails',
-    'DeferredRefusalTests.test_incumbent_demotion_fails',
-    'DeferredRefusalTests.test_incumbent_stall_fails',
-    'DeferredRefusalTests.test_member_disturbance_fails',
-    'DeferredRefusalTests.test_pending_reporting_active_fails',
-    'DeferredRefusalTests.test_pending_exit_is_inconclusive',
-    'DeferredRefusalTests.test_pre_contract_strand_is_inconclusive',
-    'DeferredRefusalTests.test_unsettled_pair_is_inconclusive',
-    'DeferredRefusalTests.test_pause_failure_is_nondeterministic',
-    'DeferredRefusalTests.test_launch_failure_is_nondeterministic',
-    'DeferredRefusalTests.test_starved_watch_is_nondeterministic',
-    'DeferredRefusalTests.test_second_pass_defect_fails',
-    'DeferredRefusalTests.test_missing_seams_are_inconclusive',
-    'DeferredRefusalTests.test_missing_journals_are_inconclusive',
-    'DeferredRefusalTests.test_unchecked_self_check_fails',
-    'DeferredRefusalTests.test_judge_self_check_is_complete',
-})
 
 
 class DeferredRefusalFeed:

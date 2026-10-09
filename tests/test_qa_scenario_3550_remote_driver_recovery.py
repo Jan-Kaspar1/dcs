@@ -1,51 +1,11 @@
 """The 3550_remote_driver_recovery leg's scenario unit coverage — the
 feed fakes and TestCase classes for
 scenario_remote_driver_recovery. The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'RemoteDriverRecoveryTests.test_registered',
-    'RemoteDriverRecoveryTests.test_clean_cycles_pass_and_validate',
-    'RemoteDriverRecoveryTests.test_evidence_entries_cover_both_cycles',
-    'RemoteDriverRecoveryTests.test_lingering_error_fails',
-    'RemoteDriverRecoveryTests.test_late_clear_fails',
-    'RemoteDriverRecoveryTests.test_baseline_linger_fails',
-    'RemoteDriverRecoveryTests.test_never_named_fails',
-    'RemoteDriverRecoveryTests.test_uncounted_outage_fails',
-    'RemoteDriverRecoveryTests.test_link_never_degrades_fails',
-    'RemoteDriverRecoveryTests.test_second_outage_never_named_fails',
-    'RemoteDriverRecoveryTests.test_streak_standing_fails',
-    'RemoteDriverRecoveryTests.test_reset_history_fails',
-    'RemoteDriverRecoveryTests.test_promotion_during_outage_fails',
-    'RemoteDriverRecoveryTests.test_owner_role_move_fails',
-    'RemoteDriverRecoveryTests.test_aborted_run_fails',
-    'RemoteDriverRecoveryTests.test_aborted_recovery_fails',
-    'RemoteDriverRecoveryTests.test_never_reattached_fails',
-    'RemoteDriverRecoveryTests.test_rewound_tick_reports_nondeterministic',
-    'RemoteDriverRecoveryTests.test_diverging_digests_report_nondeterministic',
-    'RemoteDriverRecoveryTests.test_unsettled_restore_fails',
-    'RemoteDriverRecoveryTests.test_inert_stop_is_inconclusive',
-    'RemoteDriverRecoveryTests.test_unreturned_plant_is_inconclusive',
-    'RemoteDriverRecoveryTests.test_failed_stop_is_inconclusive',
-    'RemoteDriverRecoveryTests.test_failed_start_is_inconclusive',
-    'RemoteDriverRecoveryTests.test_missing_actions_is_inconclusive',
-    'RemoteDriverRecoveryTests.test_unreachable_rig_is_inconclusive',
-    'RemoteDriverRecoveryTests.test_unsettled_pair_is_inconclusive',
-    'RemoteDriverRecoveryTests.test_silent_peer_is_inconclusive',
-    'RemoteDriverRecoveryTests.test_precontract_surface_is_inconclusive',
-    'RemoteDriverRecoveryTests.test_legacy_driver_is_inconclusive',
-    'RemoteDriverRecoveryTests.test_unclassifiable_outage_is_inconclusive',
-    'RemoteDriverRecoveryTests.test_probe_fallback_covers_raw_plant_seam',
-    'RemoteDriverRecoveryTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class RemoteDriverFeed:

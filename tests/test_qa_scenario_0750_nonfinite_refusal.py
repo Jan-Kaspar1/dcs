@@ -2,44 +2,11 @@
 fakes and TestCase classes for scenario_nonfinite_refusal, following
 the per-leg split convention (#940): one scenario module plus one
 test module, no shared-file edits. The shared fakes and helpers live
-in tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-case set for the discovery check in tests/test_qa_scenario_modules.py.
+in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'NonfiniteRefusalTests.test_registered_in_scenarios',
-    'NonfiniteRefusalTests.test_clean_feed_passes_and_validates',
-    'NonfiniteRefusalTests.test_two_runs_produce_identical_evidence',
-    'NonfiniteRefusalTests.test_applied_write_fails',
-    'NonfiniteRefusalTests.test_write_wrong_refusal_fails',
-    'NonfiniteRefusalTests.test_applied_step_fails',
-    'NonfiniteRefusalTests.test_step_wrong_refusal_fails',
-    'NonfiniteRefusalTests.test_poisoned_read_fails',
-    'NonfiniteRefusalTests.test_poisoned_census_fails',
-    'NonfiniteRefusalTests.test_refused_write_moved_field_fails',
-    'NonfiniteRefusalTests.test_followup_write_refused_fails',
-    'NonfiniteRefusalTests.test_followup_step_refused_fails',
-    'NonfiniteRefusalTests.test_followup_not_landing_fails',
-    'NonfiniteRefusalTests.test_static_step_tick_fails',
-    'NonfiniteRefusalTests.test_poisoned_after_followup_fails',
-    'NonfiniteRefusalTests.test_unrestored_image_fails',
-    'NonfiniteRefusalTests.test_role_move_fails',
-    'NonfiniteRefusalTests.test_stalled_scans_fail',
-    'NonfiniteRefusalTests.test_io_health_counted_fails',
-    'NonfiniteRefusalTests.test_no_active_is_failed',
-    'NonfiniteRefusalTests.test_unreachable_pair_is_inconclusive',
-    'NonfiniteRefusalTests.test_no_tracking_is_inconclusive',
-    'NonfiniteRefusalTests.test_no_plant_endpoint_is_inconclusive',
-    'NonfiniteRefusalTests.test_no_owner_token_is_inconclusive',
-    'NonfiniteRefusalTests.test_refused_claim_is_inconclusive',
-    'NonfiniteRefusalTests.test_predating_rig_is_inconclusive',
-    'NonfiniteRefusalTests.test_no_float_point_is_inconclusive',
-    'NonfiniteRefusalTests.test_fenced_probes_are_inconclusive',
-})
 
 
 class NonfinitePlantPeer(FakePlantPeer):

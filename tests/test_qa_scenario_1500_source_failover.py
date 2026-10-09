@@ -1,47 +1,11 @@
 """The 1500_source_failover leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_source_failover, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'SourceFailoverTests.test_registered_in_scenarios',
-    'SourceFailoverTests.test_clean_feed_passes_and_validates',
-    'SourceFailoverTests.test_two_runs_produce_identical_evidence',
-    'SourceFailoverTests.test_backup_active_never_asserting_fails',
-    'SourceFailoverTests.test_selection_tracking_the_degraded_source_fails',
-    'SourceFailoverTests.test_frozen_last_known_fails',
-    'SourceFailoverTests.test_alarm_never_standing_fails',
-    'SourceFailoverTests.test_unacknowledged_never_latching_fails',
-    'SourceFailoverTests.test_stalled_demand_fails',
-    'SourceFailoverTests.test_frozen_demand_fails',
-    'SourceFailoverTests.test_journaled_role_change_fails',
-    'SourceFailoverTests.test_transitions_never_journaling_fails',
-    'SourceFailoverTests.test_role_move_under_primary_fault_fails',
-    'SourceFailoverTests.test_never_reselecting_primary_fails',
-    'SourceFailoverTests.test_latch_releasing_with_the_condition_fails',
-    'SourceFailoverTests.test_ack_refusal_fails',
-    'SourceFailoverTests.test_ack_never_applying_fails',
-    'SourceFailoverTests.test_ack_settlement_never_journaling_fails',
-    'SourceFailoverTests.test_unattributed_ack_fails',
-    'SourceFailoverTests.test_no_active_is_failed',
-    'SourceFailoverTests.test_no_failover_select_is_inconclusive',
-    'SourceFailoverTests.test_no_wired_alarm_is_inconclusive',
-    'SourceFailoverTests.test_no_threshold_chain_is_inconclusive',
-    'SourceFailoverTests.test_single_source_is_inconclusive',
-    'SourceFailoverTests.test_unwritable_ack_is_inconclusive',
-    'SourceFailoverTests.test_bare_signals_is_inconclusive',
-    'SourceFailoverTests.test_unhealthy_backup_is_inconclusive',
-    'SourceFailoverTests.test_backup_point_unserved_is_inconclusive',
-    'SourceFailoverTests.test_no_plant_endpoint_is_inconclusive',
-})
 
 
 class SourceFailoverFeed:

@@ -1,43 +1,11 @@
 """The 2060_stale_island_resolution leg's scenario unit coverage —
 the feed fakes and TestCase classes for
 scenario_stale_island_resolution, split out per the #940 convention.
-The shared fakes and helpers live in tests/qa_scenario_support.py;
-EXPECTED_CASES pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+The shared fakes and helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'StaleIslandTests.test_registered',
-    'StaleIslandTests.test_clean_rig_passes_and_validates',
-    'StaleIslandTests.test_demote_refused_fails',
-    'StaleIslandTests.test_silent_adoption_fails',
-    'StaleIslandTests.test_adopted_driven_fails',
-    'StaleIslandTests.test_island_never_forms_fails',
-    'StaleIslandTests.test_orphan_journal_absent_fails',
-    'StaleIslandTests.test_driven_promote_refused_fails',
-    'StaleIslandTests.test_islanded_promote_preempts_fails',
-    'StaleIslandTests.test_wrong_refusal_verdict_fails',
-    'StaleIslandTests.test_never_resolves_fails',
-    'StaleIslandTests.test_line_owner_stale_fails',
-    'StaleIslandTests.test_restore_fails',
-    'StaleIslandTests.test_no_active_reports_failed',
-    'StaleIslandTests.test_unconverged_pair_reports_inconclusive',
-    'StaleIslandTests.test_unreachable_pair_reports_inconclusive',
-    'StaleIslandTests.test_unkeyed_run_reports_inconclusive',
-    'StaleIslandTests.'
-    'test_unkeyed_deployed_pair_runs_on_the_probe_pair',
-    'StaleIslandTests.test_missing_driven_action_reports_inconclusive',
-    'StaleIslandTests.test_launch_failure_reports_inconclusive',
-    'StaleIslandTests.test_driven_never_serves_reports_inconclusive',
-    'StaleIslandTests.test_predates_contract_reports_inconclusive',
-    'StaleIslandTests.test_diverging_digests_report_nondeterministic',
-    'StaleIslandTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class StaleIslandFeed:

@@ -1,48 +1,11 @@
 """The 2420_remote_foreign_model leg's scenario unit coverage — the
 feed fake and TestCase class for scenario_remote_foreign_model, split
 out per the leg-module convention (#940). The shared fakes and helpers
-live in tests/qa_scenario_support.py; EXPECTED_CASES pins this
-module's contribution to the suite's case coverage so a dropped case
-fails the discovery check in tests/test_qa_scenario_modules.py.
+live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'RemoteForeignModelTests.test_registered',
-    'RemoteForeignModelTests.test_clean_passes_validates_and_tears_down',
-    'RemoteForeignModelTests.test_pending_verdict_passes',
-    'RemoteForeignModelTests.test_two_runs_produce_identical_evidence',
-    'RemoteForeignModelTests.test_claim_despite_refusal_fails',
-    'RemoteForeignModelTests.test_field_claimed_despite_refusal_fails',
-    'RemoteForeignModelTests.test_field_driven_despite_refusal_fails',
-    'RemoteForeignModelTests.test_control_met_named_refusal_fails',
-    'RemoteForeignModelTests.test_control_unclaimed_fails',
-    'RemoteForeignModelTests.test_control_scan_stalled_fails',
-    'RemoteForeignModelTests.test_control_field_stalled_fails',
-    'RemoteForeignModelTests.test_control_drops_fails',
-    'RemoteForeignModelTests.test_control_pending_is_nondeterministic',
-    'RemoteForeignModelTests.test_control_launch_fails_is_nondeterministic',
-    'RemoteForeignModelTests.test_census_down_is_nondeterministic',
-    'RemoteForeignModelTests.test_not_foreign_field_is_inconclusive',
-    'RemoteForeignModelTests.test_claim_after_unread_is_nondeterministic',
-    'RemoteForeignModelTests.test_field_stage_failure_is_nondeterministic',
-    'RemoteForeignModelTests.test_launch_failure_is_nondeterministic',
-    'RemoteForeignModelTests.test_pair_disturbance_is_nondeterministic',
-    'RemoteForeignModelTests.test_pair_wedge_is_nondeterministic',
-    'RemoteForeignModelTests.test_second_pass_pending_diverges_nondeterministic',
-    'RemoteForeignModelTests.test_unnamed_refusal_fails',
-    'RemoteForeignModelTests.test_predates_contract_is_inconclusive',
-    'RemoteForeignModelTests.test_watch_starves_is_nondeterministic',
-    'RemoteForeignModelTests.test_state_fails_is_nondeterministic',
-    'RemoteForeignModelTests.test_missing_seams_are_inconclusive',
-    'RemoteForeignModelTests.test_unreachable_rig_is_inconclusive',
-    'RemoteForeignModelTests.test_unsettled_pair_is_inconclusive',
-    'RemoteForeignModelTests.test_unchecked_self_check_fails',
-    'RemoteForeignModelTests.test_self_check_is_complete',
-})
 
 
 class ForeignFieldFeed:

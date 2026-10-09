@@ -58,7 +58,7 @@ compiles against:
 - `PlantBuilder` and `SignalBuilder` (`dcs-build`'s `builder` module):
   `device`, `channel`, `field_input`, `field_input_stale_after`,
   `field_output`, `internal_input`, `internal_output`, `journaled`,
-  `signal`, `add`, `connect`, `build`.
+  `signal`, `add`, `connect`, `equipment`, `build`.
 - The typed endpoint handles (`endpoint`): `Source<T>`, `Sink<T>`,
   `InPoint<T>`, `OutPoint<T>`, `Dynamic`.
 - The spec vocabulary (`spec`): `Spec`, `DynamicSpec`,
@@ -69,9 +69,17 @@ compiles against:
 - The per-kind spec data (`specs`): one spec struct per registered
   `dcs-blocks` kind, pinned to the kinds' descriptors by the
   spec-drift test.
+- The reusable pump equipment API (`pump`): `pump`, `PumpConfig`,
+  `PumpInputs`, `PumpLinks`, `PumpInstance`, `PumpLayout`, and
+  `ManagedAlarmLayout`. The consumer supplies typed logical bindings
+  and automatic demand; the module composes its control, protection,
+  alarms, and declared equipment surface.
 - The re-exported contract vocabulary: `Direction`, `PointId`,
   `SignalId`, `Value`, `ValueKind`, `PointType`, `ChannelRef`,
   `ComponentId`, `DeviceId`, `Endpoint`, `PortRef`, `Rationalization`,
+  `Equipment`, `EquipmentControl`, `PlantView`, `PlantViewNode`,
+  `PlantViewSymbol`, `PlantViewBinding`, `PlantViewPipe`,
+  `PlantViewPipeEnd`, `PlantViewPort`, and `PlantBuilder::view`,
   `BuildError`; from `dcs-core` the served-registry types
   (`SchemaView`, `BlockInterface`, `INTERFACE_VERSION`) and
   `SchemaView::json_schema`; and from `dcs-model` the `PlantModel`

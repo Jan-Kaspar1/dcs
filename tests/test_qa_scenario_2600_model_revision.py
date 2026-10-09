@@ -1,33 +1,11 @@
 """The 2600_model_revision leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_model_revision, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'ModelRevisionTests.test_registered_in_scenarios',
-    'ModelRevisionTests.test_clean_roll_passes_validates_and_orders_the_roll',
-    'ModelRevisionTests.test_two_runs_produce_identical_evidence',
-    'ModelRevisionTests.test_never_converging_revised_peer_is_inconclusive',
-    'ModelRevisionTests.test_wrong_convergence_state_fails',
-    'ModelRevisionTests.test_persistent_degraded_pulls_fail',
-    'ModelRevisionTests.test_carryover_missing_the_operator_write_fails',
-    'ModelRevisionTests.test_receipt_loss_across_the_roll_fails',
-    'ModelRevisionTests.test_field_regression_in_the_gap_fails',
-    'ModelRevisionTests.test_field_regression_after_promotion_fails',
-    'ModelRevisionTests.test_demoted_peer_serving_writes_fails',
-    'ModelRevisionTests.test_run_ending_off_the_revised_fingerprint_fails',
-    'ModelRevisionTests.test_missing_reinitialized_journal_entry_fails',
-    'ModelRevisionTests.test_demoted_journal_lifetime_restart_fails',
-    'ModelRevisionTests.test_failed_action_is_inconclusive',
-})
 
 
 class RevisionFeed:

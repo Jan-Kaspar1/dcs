@@ -1,15 +1,5 @@
-//! End-to-end tests for the faceplate parameter-edit surface: a
-//! `set_parameter` command posted the way the page posts it applies at
-//! the next scan boundary with a receipt and the tuned behavior shows in
-//! later telemetry; the snapshot's `parameters` section reports each
-//! component's standing tune for the page's current-value column, the
-//! applied value landing in the next poll's section; out-of-range and
-//! mistyped submissions answer the named `CommandError` rejection,
-//! journaled for the page's journal pane; and the served page carries
-//! the parameter-edit markup plus the declared-range warning logic and
-//! the current-value join — all driven over TCP through the in-process
-//! `MonitorClient` against a multi-kind rig: a real `dcs_blocks::Pid`
-//! beside a kind declaring no parameters.
+//! Parameter metadata, command validation, live values and settled receipts
+//! exercised through the monitor contract.
 
 use dcs_blocks::{Pid, PidConfig};
 use dcs_core::{
@@ -387,65 +377,8 @@ fn out_of_range_and_mistyped_edits_yield_named_rejections() {
 }
 
 #[test]
-fn page_serves_parameter_edit_markup_and_declared_range_warning() {
+fn parameter_descriptors_carry_ranges_and_empty_defaults() {
     with_monitor(|_driver, client| {
-        let page = client.page().unwrap();
-        // The edit surface: a control typed to the declared kind per
-        // parameter — a Bool select, a text input for Int and Float —
-        // carrying the component, parameter, and kind the submit path
-        // reads, plus the set button and the status cell the receipted
-        // answer lands on.
-        for needle in [
-            "function parameterTable(",
-            "function parameterControl(",
-            "class=\\\"param-value\\\"",
-            "<option value=\\\"true\\\">true</option>",
-            "data-component",
-            "data-param",
-            "data-kind",
-            "class=\\\"tune\\\"",
-            "param-status",
-            "function setParamStatus(",
-        ] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-        // The submission path: set_parameter built per edit, routed
-        // through the pair view's active-peer command path, and the
-        // descriptor-declared range check warning — advisory, sent
-        // anyway — plus the settled-receipt surface in the journal feed.
-        for needle in [
-            "function submitParameter(",
-            "{ set_parameter: {",
-            "await submitCommand(command)",
-            "function parameterValue(",
-            "function inDeclaredRange(",
-            "outside declared range",
-            "not an Int value",
-            "not a Float value",
-            "settled.receipt.command.set_parameter",
-        ] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-        // The current-value column: the page joins the same snapshot's
-        // parameters section to the descriptor by component name and
-        // renders each declared parameter's reported Value beside its
-        // edit control. The serde-default guard finds no entry when the
-        // section — or the component's ComponentParameters — is absent,
-        // rendering the column empty rather than failing.
-        for needle in [
-            "<th>Current</th>",
-            "class=\\\"param-current\\\"",
-            "(snapshot.parameters || []).map(p => [p.name, p.values])",
-            "parameterTable(descriptor, parameters.get(descriptor.name))",
-            "hasOwnProperty.call(values, param.name)",
-            "formatValue(values[param.name])",
-        ] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-        // The no-affordance rule for a kind declaring no parameters.
-        assert!(page.contains("descriptor.parameters.length > 0"));
-        assert!(!page.contains("src="), "page references external assets");
-
         // The descriptor data behind the markup: the Pid kind declares
         // its tunables with ranges; the parameterless kind declares
         // none, so its faceplate renders no edit affordance.

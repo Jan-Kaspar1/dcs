@@ -2,49 +2,11 @@
 feed fake, the stubbed deployment-doctoring levers, and the TestCase
 class for scenario_shared_state_file_refusal, per the module-per-leg
 test convention (#940). The shared fakes and helpers live in
-tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+tests/qa_scenario_support.py.
 """
 import shutil
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'SharedStateFileTests.test_registered_in_scenarios',
-    'SharedStateFileTests.test_clean_rig_passes_and_validates',
-    'SharedStateFileTests.test_two_passes_share_one_digest',
-    'SharedStateFileTests.test_two_runs_produce_identical_records',
-    'SharedStateFileTests.test_scenario_ctx_carries_the_alias_seam',
-    'SharedStateFileTests.test_restore_relaunch_mounts_its_own_directory',
-    'SharedStateFileTests.test_alias_arguments_are_validated',
-    'SharedStateFileTests.test_missing_relaunch_lever_is_inconclusive',
-    'SharedStateFileTests.test_missing_state_probe_is_inconclusive',
-    'SharedStateFileTests.test_missing_state_files_is_inconclusive',
-    'SharedStateFileTests.test_single_endpoint_is_inconclusive',
-    'SharedStateFileTests.test_unreachable_rig_is_inconclusive',
-    'SharedStateFileTests.test_unsettled_pair_is_inconclusive',
-    'SharedStateFileTests.test_no_active_is_failed',
-    'SharedStateFileTests.test_alias_accepted_fails',
-    'SharedStateFileTests.test_alias_exited_zero_fails',
-    'SharedStateFileTests.test_alias_absent_fails',
-    'SharedStateFileTests.test_unnamed_refusal_fails',
-    'SharedStateFileTests.test_surviving_monitor_fails',
-    'SharedStateFileTests.test_shared_collision_fails_by_name',
-    'SharedStateFileTests.test_alias_write_fails',
-    'SharedStateFileTests.test_sink_stalled_fails',
-    'SharedStateFileTests.test_control_unread_fails',
-    'SharedStateFileTests.test_declared_paths_aliased_fails',
-    'SharedStateFileTests.test_owner_moved_fails',
-    'SharedStateFileTests.test_owner_frozen_fails',
-    'SharedStateFileTests.test_owner_silent_fails',
-    'SharedStateFileTests.test_restore_stalls_fails',
-    'SharedStateFileTests.test_raising_probe_restores_the_member',
-    'SharedStateFileTests.test_swapped_launch_layout_passes',
-    'SharedStateFileTests.test_silenced_judges_report_unchecked',
-    'SharedStateFileTests.test_self_check_catches_planted_negatives',
-})
 
 
 class SharedFeed:

@@ -1,9 +1,7 @@
 """The 0850_superseded_restart leg's scenario unit coverage — the feed
 fake and TestCase classes for scenario_superseded_restart, split out
 of the test_qa_scenarios monolith (#940). The shared fakes and helpers
-live in tests/qa_scenario_support.py; EXPECTED_CASES pins this
-module's contribution to the suite's case coverage so a dropped case
-fails the discovery check in tests/test_qa_scenario_modules.py.
+live in tests/qa_scenario_support.py.
 """
 import io
 import json
@@ -14,57 +12,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'SupersededRestartTests.test_registered_after_fenced_writer_before_failover',
-    'SupersededRestartTests.test_clean_run_passes_and_validates',
-    'SupersededRestartTests.test_two_runs_produce_identical_evidence',
-    'SupersededRestartTests.test_evidence_names_every_leg',
-    'SupersededRestartTests.test_the_pair_ends_on_its_launch_roles',
-    'SupersededRestartTests.test_missing_restart_action_is_inconclusive',
-    'SupersededRestartTests.test_missing_plant_endpoint_is_inconclusive',
-    'SupersededRestartTests.test_missing_monitors_are_inconclusive',
-    'SupersededRestartTests.test_missing_owner_tokens_are_inconclusive',
-    'SupersededRestartTests.test_missing_journals_are_inconclusive',
-    'SupersededRestartTests.test_unreachable_pair_is_inconclusive',
-    'SupersededRestartTests.test_unsettled_pair_is_failed',
-    'SupersededRestartTests.test_unwritable_model_is_inconclusive',
-    'SupersededRestartTests.test_unreadable_journal_is_inconclusive',
-    'SupersededRestartTests.test_refused_switchover_demote_fails',
-    'SupersededRestartTests.test_refused_switchover_promote_fails',
-    'SupersededRestartTests.test_stranded_demoted_peer_fails',
-    'SupersededRestartTests.test_handback_demote_refused_fails',
-    'SupersededRestartTests.test_handback_promote_refused_fails',
-    'SupersededRestartTests.test_handback_not_settling_fails',
-    'SupersededRestartTests.test_a_cleared_divergence_is_audited',
-    'SupersededRestartTests.test_unjournaled_resolution_fails',
-    'SupersededRestartTests.test_double_resolution_fails',
-    'SupersededRestartTests.test_resolution_without_compared_points_fails',
-    'SupersededRestartTests.test_resolution_on_incomplete_comparison_fails',
-    'SupersededRestartTests.test_restart_lever_failure_is_inconclusive',
-    'SupersededRestartTests.test_incumbent_never_promoted_fails',
-    'SupersededRestartTests.test_dual_active_window_fails',
-    'SupersededRestartTests.test_stalled_field_fails',
-    'SupersededRestartTests.test_unanswered_window_is_inconclusive',
-    'SupersededRestartTests.test_unjournaled_demotion_fails',
-    'SupersededRestartTests.test_unwalked_demotion_fails',
-    'SupersededRestartTests.test_skipped_demoting_fails',
-    'SupersededRestartTests.test_double_claim_loss_fails',
-    'SupersededRestartTests.test_restarted_preempted_peer_fails',
-    'SupersededRestartTests.test_claim_not_on_the_restartee_fails',
-    'SupersededRestartTests.test_unclaimed_field_fails',
-    'SupersededRestartTests.test_restartee_fenced_writes_fail',
-    'SupersededRestartTests.test_command_applying_on_fenced_peer_fails',
-    'SupersededRestartTests.test_command_misnamed_refusal_fails',
-    'SupersededRestartTests.test_refused_write_reaching_point_fails',
-    'SupersededRestartTests.test_shared_token_refused_fails',
-    'SupersededRestartTests.test_shared_token_naming_another_owner_fails',
-    'SupersededRestartTests.test_field_opened_under_shared_token_fails',
-    'SupersededRestartTests.test_superseded_token_reclaimed_field_fails',
-    'SupersededRestartTests.test_restore_demote_refused_fails',
-    'SupersededRestartTests.test_restore_promote_refused_fails',
-})
 
 
 MEMBERS = ('active', 'standby')

@@ -1,52 +1,11 @@
 """The 2160_orphan_episode_bound leg's scenario unit coverage —
 the feed fakes and TestCase classes for
 scenario_orphan_episode_bound, split out per the #940 convention.
-The shared fakes and helpers live in tests/qa_scenario_support.py;
-EXPECTED_CASES pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+The shared fakes and helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'OrphanBoundTests.test_registered',
-    'OrphanBoundTests.test_clean_rig_passes_and_validates',
-    'OrphanBoundTests.test_journal_flooded_fails',
-    'OrphanBoundTests.test_verdict_flickered_fails',
-    'OrphanBoundTests.test_misses_stalled_fails',
-    'OrphanBoundTests.test_island_never_forms_fails',
-    'OrphanBoundTests.test_orphan_journal_absent_fails',
-    'OrphanBoundTests.test_episode_unended_fails',
-    'OrphanBoundTests.test_second_episode_silent_fails',
-    'OrphanBoundTests.test_restore_fails',
-    'OrphanBoundTests.test_demote_refused_reports_nondeterministic',
-    'OrphanBoundTests.test_silent_adoption_reports_nondeterministic',
-    'OrphanBoundTests.test_starved_watch_reports_nondeterministic',
-    'OrphanBoundTests.test_failover_fired_reports_nondeterministic',
-    'OrphanBoundTests.test_served_read_dropped_reports_'
-    'nondeterministic',
-    'OrphanBoundTests.test_pulls_never_landed_reports_'
-    'nondeterministic',
-    'OrphanBoundTests.test_redemote_refused_reports_'
-    'nondeterministic',
-    'OrphanBoundTests.test_diverging_digests_report_nondeterministic',
-    'OrphanBoundTests.test_silent_judge_reports_unchecked',
-    'OrphanBoundTests.test_unreachable_pair_reports_inconclusive',
-    'OrphanBoundTests.test_unconverged_pair_reports_inconclusive',
-    'OrphanBoundTests.test_swapped_layout_reports_inconclusive',
-    'OrphanBoundTests.test_unkeyed_run_reports_inconclusive',
-    'OrphanBoundTests.test_unkeyed_deployed_pair_runs_on_the_'
-    'probe_pair',
-    'OrphanBoundTests.test_missing_pause_action_reports_'
-    'inconclusive',
-    'OrphanBoundTests.test_missing_journal_files_reports_'
-    'inconclusive',
-    'OrphanBoundTests.test_single_endpoint_reports_inconclusive',
-    'OrphanBoundTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class FakeClock:

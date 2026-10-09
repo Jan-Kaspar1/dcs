@@ -25,6 +25,8 @@
 
 ## DCS interpretation
 
+The separate [operator HMI visual research](operator-hmi.md#visual-reference-catalogue), checked 2026-10-08, samples the supplied APL V9.0 manual's symbols and motor/valve faceplates with exact page locators. It adds an original DCS appearance proposal; these historical visual examples do not define DCS semantics or current safety policy.
+
 These observations reinforce the product strategy's completeness dimensions: typed contract, declared control behavior, operator availability and command feedback, diagnostics and quality, reproducible scenarios, and explicit capability variants. They do not establish the DCS mode vocabulary, security model, alarm policy, resource budget, or customer workflow.
 
 DCS architecture decisions and accepted customer-backed requirements define DCS semantics. Do not copy vendor names, code, screen layouts, diagrams, or numerical performance claims. Record any adopted prompt against a stable DCS requirement ID and executable scenario; leave it as a research question when evidence is insufficient.

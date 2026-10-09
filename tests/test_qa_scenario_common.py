@@ -7,14 +7,6 @@ import unittest
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
 
 
-EXPECTED_CASES = frozenset({
-    'PointAccessorTests.test_point_sample_serves_the_present_point',
-    'PointAccessorTests.test_point_sample_missing_point_answers_none',
-    'PointAccessorTests.test_point_quality_serves_the_present_point',
-    'PointAccessorTests.test_point_quality_missing_point_answers_none',
-})
-
-
 class PointAccessorTests(unittest.TestCase):
     """The snapshot point accessors' single contract: _point_sample
     serves the point's sample and answers None when the point is

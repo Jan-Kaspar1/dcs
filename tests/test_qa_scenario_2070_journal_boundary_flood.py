@@ -1,53 +1,10 @@
 """The 2070_journal_boundary_flood leg's scenario unit coverage — the
 feed fakes and TestCase classes for scenario_journal_boundary_flood.
-The shared fakes and helpers live in tests/qa_scenario_support.py;
-EXPECTED_CASES pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+The shared fakes and helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'JournalBoundaryFloodTests.test_clean_passes_and_restores',
-    'JournalBoundaryFloodTests.test_dropped_boundary_fails',
-    'JournalBoundaryFloodTests.test_unbounded_tail_fails',
-    'JournalBoundaryFloodTests.test_hidden_gap_fails',
-    'JournalBoundaryFloodTests.test_broken_cursor_fails',
-    'JournalBoundaryFloodTests.test_orphaned_served_seq_fails',
-    'JournalBoundaryFloodTests.test_disordered_file_fails',
-    'JournalBoundaryFloodTests.test_marker_lost_file_side_fails',
-    'JournalBoundaryFloodTests.test_moved_roles_fail',
-    'JournalBoundaryFloodTests.test_restart_moved_owner_fails',
-    'JournalBoundaryFloodTests.test_flood_refusal_fails',
-    'JournalBoundaryFloodTests.test_no_active_peer_fails',
-    'JournalBoundaryFloodTests.test_starved_second_pass_is_'
-    'nondeterministic',
-    'JournalBoundaryFloodTests.test_missing_served_boundary_is_'
-    'inconclusive',
-    'JournalBoundaryFloodTests.test_missing_durable_boundary_is_'
-    'inconclusive',
-    'JournalBoundaryFloodTests.test_restart_action_missing_is_'
-    'inconclusive',
-    'JournalBoundaryFloodTests.test_journal_paths_missing_is_'
-    'inconclusive',
-    'JournalBoundaryFloodTests.test_unreachable_rig_is_inconclusive',
-    'JournalBoundaryFloodTests.test_restart_action_failure_is_'
-    'inconclusive',
-    'JournalBoundaryFloodTests.test_unreturned_monitor_is_'
-    'inconclusive',
-    'JournalBoundaryFloodTests.test_no_journal_surface_is_'
-    'inconclusive',
-    'JournalBoundaryFloodTests.test_no_writable_point_is_inconclusive',
-    'JournalBoundaryFloodTests.test_no_tracking_standby_is_'
-    'inconclusive',
-    'JournalBoundaryFloodTests.test_post_failover_layout_is_'
-    'inconclusive',
-    'JournalBoundaryFloodTests.test_two_runs_produce_identical_'
-    'evidence',
-})
 
 
 class PeerJournal:

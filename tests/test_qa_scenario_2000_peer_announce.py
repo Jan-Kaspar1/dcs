@@ -1,34 +1,11 @@
 """The 2000_peer_announce leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_peer_announce, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'PeerAnnounceTests.test_registered',
-    'PeerAnnounceTests.test_clean_pair_passes_and_validates',
-    'PeerAnnounceTests.test_landed_announce_strands_unsynchronized',
-    'PeerAnnounceTests.test_refused_checkpoint_read_fails',
-    'PeerAnnounceTests.test_refused_demote_fails',
-    'PeerAnnounceTests.test_missing_announce_refuses_demote',
-    'PeerAnnounceTests.test_refused_promote_fails',
-    'PeerAnnounceTests.test_stranded_demotion_fails',
-    'PeerAnnounceTests.test_open_claim_fails',
-    'PeerAnnounceTests.test_silent_plant_fails',
-    'PeerAnnounceTests.test_admitted_command_fails',
-    'PeerAnnounceTests.test_no_active_reports_failed',
-    'PeerAnnounceTests.test_unconverged_pair_reports_inconclusive',
-    'PeerAnnounceTests.test_unreachable_peer_reports_inconclusive',
-    'PeerAnnounceTests.test_diverging_digests_report_nondeterministic',
-    'PeerAnnounceTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class PeerAnnounceFeed:

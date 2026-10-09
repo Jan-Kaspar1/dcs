@@ -1,55 +1,11 @@
 """The 3960_cause_alarm_quality leg's scenario unit coverage — the
 feed fakes and TestCase classes for scenario_cause_alarm_quality. The
-shared fakes and helpers live in tests/qa_scenario_support.py;
-EXPECTED_CASES pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+shared fakes and helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
 
-
-EXPECTED_CASES = frozenset({
-    'CauseAlarmTests.test_registered_in_scenarios',
-    'CauseAlarmTests.test_clean_feed_passes_and_validates',
-    'CauseAlarmTests.test_two_runs_produce_identical_evidence',
-    'CauseAlarmTests.test_no_active_fails',
-    'CauseAlarmTests.test_missing_surface_is_inconclusive',
-    'CauseAlarmTests.test_unwritable_ack_is_inconclusive',
-    'CauseAlarmTests.test_no_descriptor_is_inconclusive',
-    'CauseAlarmTests.test_drifted_binding_is_inconclusive',
-    'CauseAlarmTests.test_no_in_binding_is_inconclusive',
-    'CauseAlarmTests.test_raw_contact_wiring_fails',
-    'CauseAlarmTests.test_refused_claim_is_inconclusive',
-    'CauseAlarmTests.test_no_plant_endpoint_is_inconclusive',
-    'CauseAlarmTests.test_no_owner_token_is_inconclusive',
-    'CauseAlarmTests.test_standing_contact_is_inconclusive',
-    'CauseAlarmTests.test_lying_field_baseline_is_inconclusive',
-    'CauseAlarmTests.test_degraded_contact_is_inconclusive',
-    'CauseAlarmTests.test_latched_baseline_is_inconclusive',
-    'CauseAlarmTests.test_refused_write_fails',
-    'CauseAlarmTests.test_silent_cause_alarm_fails',
-    'CauseAlarmTests.test_latch_never_latches_fails',
-    'CauseAlarmTests.test_protection_never_trips_fails',
-    'CauseAlarmTests.test_command_ignores_the_trip_fails',
-    'CauseAlarmTests.test_degraded_sample_replaces_the_value_fails',
-    'CauseAlarmTests.test_fault_never_clears_fails',
-    'CauseAlarmTests.test_stuck_latch_fails',
-    'CauseAlarmTests.test_cross_annunciation_fails',
-    'CauseAlarmTests.test_annunciation_beyond_the_stopped_pump_fails',
-    'CauseAlarmTests.test_spurious_start_under_degradation_fails',
-    'CauseAlarmTests.test_late_annunciation_is_nondeterministic',
-    'CauseAlarmTests.test_duplicate_trip_is_nondeterministic',
-    'CauseAlarmTests.test_journaled_role_change_is_nondeterministic',
-    'CauseAlarmTests.test_unjournaled_point_recording_is_nondeterministic',
-    'CauseAlarmTests.test_quiet_point_recording_is_nondeterministic',
-    'CauseAlarmTests.test_missing_journal_fails',
-    'CauseAlarmTests.test_missing_settle_journal_fails',
-    'CauseAlarmTests.test_role_moving_under_the_drive_fails',
-    'CauseAlarmTests.test_peer_role_moved_fails',
-    'CauseAlarmTests.test_restore_read_lying_fails',
-})
 
 # The pump-group's declared hand-leg holdout, from the emitted model's
 # `min_off_ticks` — the off-delay timer that keeps the hand leg out for

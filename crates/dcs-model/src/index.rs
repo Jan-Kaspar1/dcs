@@ -24,7 +24,7 @@
 //!   validated model ([`PlantModel::load`] rejects it); from an unvalidated
 //!   model it is ignored, since there is no point to attach it to.
 
-use crate::model::{Direction, PlantModel, Rationalization, Signal};
+use crate::model::{ComponentId, Direction, Equipment, PlantModel, Rationalization, Signal};
 use dcs_core::{PointId, SignalId, ValueKind};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -79,6 +79,10 @@ pub struct PointSignal {
 /// name without the consumer knowing the naming convention.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ComponentRecord {
+    /// Model identity for equipment membership. Older indexes omit it;
+    /// their descriptor join by `name` remains available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<ComponentId>,
     /// The instance's diagnostic name — `"<kind>:<id>"` — matching the
     /// served `ComponentDescriptor.name`.
     pub name: String,
@@ -105,6 +109,13 @@ pub struct SignalIndex {
     /// nothing — the model keeps evolving without a version bump.
     #[serde(default)]
     pub components: Vec<ComponentRecord>,
+    /// Equipment surfaces from the same model, referring to `points` and
+    /// component identities rather than introducing another value schema.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub equipment: Vec<Equipment>,
+    /// Read-only process drawings referencing this index's model entities.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub views: Vec<crate::PlantView>,
 }
 
 impl SignalIndex {
@@ -141,6 +152,7 @@ impl PlantModel {
             .components
             .iter()
             .map(|instance| ComponentRecord {
+                id: Some(instance.id),
                 name: instance.name(),
                 kind: instance.kind.clone(),
                 rationalization: instance.rationalization.clone(),
@@ -178,7 +190,12 @@ impl PlantModel {
                 },
             })
             .collect();
-        SignalIndex { points, components }
+        SignalIndex {
+            points,
+            components,
+            equipment: self.equipment.clone(),
+            views: self.views.clone(),
+        }
     }
 }
 

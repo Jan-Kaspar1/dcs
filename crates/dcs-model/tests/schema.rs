@@ -257,8 +257,8 @@ fn recorded_release_schema_matches_the_emitted_output() {
     // `v0.5.0`'s, `v0.6.0`'s, `v0.7.0`'s, `v0.8.0`'s, `v0.9.0`'s, and
     // `v0.10.0`'s tags are pending, so their artifacts and published
     // sha256s track the current emission — identical across the eight
-    // records, the emission having moved with #907's `record` io_point
-    // field and #548's declared-unit metadata.
+    // records, now including the additive equipment declaration beside
+    // #907's `record` io_point field and #548's declared-unit metadata.
     let output = run_schema_subcommand();
     assert!(
         output.status.success(),
@@ -273,35 +273,35 @@ fn recorded_release_schema_matches_the_emitted_output() {
         ("docs/releases/v0.2.0/plant-model.schema.json", None),
         (
             "docs/releases/v0.3.0/plant-model.schema.json",
-            Some("07f9f93d1475c7bc783e99e4e7807fe5706a1549302a3701b67212bb3e793301"),
+            Some("91f175fa58b2f45bd44c1ce2a4c138ba9c583706f4bc4ccbcd5cc171540b2f7c"),
         ),
         (
             "docs/releases/v0.4.0/plant-model.schema.json",
-            Some("07f9f93d1475c7bc783e99e4e7807fe5706a1549302a3701b67212bb3e793301"),
+            Some("91f175fa58b2f45bd44c1ce2a4c138ba9c583706f4bc4ccbcd5cc171540b2f7c"),
         ),
         (
             "docs/releases/v0.5.0/plant-model.schema.json",
-            Some("07f9f93d1475c7bc783e99e4e7807fe5706a1549302a3701b67212bb3e793301"),
+            Some("91f175fa58b2f45bd44c1ce2a4c138ba9c583706f4bc4ccbcd5cc171540b2f7c"),
         ),
         (
             "docs/releases/v0.6.0/plant-model.schema.json",
-            Some("07f9f93d1475c7bc783e99e4e7807fe5706a1549302a3701b67212bb3e793301"),
+            Some("91f175fa58b2f45bd44c1ce2a4c138ba9c583706f4bc4ccbcd5cc171540b2f7c"),
         ),
         (
             "docs/releases/v0.7.0/plant-model.schema.json",
-            Some("07f9f93d1475c7bc783e99e4e7807fe5706a1549302a3701b67212bb3e793301"),
+            Some("91f175fa58b2f45bd44c1ce2a4c138ba9c583706f4bc4ccbcd5cc171540b2f7c"),
         ),
         (
             "docs/releases/v0.8.0/plant-model.schema.json",
-            Some("07f9f93d1475c7bc783e99e4e7807fe5706a1549302a3701b67212bb3e793301"),
+            Some("91f175fa58b2f45bd44c1ce2a4c138ba9c583706f4bc4ccbcd5cc171540b2f7c"),
         ),
         (
             "docs/releases/v0.9.0/plant-model.schema.json",
-            Some("07f9f93d1475c7bc783e99e4e7807fe5706a1549302a3701b67212bb3e793301"),
+            Some("91f175fa58b2f45bd44c1ce2a4c138ba9c583706f4bc4ccbcd5cc171540b2f7c"),
         ),
         (
             "docs/releases/v0.10.0/plant-model.schema.json",
-            Some("07f9f93d1475c7bc783e99e4e7807fe5706a1549302a3701b67212bb3e793301"),
+            Some("91f175fa58b2f45bd44c1ce2a4c138ba9c583706f4bc4ccbcd5cc171540b2f7c"),
         ),
     ] {
         let recorded = std::fs::read(workspace_root().join(path)).unwrap_or_else(|error| {

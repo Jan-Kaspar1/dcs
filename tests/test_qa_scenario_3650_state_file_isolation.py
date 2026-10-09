@@ -2,47 +2,12 @@
 feed fakes and TestCase classes for
 scenario_state_file_isolation, split out of the test_qa_scenarios
 monolith (#940). The shared fakes and helpers live in
-tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+tests/qa_scenario_support.py.
 """
 import collections
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'StateFileIsolationTests.test_registered_in_scenarios',
-    'StateFileIsolationTests.test_clean_rig_passes_and_validates',
-    'StateFileIsolationTests.test_lever_stages_and_releases_the_fifo',
-    'StateFileIsolationTests.test_lag_never_surfaces_fails',
-    'StateFileIsolationTests.test_tick_stall_under_lag_fails',
-    'StateFileIsolationTests.test_io_growth_under_stall_fails',
-    'StateFileIsolationTests.test_overrun_growth_under_stall_fails',
-    'StateFileIsolationTests.test_sink_failed_state_fails',
-    'StateFileIsolationTests.test_early_answer_is_nondeterministic',
-    'StateFileIsolationTests.test_tick_regress_is_nondeterministic',
-    'StateFileIsolationTests.test_counter_regress_is_nondeterministic',
-    'StateFileIsolationTests.test_lag_flicker_is_nondeterministic',
-    'StateFileIsolationTests.test_stale_durable_file_is_nondeterministic',
-    'StateFileIsolationTests.test_unanswered_admission_fails',
-    'StateFileIsolationTests.test_rejected_admission_fails',
-    'StateFileIsolationTests.test_lost_captures_fail',
-    'StateFileIsolationTests.test_owner_move_fails',
-    'StateFileIsolationTests.test_untracked_peer_fails',
-    'StateFileIsolationTests.test_missing_lever_is_inconclusive',
-    'StateFileIsolationTests.test_undeclared_endpoint_is_inconclusive',
-    'StateFileIsolationTests.test_predated_contract_is_inconclusive',
-    'StateFileIsolationTests.test_unreachable_rig_is_inconclusive',
-    'StateFileIsolationTests.test_unsettled_pair_is_inconclusive',
-    'StateFileIsolationTests.test_failed_impede_is_inconclusive',
-    'StateFileIsolationTests.test_failed_restore_is_inconclusive',
-    'StateFileIsolationTests.test_scenario_ctx_carries_the_lever',
-    'StateFileIsolationTests.test_undeclared_config_carries_no_lever',
-    'StateFileIsolationTests.test_misconfigured_mounts_fail_loudly',
-    'StateFileIsolationTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class _FakeSink:

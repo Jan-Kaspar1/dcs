@@ -1,9 +1,7 @@
 """The 3560_sim_bus_driver_reattach leg's scenario unit coverage — the
 feed fake and TestCase class for scenario_sim_bus_driver_reattach. The
-shared fakes and helpers live in tests/qa_scenario_support.py;
-EXPECTED_CASES pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+shared fakes and helpers live in tests/qa_scenario_support.py.
+
 
 The feed stages the leg's shape: the lane's sim-bus device server is
 staged through the run context's sim_bus_device levers, a controller
@@ -20,41 +18,6 @@ inconcludes on."""
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'BusDriverReattachTests.test_registered',
-    'BusDriverReattachTests.test_clean_passes_validate_and_restore',
-    'BusDriverReattachTests.test_evidence_entries_cover_the_leg',
-    'BusDriverReattachTests.test_two_runs_produce_identical_digests',
-    'BusDriverReattachTests.test_never_reattached_fails',
-    'BusDriverReattachTests.test_never_degraded_fails',
-    'BusDriverReattachTests.test_swallowed_diagnostics_fail_the_run',
-    'BusDriverReattachTests.test_outage_between_polls_still_counts',
-    'BusDriverReattachTests.test_lingering_error_fails',
-    'BusDriverReattachTests.test_streak_standing_fails',
-    'BusDriverReattachTests.test_reset_history_fails',
-    'BusDriverReattachTests.test_baseline_linger_fails',
-    'BusDriverReattachTests.test_aborted_run_fails',
-    'BusDriverReattachTests.test_aborted_recovery_fails',
-    'BusDriverReattachTests.test_rewound_tick_reports_nondeterministic',
-    'BusDriverReattachTests.test_diverging_digests_report_nondeterministic',
-    'BusDriverReattachTests.test_promotion_refusal_fails',
-    'BusDriverReattachTests.test_promotion_never_settles_fails',
-    'BusDriverReattachTests.test_unsettled_restore_is_nondeterministic',
-    'BusDriverReattachTests.test_restore_refusal_fails',
-    'BusDriverReattachTests.test_no_subject_is_inconclusive',
-    'BusDriverReattachTests.test_missing_lever_is_inconclusive',
-    'BusDriverReattachTests.test_unreachable_rig_is_inconclusive',
-    'BusDriverReattachTests.test_unsettled_pair_is_inconclusive',
-    'BusDriverReattachTests.test_leaderless_pair_fails',
-    'BusDriverReattachTests.test_precontract_surface_is_inconclusive',
-    'BusDriverReattachTests.test_unreturned_device_is_inconclusive',
-    'BusDriverReattachTests.test_unclassifiable_restore_is_inconclusive',
-    'BusDriverReattachTests.test_failed_staging_is_inconclusive',
-    'BusDriverReattachTests.test_unchecked_self_check_fails',
-    'BusDriverReattachTests.test_self_check_is_complete',
-})
 
 
 # The register-mapped model the fake device launch stages — the same

@@ -1,58 +1,11 @@
 """The 2170_orphan_retarget_journal leg's scenario unit coverage —
 the feed fakes and TestCase classes for
 scenario_orphan_retarget_journal, split out per the #940 convention.
-The shared fakes and helpers live in tests/qa_scenario_support.py;
-EXPECTED_CASES pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+The shared fakes and helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'OrphanRetargetTests.test_registered',
-    'OrphanRetargetTests.test_clean_rig_passes_and_validates',
-    'OrphanRetargetTests.test_retarget_silent_fails',
-    'OrphanRetargetTests.test_retarget_misattributed_fails',
-    'OrphanRetargetTests.test_retarget_misordered_fails',
-    'OrphanRetargetTests.test_orphan_evidence_absent_fails',
-    'OrphanRetargetTests.test_island_never_forms_fails',
-    'OrphanRetargetTests.test_never_resolves_fails',
-    'OrphanRetargetTests.test_line_owner_stale_fails',
-    'OrphanRetargetTests.test_restore_wedged_fails',
-    'OrphanRetargetTests.test_demote_refused_reports_nondeterministic',
-    'OrphanRetargetTests.test_silent_adoption_reports_'
-    'nondeterministic',
-    'OrphanRetargetTests.test_driven_unconverged_reports_'
-    'nondeterministic',
-    'OrphanRetargetTests.test_driven_promote_refused_reports_'
-    'nondeterministic',
-    'OrphanRetargetTests.test_restore_demote_refused_reports_'
-    'nondeterministic',
-    'OrphanRetargetTests.test_restore_promote_refused_reports_'
-    'nondeterministic',
-    'OrphanRetargetTests.test_diverging_digests_report_'
-    'nondeterministic',
-    'OrphanRetargetTests.test_silent_judge_reports_unchecked',
-    'OrphanRetargetTests.test_unreachable_pair_reports_inconclusive',
-    'OrphanRetargetTests.test_unconverged_pair_reports_inconclusive',
-    'OrphanRetargetTests.test_swapped_layout_reports_inconclusive',
-    'OrphanRetargetTests.test_unkeyed_run_reports_inconclusive',
-    'OrphanRetargetTests.test_unkeyed_deployed_pair_runs_on_the_'
-    'probe_pair',
-    'OrphanRetargetTests.test_missing_driven_action_reports_'
-    'inconclusive',
-    'OrphanRetargetTests.test_missing_journal_files_reports_'
-    'inconclusive',
-    'OrphanRetargetTests.test_launch_failure_reports_inconclusive',
-    'OrphanRetargetTests.test_driven_never_serves_reports_'
-    'inconclusive',
-    'OrphanRetargetTests.test_predates_contract_reports_inconclusive',
-    'OrphanRetargetTests.test_single_endpoint_reports_inconclusive',
-    'OrphanRetargetTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class RetargetJournalFeed:

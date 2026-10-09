@@ -1,56 +1,11 @@
 """The 4000_dcs_ctl leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_dcs_ctl, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'DcsCtlTests.test_registered_last_and_replayable',
-    'DcsCtlTests.test_clean_rig_passes_with_full_evidence',
-    'DcsCtlTests.test_two_runs_produce_identical_evidence',
-    'DcsCtlTests.test_role_mismatch_fails',
-    'DcsCtlTests.test_missing_schema_kind_fails',
-    'DcsCtlTests.test_resources_missing_component_fails',
-    'DcsCtlTests.test_resources_entry_mismatch_fails',
-    'DcsCtlTests.test_keyed_events_missing_component_fails',
-    'DcsCtlTests.test_receipts_missing_invoke_fails',
-    'DcsCtlTests.test_history_without_samples_fails',
-    'DcsCtlTests.test_no_bound_measurement_is_inconclusive',
-    'DcsCtlTests.test_missing_receipt_fails',
-    'DcsCtlTests.test_unjournaled_settlement_fails',
-    'DcsCtlTests.test_unattributed_actor_fails',
-    'DcsCtlTests.test_stale_identical_settlement_is_not_this_legs',
-    'DcsCtlTests.test_carried_over_settlement_is_not_this_legs',
-    'DcsCtlTests.test_unattributed_event_fails',
-    'DcsCtlTests.test_silently_accepted_undeclared_invoke_fails',
-    'DcsCtlTests.test_unavailable_binary_is_inconclusive',
-    'DcsCtlTests.test_mutation_legs_cover_each_write_verb',
-    'DcsCtlTests.test_mutation_leg_payloads_show_attribution',
-    'DcsCtlTests.test_mutation_rejection_legs_name_their_refusals',
-    'DcsCtlTests.test_paced_scan_leg_records_a_skipped_attempt',
-    'DcsCtlTests.test_driven_scan_leg_verifies_served_tick',
-    'DcsCtlTests.test_unserved_write_fails',
-    'DcsCtlTests.test_unserved_tune_fails',
-    'DcsCtlTests.test_unbadged_force_fails',
-    'DcsCtlTests.test_stuck_unforce_fails',
-    'DcsCtlTests.test_standby_accepting_commands_fails',
-    'DcsCtlTests.test_demote_refusal_fails_and_restores',
-    'DcsCtlTests.test_promote_refusal_fails',
-    'DcsCtlTests.test_unsettled_switch_fails',
-    'DcsCtlTests.test_missing_role_events_fail',
-    'DcsCtlTests.test_unsettled_write_leg_fails',
-    'DcsCtlTests.test_foreign_leg_actor_fails',
-    'DcsCtlTests.test_no_writable_bool_is_inconclusive',
-    'DcsCtlTests.test_no_tunable_parameter_is_inconclusive',
-    'DcsCtlTests.test_snapshot_failure_is_inconclusive',
-})
 
 
 class CtlResult:

@@ -1,0 +1,245 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1480" height="984" viewBox="0 0 1480 984" role="img" aria-labelledby="title description">
+<title id="title">Operator HMI appearance target: fictitious two-pump inlet station</title>
+<desc id="description">Original documentation concept. A narrow plant navigation tree, permanent alarm strip, connected process schematic, compact contextual measurements and a right equipment faceplate. Pump P101 is running in Auto and has an unacknowledged priority 2 bearing-temperature alarm. Pump P102 is stopped and available. Equipment and pipes use neutral grays. A separate temperature sensor has bad data and its value is withheld. This fictitious topology and data are not the running demo or an engineering drawing.</desc>
+<defs>
+  <marker id="flow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M1 1 L7 4 L1 7" fill="none" stroke="#5c676d" stroke-width="1.4"/></marker>
+  <clipPath id="tank-fill"><rect x="272" y="289" width="158" height="306"/></clipPath>
+</defs>
+<style>
+  text { font-family: Inter, Arial, sans-serif; fill: #29343a; font-size: 14px; }
+  .small { font-size: 13px; }
+  .micro { font-size: 12px; }
+  .muted { fill: #69747b; }
+  .strong { font-weight: 600; }
+  .title { font-size: 17px; font-weight: 600; }
+  .value { font-size: 25px; font-weight: 500; font-variant-numeric: tabular-nums; }
+  .pipe { fill: none; stroke: #68757c; stroke-width: 3; stroke-linecap: square; stroke-linejoin: miter; }
+  .fine { fill: none; stroke: #bac1c5; stroke-width: 1; }
+  .divider { stroke: #d5dbde; stroke-width: 1; }
+  .equipment { stroke: #4d5b63; stroke-width: 2; }
+  .button { fill: #f8f9f9; stroke: #a6b0b6; stroke-width: 1; }
+  .mono { font-variant-numeric: tabular-nums; }
+</style>
+<rect width="1480" height="984" fill="#f1f3f4"/>
+<rect x="20" y="20" width="1440" height="900" rx="4" fill="#fbfcfc" stroke="#aeb7bc"/>
+
+<rect x="21" y="21" width="1438" height="42" fill="#e8ecee"/>
+<text x="39" y="48" class="strong">DCS</text>
+<line x1="84" y1="32" x2="84" y2="53" class="divider"/>
+<text x="103" y="48" class="strong">North water works</text>
+<text x="1216" y="48" class="small mono" text-anchor="end">08:42:16</text>
+<text x="1334" y="48" class="small" text-anchor="end">kaspar</text>
+<rect x="1364" y="27" width="80" height="32" fill="#fafbfb" stroke="#b2bbc1" rx="3"/>
+<text x="1404.0" y="48" class="small" text-anchor="middle">Menu</text>
+<rect x="21" y="63" width="1438" height="60" fill="#f5f6f6"/>
+<text x="39" y="86" class="small strong">Alarms</text>
+<text x="39" y="107" class="small muted">2 unack</text>
+<rect x="128" y="73" width="642" height="40" fill="#ffffff" stroke="#c7cfd4" rx="3"/>
+<rect x="128" y="73" width="4" height="40" fill="#d87b16"/>
+<path d="M149 84 L158 93 L149 102 L140 93 Z" fill="#d87b16"/>
+<text x="149" y="97" class="micro strong" text-anchor="middle" fill="#ffffff">2</text>
+<text x="168" y="88" class="small strong">P2  ·  P101  ·  Bearing temp high</text>
+<text x="168" y="105" class="small muted">80 °C  /  60 °C limit</text>
+<text x="738" y="98" class="small strong" text-anchor="end">UNACK</text>
+<rect x="778" y="73" width="525" height="40" fill="#ffffff" stroke="#c7cfd4" rx="3"/>
+<rect x="778" y="73" width="4" height="40" fill="#9d791c"/>
+<path d="M798 84 L808 101 L788 101 Z" fill="#9d791c"/>
+<text x="798" y="97" class="micro strong" text-anchor="middle" fill="#ffffff">3</text>
+<text x="817" y="88" class="small strong">P3  ·  TT102  ·  Measurement fault</text>
+<text x="817" y="105" class="small muted">Value unavailable</text>
+<text x="1281" y="98" class="small strong" text-anchor="end">UNACK</text>
+<rect x="1315" y="77" width="128" height="32" fill="#fafbfb" stroke="#b2bbc1" rx="3"/>
+<text x="1379.0" y="98" class="small" text-anchor="middle">All alarms  ›</text>
+<line x1="21" y1="123" x2="1459" y2="123" class="divider"/>
+<rect x="21" y="124" width="179" height="766" fill="#f2f4f5"/>
+<text x="39" y="156" class="small muted strong">PLANT</text>
+<text x="39" y="190" class="small">⌄</text>
+<text x="59" y="190" class="small strong">North water works</text>
+<text x="63" y="225" class="small">Overview</text>
+<rect x="29" y="242" width="164" height="32" fill="#e0e6e9" rx="3"/>
+<rect x="29" y="242" width="3" height="32" fill="#52636e"/>
+<text x="63" y="263" class="small strong">Inlet pumping</text>
+<text x="63" y="301" class="small">Screens</text>
+<text x="63" y="339" class="small">Disinfection</text>
+<text x="63" y="377" class="small">Service water</text>
+<line x1="39" y1="411" x2="180" y2="411" class="divider"/>
+<text x="39" y="439" class="small muted strong">VIEWS</text>
+<text x="39" y="474" class="small strong">Process</text>
+<text x="39" y="510" class="small">Alarms</text>
+<text x="166" y="510" class="small strong" text-anchor="end">2</text>
+<text x="39" y="546" class="small">Trends</text>
+<text x="39" y="582" class="small">Events</text>
+<line x1="200" y1="124" x2="200" y2="890" class="divider"/>
+<text x="224" y="151" class="small muted">North water works  /  Inlet pumping</text>
+<text x="224" y="183" class="title">Inlet pumping</text>
+<text x="1146" y="182" class="small strong" text-anchor="end">Overview</text>
+<line x1="200" y1="201" x2="1169" y2="201" class="divider"/>
+<text x="224" y="229" class="small strong">WET WELL 01</text>
+<text x="1146" y="229" class="small muted" text-anchor="end">2 pumps  ·  1 running</text>
+<text x="250" y="280" class="small strong">WW-01</text>
+<rect x="272" y="381" width="158" height="214" fill="#d5dde1"/>
+<path d="M270 287 V598 H432 V287" fill="none" stroke="#68757c" stroke-width="2"/>
+<line x1="272" y1="381" x2="430" y2="381" stroke="#87959d"/>
+<line x1="281" y1="581" x2="418" y2="581" stroke="#c0cbd1"/>
+<path d="M224 322 H270" fill="none" class="pipe"/>
+<path d="M232 322 H253" fill="none" stroke="#68757c" stroke-width="2"/>
+<path d="M232 322 H253" fill="none" stroke="#68757c" stroke-width="2" marker-end="url(#flow)"/>
+<text x="225" y="306" class="small muted">Inlet</text>
+<rect x="285" y="410" width="116" height="73" fill="#fbfcfc" stroke="#bcc6cc" rx="3"/>
+<text x="297" y="430" class="small muted">LT101  ·  Level</text>
+<text x="297" y="460" class="value">4.20</text>
+<text x="372" y="460" class="small muted">m</text>
+<text x="297" y="477" class="micro muted">Normal 2.0–5.2 m</text>
+<line x1="447" y1="289" x2="447" y2="595" stroke="#bec7cd"/>
+<line x1="444" y1="595" x2="451" y2="595" stroke="#909da5"/>
+<text x="458" y="599" class="micro muted">0</text>
+<line x1="444" y1="493" x2="451" y2="493" stroke="#909da5"/>
+<text x="458" y="497" class="micro muted">2</text>
+<line x1="444" y1="391" x2="451" y2="391" stroke="#909da5"/>
+<text x="458" y="395" class="micro muted">4</text>
+<line x1="444" y1="289" x2="451" y2="289" stroke="#909da5"/>
+<text x="458" y="293" class="micro muted">6</text>
+<path d="M432 567 H489 V365 H957 V548 H489" fill="none" class="pipe"/>
+<path d="M489 548 H957" fill="none" class="pipe"/>
+<path d="M957 365 H1138" fill="none" class="pipe"/>
+<path d="M1091 365 H1128" fill="none" stroke="#68757c" stroke-width="2" marker-end="url(#flow)"/>
+<text x="1139" y="390" class="small muted" text-anchor="end">To treatment</text>
+<path d="M535 354 L563 376 V354 L535 376 Z" fill="#ffffff" stroke="#52636d" stroke-width="1.6"/>
+<line x1="549" y1="354" x2="549" y2="338" stroke="#52636d"/>
+<line x1="541" y1="338" x2="557" y2="338" stroke="#52636d"/>
+<text x="549" y="396" class="small muted" text-anchor="middle">XV101</text>
+<text x="549" y="414" class="small" text-anchor="middle">Open</text>
+<path d="M535 537 L563 559 V537 L535 559 Z" fill="#ffffff" stroke="#52636d" stroke-width="1.6"/>
+<line x1="549" y1="537" x2="549" y2="521" stroke="#52636d"/>
+<line x1="541" y1="521" x2="557" y2="521" stroke="#52636d"/>
+<text x="549" y="579" class="small muted" text-anchor="middle">XV102</text>
+<text x="549" y="597" class="small" text-anchor="middle">Open</text>
+<path d="M842 354 L870 376 V354 L842 376 Z" fill="#ffffff" stroke="#52636d" stroke-width="1.6"/>
+<line x1="856" y1="354" x2="856" y2="338" stroke="#52636d"/>
+<line x1="848" y1="338" x2="864" y2="338" stroke="#52636d"/>
+<text x="856" y="396" class="small muted" text-anchor="middle">XV111</text>
+<text x="856" y="414" class="small" text-anchor="middle">Open</text>
+<path d="M842 537 L870 559 V537 L842 559 Z" fill="#ffffff" stroke="#52636d" stroke-width="1.6"/>
+<line x1="856" y1="537" x2="856" y2="521" stroke="#52636d"/>
+<line x1="848" y1="521" x2="864" y2="521" stroke="#52636d"/>
+<text x="856" y="579" class="small muted" text-anchor="middle">XV112</text>
+<text x="856" y="597" class="small" text-anchor="middle">Open</text>
+<path d="M738 354 L759 365 L738 376 Z" fill="#ffffff" stroke="#52636d" stroke-width="1.6"/>
+<line x1="763" y1="353" x2="763" y2="377" stroke="#52636d"/>
+<text x="751" y="396" class="small muted" text-anchor="middle">NRV101</text>
+<path d="M738 537 L759 548 L738 559 Z" fill="#ffffff" stroke="#52636d" stroke-width="1.6"/>
+<line x1="763" y1="536" x2="763" y2="560" stroke="#52636d"/>
+<text x="751" y="579" class="small muted" text-anchor="middle">NRV102</text>
+<rect x="610" y="326" width="78" height="78" fill="none" stroke="#293c47" rx="5"/>
+<circle cx="649" cy="365" r="28" fill="#ffffff" class="equipment"/>
+<path d="M635 348 L667 365 L635 382 Z" fill="#ffffff" stroke="#52636d" stroke-width="1.6"/>
+<text x="649" y="307" class="strong" text-anchor="middle">P101</text>
+<text x="649" y="425" class="small strong" text-anchor="middle">Running  ·  Auto</text>
+<circle cx="649" cy="548" r="28" fill="#8b979e" class="equipment"/>
+<path d="M635 531 L667 548 L635 565 Z" fill="#677880" stroke="#52636d" stroke-width="1.6"/>
+<text x="649" y="490" class="strong" text-anchor="middle">P102</text>
+<text x="649" y="608" class="small" text-anchor="middle">Stopped  ·  Auto</text>
+<path d="M597 438 L606 447 L597 456 L588 447 Z" fill="#d87b16"/>
+<text x="597" y="451" class="micro strong" text-anchor="middle" fill="#ffffff">2</text>
+<text x="616" y="451" class="small strong">Bearing temp 80 °C</text>
+<text x="616" y="469" class="small muted">UNACK  ·  limit 60 °C</text>
+<rect x="596" y="628" width="216" height="50" fill="#f2f4f5" stroke="#bbc5cb" rx="3"/>
+<path d="M613 638 L623 655 L603 655 Z" fill="#9d791c"/>
+<text x="613" y="651" class="micro strong" text-anchor="middle" fill="#ffffff">3</text>
+<text x="631" y="646" class="small strong">TT102  ·  — °C</text>
+<text x="631" y="667" class="small muted">BAD DATA  ·  value unavailable</text>
+<path d="M1017 365 V314" fill="none" class="fine"/>
+<rect x="952" y="262" width="192" height="48" fill="#ffffff" stroke="#c8d0d5" rx="3"/>
+<text x="965" y="281" class="small muted">FT201  ·  Discharge flow</text>
+<text x="965" y="302" class="strong">42.0 m³/h</text>
+<text x="1131" y="302" class="small muted" text-anchor="end">10–70</text>
+<path d="M957 453 H997" fill="none" class="fine"/>
+<rect x="997" y="430" width="147" height="68" fill="#ffffff" stroke="#c8d0d5" rx="3"/>
+<text x="1010" y="449" class="small muted">PT201  ·  Pressure</text>
+<text x="1010" y="473" class="strong">3.40 bar</text>
+<text x="1010" y="490" class="micro muted">Normal 2.0–4.5</text>
+<line x1="224" y1="714" x2="1146" y2="714" class="divider"/>
+<text x="224" y="741" class="small strong">Wet-well level</text>
+<text x="526" y="741" class="small muted" text-anchor="end">15 min</text>
+<rect x="256" y="758" width="270" height="91" fill="#ffffff"/>
+<line x1="256" y1="763" x2="526" y2="763" class="fine"/>
+<line x1="256" y1="806" x2="526" y2="806" class="fine"/>
+<line x1="256" y1="849" x2="526" y2="849" class="fine"/>
+<text x="241" y="768" class="micro muted" text-anchor="end">6</text>
+<text x="241" y="811" class="micro muted" text-anchor="end">4</text>
+<text x="241" y="853" class="micro muted" text-anchor="end">2</text>
+<path d="M257 824 L272 821 L290 816 L310 812 L329 803 L346 805 L365 797 L385 800 L403 794 L421 802 L441 803 L460 799 L481 801 L502 802 L525 802" fill="none" stroke="#657a86" stroke-width="2"/>
+<text x="257" y="873" class="micro muted">08:27</text>
+<text x="526" y="873" class="micro muted" text-anchor="end">08:42</text>
+<line x1="558" y1="738" x2="558" y2="868" class="divider"/>
+<text x="582" y="741" class="small strong">Station</text>
+<text x="582" y="777" class="small muted">Duty</text>
+<text x="808" y="777" class="small strong" text-anchor="end">P101</text>
+<text x="582" y="808" class="small muted">Standby</text>
+<text x="808" y="808" class="small" text-anchor="end">P102 available</text>
+<text x="582" y="839" class="small muted">Control</text>
+<text x="808" y="839" class="small" text-anchor="end">Level demand</text>
+<line x1="842" y1="738" x2="842" y2="868" class="divider"/>
+<text x="866" y="741" class="small strong">State key</text>
+<rect x="866" y="761" width="14" height="14" fill="#ffffff" stroke="#667882"/>
+<text x="891" y="773" class="small">Running / Open</text>
+<rect x="866" y="791" width="14" height="14" fill="#8b979e" stroke="#667882"/>
+<text x="891" y="803" class="small">Stopped / Closed</text>
+<path d="M873 823 L882 832 L873 841 L864 832 Z" fill="#d87b16"/>
+<text x="873" y="836" class="micro strong" text-anchor="middle" fill="#ffffff">2</text>
+<text x="891" y="837" class="small">Priority + alarm state</text>
+<rect x="1170" y="124" width="289" height="766" fill="#f5f7f8"/>
+<line x1="1170" y1="124" x2="1170" y2="890" class="divider"/>
+<text x="1190" y="151" class="small muted strong">EQUIPMENT</text>
+<text x="1190" y="183" class="title">P101</text>
+<text x="1438" y="182" class="title" text-anchor="end">×</text>
+<text x="1190" y="210" class="small muted">Duty pump</text>
+<line x1="1187" y1="227" x2="1442" y2="227" class="divider"/>
+<text x="1190" y="253" class="small muted">Feedback</text>
+<text x="1438" y="253" class="strong" text-anchor="end">Running</text>
+<text x="1190" y="283" class="small muted">Mode</text>
+<text x="1438" y="283" class="small strong" text-anchor="end">Auto</text>
+<text x="1190" y="313" class="small muted">Available</text>
+<text x="1438" y="313" class="small" text-anchor="end">Yes</text>
+<rect x="1187" y="336" width="255" height="79" fill="#ffffff" stroke="#bcc6cc" rx="3"/>
+<rect x="1187" y="336" width="3" height="79" fill="#d87b16"/>
+<path d="M1204 346 L1213 355 L1204 364 L1195 355 Z" fill="#d87b16"/>
+<text x="1204" y="359" class="micro strong" text-anchor="middle" fill="#ffffff">2</text>
+<text x="1221" y="359" class="small strong">Bearing temp high</text>
+<text x="1201" y="383" class="strong">80 °C</text>
+<text x="1431" y="383" class="small muted" text-anchor="end">Limit 60 °C</text>
+<text x="1201" y="403" class="small strong">UNACK</text>
+<text x="1431" y="403" class="small" text-anchor="end">Alarm details  ›</text>
+<text x="1190" y="449" class="small strong">Mode request</text>
+<rect x="1187" y="464" width="83" height="32" fill="#e0e5e8" stroke="#7d8b93" rx="3"/>
+<text x="1228.5" y="485" class="small strong" text-anchor="middle">Auto</text>
+<rect x="1273" y="464" width="83" height="32" fill="#fafbfb" stroke="#b2bbc1" rx="3"/>
+<text x="1314.5" y="485" class="small" text-anchor="middle">Manual</text>
+<rect x="1359" y="464" width="83" height="32" fill="#fafbfb" stroke="#b2bbc1" rx="3"/>
+<text x="1400.5" y="485" class="small" text-anchor="middle">OOS</text>
+<text x="1190" y="530" class="small strong">Run request</text>
+<rect x="1187" y="544" width="126" height="33" fill="#f3f5f6" stroke="#c7cfd3" rx="3"/>
+<rect x="1316" y="544" width="126" height="33" fill="#f3f5f6" stroke="#c7cfd3" rx="3"/>
+<text x="1250" y="566" class="small muted" text-anchor="middle">Run</text>
+<text x="1379" y="566" class="small muted" text-anchor="middle">Stop</text>
+<text x="1190" y="599" class="small muted">Manual mode required</text>
+<line x1="1187" y1="619" x2="1442" y2="619" class="divider"/>
+<text x="1190" y="646" class="small muted strong">Last command</text>
+<text x="1190" y="674" class="small">Auto request</text>
+<text x="1438" y="674" class="small strong" text-anchor="end">Applied</text>
+<text x="1190" y="698" class="small muted">08:41:58  ·  kaspar</text>
+<line x1="1187" y1="720" x2="1442" y2="720" class="divider"/>
+<text x="1190" y="748" class="small strong">Permissives</text>
+<text x="1190" y="777" class="small muted">Thermal protection</text>
+<text x="1438" y="777" class="small" text-anchor="end">Ready</text>
+<text x="1190" y="807" class="small muted">Moisture protection</text>
+<text x="1438" y="807" class="small" text-anchor="end">Ready</text>
+<text x="1190" y="850" class="small">More details  ›</text>
+<rect x="21" y="891" width="1438" height="28" fill="#e8ecee"/>
+<line x1="21" y1="890" x2="1459" y2="890" class="divider"/>
+<text x="39" y="910" class="small">Telemetry live  ·  updated 0.2 s ago</text>
+<text x="1110" y="910" class="small" text-anchor="end">Controller: Active</text>
+<text x="1438" y="910" class="small muted" text-anchor="end">Inlet pumping</text>
+<text x="20" y="951" class="small strong">Illustrative design target · fictitious topology and values · documentation only</text>
+<text x="20" y="975" class="small muted">Original DCS concept. Layout and tokens are project proposals; site conventions and operator validation determine production use.</text>
+</svg>

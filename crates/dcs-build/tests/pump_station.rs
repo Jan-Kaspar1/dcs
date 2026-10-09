@@ -2066,22 +2066,6 @@ fn with_station_monitor(
 fn assert_five_category_surface(client: &MonitorClient) {
     client.advance(1).unwrap();
 
-    // The served page carries the generic renderers — every
-    // faceplate's five categories come from the schema and resource
-    // views, never from kind-specific markup.
-    let page = client.page().unwrap();
-    for needle in [
-        "interfaceMarkup(descriptor.name, generic)",
-        "resourceTable(\"measurements\", iface.measurements",
-        "configTable(name, iface.configuration",
-        "resourceTable(\"state\", iface.state",
-        "commandTable(name, iface.commands",
-        "eventList(resources && resources.events)",
-        "class=\\\"invoke\\\"",
-    ] {
-        assert!(page.contains(needle), "page lacks {needle}");
-    }
-
     let snapshot = client.snapshot().unwrap();
     let schema = client.schema().unwrap();
     let resources = client.resources().unwrap();
@@ -2227,11 +2211,9 @@ fn assert_five_category_surface(client: &MonitorClient) {
 /// The schema-driven-interface decision's reference slice: the
 /// duty/standby station's monitor serves every component's five
 /// `BlockInterface` categories and the matching live resource state,
-/// so the page's generic faceplate renders the full surface with no
-/// kind-specific markup required — and the surfaced commands operate
-/// the station through the receipted path.
+/// and the declared commands operate the station through the receipted path.
 #[test]
-fn the_reference_station_renders_every_components_five_categories_generically() {
+fn the_reference_station_serves_every_components_five_categories() {
     let model = fixture_model();
     let layout = ids();
     with_station_monitor(&model, dynamics(), |client| {

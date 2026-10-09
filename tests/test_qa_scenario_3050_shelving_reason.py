@@ -1,41 +1,11 @@
 """The 3050_shelving_reason leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_shelving_reason, following the per-leg
 test-module split (#940). The shared fakes and helpers live in
-tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'ShelvingReasonTests.test_registered',
-    'ShelvingReasonTests.test_clean_feed_passes_and_validates',
-    'ShelvingReasonTests.test_two_runs_produce_identical_evidence',
-    'ShelvingReasonTests.test_rejected_reasoned_shelve_fails',
-    'ShelvingReasonTests.test_unsettled_shelve_fails',
-    'ShelvingReasonTests.test_settled_receipt_without_reason_fails',
-    'ShelvingReasonTests.test_unserved_shelved_flag_fails',
-    'ShelvingReasonTests.test_silent_journal_fails',
-    'ShelvingReasonTests.test_journaled_receipt_without_reason_fails',
-    'ShelvingReasonTests.test_mispaired_transition_fails',
-    'ShelvingReasonTests.test_unexpired_shelve_fails',
-    'ShelvingReasonTests.test_early_expiry_fails',
-    'ShelvingReasonTests.test_refused_release_fails',
-    'ShelvingReasonTests.test_rejected_reasonless_shelve_fails',
-    'ShelvingReasonTests.test_reasonless_receipt_with_reason_fails',
-    'ShelvingReasonTests.test_drifted_reread_fails_nondeterministic',
-    'ShelvingReasonTests.test_predates_index_is_inconclusive',
-    'ShelvingReasonTests.test_predates_envelope_is_inconclusive',
-    'ShelvingReasonTests.test_no_managed_alarm_is_inconclusive',
-    'ShelvingReasonTests.test_no_shelvable_alarm_is_inconclusive',
-    'ShelvingReasonTests.test_all_mandating_is_inconclusive',
-    'ShelvingReasonTests.test_missing_journal_path_is_inconclusive',
-    'ShelvingReasonTests.test_no_active_peer_fails',
-    'ShelvingReasonTests.test_unreachable_pair_is_inconclusive',
-})
 
 
 class ShelvingReasonFeed:

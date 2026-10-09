@@ -60,9 +60,7 @@ The run's phases, all driven so the episode needs no wall clock:
 
 - converges the declared pair to `tracking` and gates the contract
   surface: the launched active's recorded owner token, the emitted
-  model's carried boolean field output the perturbation lands on, and
-  the monitor page's declared pair-fault vocabulary — the surface the
-  pair view renders `field_unclaimed` from;
+  model's carried boolean field output the perturbation lands on;
 - induces the wedge through the run's dedicated plant-protocol
   client: the rogue `claim_writer` preempts the duty's standing claim
   and one field write lands off the staged value; the survivor's
@@ -119,10 +117,9 @@ and `skip-relaunch` never relaunches the field owner, so the recorded
 remedy never runs; each must fail naming the named evidence, the
 check's `diverged-field-recovery-unchecked` cover.
 
-A pinned release predating the contract — a served page declaring no
-unclaimed-field spelling, a launched active holding no recorded owner
-token, or a relaunched controller holding no startup claim — reports
-`wedge-recovery-digest inconclusive` rather than failing, until the
+A pinned release predating the contract, with a launched active holding no
+recorded owner token or a relaunched controller holding no startup claim,
+reports `wedge-recovery-digest inconclusive` rather than failing, until the
 manifest repins a release carrying decision 90's served signal and
 decision 94's remedy.
 """
@@ -204,7 +201,6 @@ WEDGE_TICKS = 3       # driven scans of the fenced field owner through
 RECOVERY_TICKS = 10   # driven pair ticks spent on the reconvergence
 RETURN_POLLS = 80     # the relaunched monitor's answer polls
 POLL_SLEEP = 0.25     # cadence between those polls
-UNCLAIMED_SPELLING = "field_unclaimed"
 
 
 def sync_kind(report):
@@ -262,19 +258,6 @@ def journal_counts(url, failures):
         divergence.journal_events(entries, "divergence_detected"),
         divergence.journal_events(entries, "divergence_resolved"),
     )
-
-
-def declares_unclaimed(url, failures):
-    """Whether the served monitor page declares the unclaimed-field
-    pair-fault spelling — the vocabulary the pair view renders its live
-    faults from. A page that never declares it predates decision 90's
-    served signal."""
-    try:
-        page = simulate.http_text(url)
-    except Exception as error:
-        failures.append(f"the monitor page at {url} did not serve — {error}")
-        raise Abort
-    return f'"{UNCLAIMED_SPELLING}"' in page
 
 
 def rogue_claim(plant_io, failures):
@@ -429,17 +412,6 @@ def wedge_recovery_run(args, declared, point, tamper, failures):
         plant_io = rig.plant_io
 
         # --- Phase 1 — the settled pair and the contract surface -----
-        # The served fault vocabulary gates the run: a release whose
-        # page never declares the unclaimed-field spelling cannot render
-        # the pair view the wedge's evidence is read on, so the leg
-        # reports the pin rather than judging a contract it never had.
-        if not declares_unclaimed(duty_url, failures):
-            raise Inconclusive(
-                f"the served monitor page declares no "
-                f"{UNCLAIMED_SPELLING} pair-fault spelling — the "
-                "pinned release predates the unclaimed-field signal "
-                "the wedge's evidence is read on"
-            )
         converged = rig.converge(failures)
         owner = converged["owner"]
         staged = simulate.snapshot_point(owner, point)
@@ -465,7 +437,6 @@ def wedge_recovery_run(args, declared, point, tamper, failures):
                 "staged": staged,
                 "duty_role": converged["duty_role"],
                 "standby_role": converged["standby_role"],
-                "vocabulary": True,
             }
         )
 

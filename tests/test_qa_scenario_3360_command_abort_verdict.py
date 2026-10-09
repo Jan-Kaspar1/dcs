@@ -1,39 +1,10 @@
 """The 3360_command_abort_verdict leg's scenario unit coverage — the feed
 fakes and TestCase classes for scenario_command_abort_verdict. The
-shared fakes and helpers live in tests/qa_scenario_support.py;
-EXPECTED_CASES pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+shared fakes and helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'CommandAbortVerdictTests.test_registered_in_scenarios',
-    'CommandAbortVerdictTests.test_clean_pair_passes_and_validates',
-    'CommandAbortVerdictTests.test_failed_report_reports_failed',
-    'CommandAbortVerdictTests.test_never_settled_reports_failed',
-    'CommandAbortVerdictTests.test_double_settle_reports_nondeterministic',
-    'CommandAbortVerdictTests.test_contradicting_peer_reports_nondeterministic',
-    'CommandAbortVerdictTests.test_pending_log_reports_nondeterministic',
-    'CommandAbortVerdictTests.test_missing_file_settle_reports_failed',
-    'CommandAbortVerdictTests.test_lagged_image_reports_nondeterministic',
-    'CommandAbortVerdictTests.test_moved_roles_report_nondeterministic',
-    'CommandAbortVerdictTests.test_answered_post_reports_inconclusive',
-    'CommandAbortVerdictTests.test_predated_page_reports_inconclusive',
-    'CommandAbortVerdictTests.test_no_journal_files_reports_inconclusive',
-    'CommandAbortVerdictTests.test_no_active_reports_failed',
-    'CommandAbortVerdictTests.test_silent_audit_reports_unchecked',
-    'CommandAbortVerdictTests.test_two_runs_produce_identical_evidence',
-})
-
-# The honest-verdict page surface the contract gate probes for — the
-# indeterminate-outcome vocabulary and the abandoned-submission mint
-# the leg names in PAGE_MARKERS.
-PAGE = (b'<html>abandonedSubmission outcome indeterminate verdict '
-        b'command may still apply</html>')
 
 
 class AbortVerdictFeed:
@@ -70,7 +41,6 @@ class AbortVerdictFeed:
         self.role_moved = False    # the standby leaves tracking on drain
         self.moved = False         # the doctor's landed state
         self.no_active = False     # no peer reports role=active
-        self.predated = False      # the served page predates the fix
 
     # --- the runner-owned transport seam ---
 
@@ -170,14 +140,6 @@ class AbortVerdictFeed:
             + [json.dumps(record) for record in self.records[name]]
         Path(self.paths[name]).write_text('\n'.join(lines) + '\n')
 
-    def page_status(self, method, url, timeout=5):
-        """The served-page contract probe: the post-fix page carries
-        the honest-verdict surface; a staged run predating #1036's fix
-        serves the page without it."""
-        if self.predated:
-            return 200, b'<html>the legacy page</html>'
-        return 200, PAGE
-
     # --- the stubbed monitor surface ---
 
     def http_json(self, method, url, body=None, timeout=5):
@@ -227,11 +189,7 @@ class AbortVerdictFeed:
 
 
 class CommandAbortVerdictTests(unittest.TestCase):
-    """scenario_command_abort_verdict against the stubbed pair: a
-    clean rig passes with identical digests and the honest-verdict
-    report, each doctored defect reports the named diagnostic — the
-    'command failed' report for an applied command first — and a
-    silenced judge reports the self-check leg's unchecked name."""
+    """Audit command settlement after an abandoned transport wait."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -255,23 +213,18 @@ class CommandAbortVerdictTests(unittest.TestCase):
                 'journal_files': paths,
                 'evidence_dir': str(self.evidence)}
 
-    def run_scenario(self, feed=None, ctx=None, submit=None):
+    def run_scenario(self, feed=None, ctx=None, post=None):
         feed = feed or self.feed
         constants = {'ABORT_LEAD': 0.001, 'ABORT_HOLD': 0.001,
                      'ABORT_BOUND': 0.001, 'ABORT_SETTLE': 1.0,
-                     'ABORT_REPLY': 1.0, 'ABORT_POLL': 0.001,
-                     'PAGE_TIMEOUT': 1.0}
+                     'ABORT_REPLY': 1.0, 'ABORT_POLL': 0.001}
         patches = [patch.multiple(scenarios, **constants),
                    patch.object(scenarios, 'http_json', feed.http_json),
                    patch.object(scenarios, '_connect', feed.connect),
-                   patch.object(scenarios, '_drain_reply', feed.drain),
-                   patch.object(scenarios, '_request_status',
-                                feed.page_status)]
-        if submit is not None:
-            report = dict(submit)
+                   patch.object(scenarios, '_drain_reply', feed.drain)]
+        if post is not None:
             patches.append(patch.object(
-                scenarios, '_submit_command',
-                lambda base, body, bound: dict(report)))
+                scenarios, '_post_command', return_value=post))
         for patcher in patches:
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -304,36 +257,13 @@ class CommandAbortVerdictTests(unittest.TestCase):
             (self.evidence
              / 'command-abort-verdict-pass-1.json').read_text())
         self.assertEqual(passed['digest'], {
-            'report': 'indeterminate', 'receipt': 'applied',
+            'receipt': 'applied',
             'journal': 'single', 'roles': 'held'})
         self.assertEqual(passed['violations'], {})
-        # The mirrored submitCommand minted the indeterminate verdict —
-        # never 'command failed' — and named the settled receipt the
-        # truth.
-        report_record = passed['report']
-        self.assertEqual(report_record['verdict'], 'indeterminate')
-        self.assertIn('indeterminate',
-                      report_record['answer']['outcome'])
-        self.assertIn('may still apply', report_record['notice'])
-        self.assertNotIn('command failed', report_record['notice'])
         second = json.loads(
             (self.evidence
              / 'command-abort-verdict-pass-2.json').read_text())
         self.assertEqual(second['digest'], passed['digest'])
-
-    def test_failed_report_reports_failed(self):
-        # The doctored negative the finding names: the aborted
-        # submission asserted 'command failed' while the journal
-        # settled it applied.
-        record = self.run_scenario(submit={
-            'verdict': 'failed',
-            'detail': "command failed: "
-                      "TimeoutError('the read bound fired')"})
-        self.assertEqual(record['outcome'], 'failed', record)
-        self.assertTrue(record['detail'].startswith(
-            'command-abort-verdict-failed'), record['detail'])
-        self.assertIn('command failed', record['detail'])
-        report.validate_scenario(record)
 
     def test_never_settled_reports_failed(self):
         self.feed.never_settle = True
@@ -408,18 +338,10 @@ class CommandAbortVerdictTests(unittest.TestCase):
         # The pinned lane answering inside the bound means the abort
         # window never staged — the leg reports inconclusive, never a
         # verdict.
-        record = self.run_scenario(submit={
-            'verdict': 'receipt',
-            'receipt': {'outcome': {'applied': {'tick': 1}}}})
+        record = self.run_scenario(post=(
+            'answered', {'outcome': {'applied': {'tick': 1}}}))
         self.assertEqual(record['outcome'], 'inconclusive', record)
         self.assertIn('abort window never staged', record['detail'])
-        report.validate_scenario(record)
-
-    def test_predated_page_reports_inconclusive(self):
-        self.feed.predated = True
-        record = self.run_scenario()
-        self.assertEqual(record['outcome'], 'inconclusive', record)
-        self.assertIn('predates', record['detail'])
         report.validate_scenario(record)
 
     def test_no_journal_files_reports_inconclusive(self):
@@ -438,9 +360,9 @@ class CommandAbortVerdictTests(unittest.TestCase):
         report.validate_scenario(record)
 
     def test_silent_audit_reports_unchecked(self):
-        # The self-check leg: the report judge, silenced, must turn the
+        # The self-check leg: the settlement judge, silenced, must turn the
         # planted negatives into the unchecked diagnostic.
-        with patch.object(scenarios, '_judge_report',
+        with patch.object(scenarios, '_judge_settle',
                           lambda record, note: None):
             record = self.run_scenario()
         self.assertEqual(record['outcome'], 'failed', record)

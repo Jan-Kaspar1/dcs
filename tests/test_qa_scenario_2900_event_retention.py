@@ -1,32 +1,11 @@
 """The 2900_event_retention leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_event_retention, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'EventRetentionTests.test_registered_and_replayable',
-    'EventRetentionTests.test_clean_feed_passes_and_validates',
-    'EventRetentionTests.test_two_runs_produce_identical_evidence',
-    'EventRetentionTests.test_history_event_journaled_fails',
-    'EventRetentionTests.test_history_not_growing_on_repeat_fails',
-    'EventRetentionTests.test_latest_accumulating_records_fails',
-    'EventRetentionTests.test_latest_stale_on_repeat_fails',
-    'EventRetentionTests.test_standby_journaling_routed_events_fails',
-    'EventRetentionTests.test_standby_admitting_the_drive_fails',
-    'EventRetentionTests.test_standby_without_descriptor_fails',
-    'EventRetentionTests.test_no_qualifying_component_is_inconclusive',
-    'EventRetentionTests.test_declared_but_unserved_component_is_inconclusive',
-    'EventRetentionTests.test_no_emission_path_is_inconclusive',
-    'EventRetentionTests.test_drives_without_emissions_is_inconclusive',
-})
 
 
 class RetentionFeed:

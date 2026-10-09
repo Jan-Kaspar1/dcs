@@ -1,42 +1,11 @@
 """The 3970_graceful_shutdown leg's scenario unit coverage — the feed
 fakes and TestCase classes for scenario_graceful_shutdown, split out
 of the test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES pins
-this module's contribution to the suite's case coverage so a dropped
-case fails the discovery check in tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'GracefulShutdownTests.test_registered_in_scenarios',
-    'GracefulShutdownTests.test_clean_rig_passes_and_validates',
-    'GracefulShutdownTests.test_killed_exit_without_marker_is_predated',
-    'GracefulShutdownTests.test_graceful_exit_without_marker_fails',
-    'GracefulShutdownTests.test_exit_timeout_fails',
-    'GracefulShutdownTests.test_stale_state_file_fails',
-    'GracefulShutdownTests.test_unreadable_state_file_fails',
-    'GracefulShutdownTests.test_relaunch_refused_fails',
-    'GracefulShutdownTests.test_resumed_tick_rewind_is_nondeterministic',
-    'GracefulShutdownTests.test_resumed_run_stalls_fails',
-    'GracefulShutdownTests.test_reconverge_fails',
-    'GracefulShutdownTests.test_first_signal_exits_despite_stall_fails',
-    'GracefulShutdownTests.test_killed_first_signal_is_predated',
-    'GracefulShutdownTests.test_second_signal_hangs_fails',
-    'GracefulShutdownTests.test_second_signal_wrong_exit_fails',
-    'GracefulShutdownTests.test_missing_signal_action_is_inconclusive',
-    'GracefulShutdownTests.test_missing_state_probe_is_inconclusive',
-    'GracefulShutdownTests.test_missing_state_path_is_inconclusive',
-    'GracefulShutdownTests.test_missing_mount_lever_is_inconclusive',
-    'GracefulShutdownTests.test_unreachable_rig_is_inconclusive',
-    'GracefulShutdownTests.test_unsettled_pair_is_inconclusive',
-    'GracefulShutdownTests.test_failed_impede_is_inconclusive',
-    'GracefulShutdownTests.test_failed_restore_reports',
-    'GracefulShutdownTests.test_scenario_ctx_carries_the_signal_action',
-    'GracefulShutdownTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class ShutdownFeed:

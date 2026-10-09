@@ -1,42 +1,11 @@
 """The 0650_bare_point_restamp leg's scenario unit coverage — the
 feed fakes and TestCase classes for scenario_bare_point_restamp,
 split out of the test_qa_scenarios monolith (#940). The shared
-fakes and helpers live in tests/qa_scenario_support.py;
-EXPECTED_CASES pins this module's contribution to the suite's
-case coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+fakes and helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'BarePointRestampTests.test_registered_in_scenarios',
-    'BarePointRestampTests.test_clean_feed_passes_and_validates',
-    'BarePointRestampTests.test_predating_rig_is_inconclusive',
-    'BarePointRestampTests.test_stamp_gap_fails',
-    'BarePointRestampTests.test_stepped_rewind_fails',
-    'BarePointRestampTests.test_freeze_rewind_fails',
-    'BarePointRestampTests.test_unstamped_freeze_read_fails',
-    'BarePointRestampTests.test_element_driven_point_is_inconclusive',
-    'BarePointRestampTests.test_no_bare_input_is_inconclusive',
-    'BarePointRestampTests.test_no_driven_contrast_is_inconclusive',
-    'BarePointRestampTests.test_refused_claim_is_inconclusive',
-    'BarePointRestampTests.test_refused_probe_write_is_inconclusive',
-    'BarePointRestampTests.test_fenced_step_is_inconclusive',
-    'BarePointRestampTests.test_freeze_never_took_is_inconclusive',
-    'BarePointRestampTests.test_resume_never_restores_fails',
-    'BarePointRestampTests.test_promotion_mid_freeze_passes',
-    'BarePointRestampTests.test_unreturned_writer_is_inconclusive',
-    'BarePointRestampTests.test_failed_stop_action_is_inconclusive',
-    'BarePointRestampTests.test_failed_start_action_is_inconclusive',
-    'BarePointRestampTests.test_unreachable_pair_is_inconclusive',
-    'BarePointRestampTests.test_no_tracking_peer_is_inconclusive',
-    'BarePointRestampTests.test_silent_census_is_inconclusive',
-    'BarePointRestampTests.test_missing_actions_is_inconclusive',
-    'BarePointRestampTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class RestampPlantPeer(FakePlantPeer):

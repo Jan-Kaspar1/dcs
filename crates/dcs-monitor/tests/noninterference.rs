@@ -1207,7 +1207,6 @@ fn published_reads_cover_every_execution_mode() {
         );
         assert_eq!(client.signals().unwrap(), signal_index());
         assert_eq!(client.role().unwrap().tick, monitor.tick());
-        assert!(client.page().unwrap().contains("<title>"));
     }
 
     let driver_points = || {

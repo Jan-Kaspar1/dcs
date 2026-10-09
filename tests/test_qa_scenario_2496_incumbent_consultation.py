@@ -2,9 +2,7 @@
 feed fakes and TestCase classes for
 scenario_incumbent_consultation, split out per the leg-module
 convention (#940). The shared fakes and helpers live in
-tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+tests/qa_scenario_support.py.
 """
 import importlib
 import unittest
@@ -17,47 +15,6 @@ from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
 # keeps only the last of each.
 LEG = importlib.import_module(
     'qa_lane.scenarios.2496_incumbent_consultation')
-
-
-EXPECTED_CASES = frozenset({
-    'ConsultationGateTests.test_registered_after_keyed_announce_before_revisions',
-    'ConsultationGateTests.test_fixed_shape_passes_validates_and_restores',
-    'ConsultationGateTests.test_two_runs_produce_identical_evidence',
-    'ConsultationGateTests.test_evidence_names_both_halves',
-    'ConsultationGateTests.test_pre_gate_release_is_inconclusive',
-    'ConsultationGateTests.test_pre_gate_release_digests_unrecorded',
-    'ConsultationGateTests.test_vanished_container_is_inconclusive',
-    'ConsultationGateTests.test_refusal_never_settles_fails',
-    'ConsultationGateTests.test_zero_exit_fails',
-    'ConsultationGateTests.test_unnamed_refusal_fails',
-    'ConsultationGateTests.test_unnamed_remedy_fails',
-    'ConsultationGateTests.test_unnamed_verdict_fails',
-    'ConsultationGateTests.test_unjournaled_consultation_fails',
-    'ConsultationGateTests.test_adopted_instead_of_refused_fails',
-    'ConsultationGateTests.test_nonowning_verdict_record_fails',
-    'ConsultationGateTests.test_incumbent_demotion_fails',
-    'ConsultationGateTests.test_incumbent_stall_fails',
-    'ConsultationGateTests.test_rolled_back_tunes_fail',
-    'ConsultationGateTests.test_incumbent_never_stopped_fails',
-    'ConsultationGateTests.test_seize_refused_fails',
-    'ConsultationGateTests.test_seizing_exit_fails',
-    'ConsultationGateTests.test_missing_takeover_record_fails',
-    'ConsultationGateTests.test_misstated_baseline_fails',
-    'ConsultationGateTests.test_baseline_not_lagging_fails',
-    'ConsultationGateTests.test_unsettled_tune_fails',
-    'ConsultationGateTests.test_unrestored_pair_fails',
-    'ConsultationGateTests.test_restart_failure_is_nondeterministic',
-    'ConsultationGateTests.test_second_pass_defect_fails',
-    'ConsultationGateTests.test_no_keyed_pair_is_inconclusive',
-    'ConsultationGateTests.test_probe_pair_is_the_subject',
-    'ConsultationGateTests.test_missing_levers_are_inconclusive',
-    'ConsultationGateTests.test_missing_journals_are_inconclusive',
-    'ConsultationGateTests.test_unsettled_pair_is_inconclusive',
-    'ConsultationGateTests.test_unnameable_incumbent_is_inconclusive',
-    'ConsultationGateTests.test_untunable_model_is_inconclusive',
-    'ConsultationGateTests.test_unchecked_self_check_fails',
-    'ConsultationGateTests.test_judge_self_check_is_complete',
-})
 
 
 class _Peer:

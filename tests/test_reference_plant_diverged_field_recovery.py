@@ -3,7 +3,7 @@ coverage: ci/legs.py's discovery (parsing, never importing) finds the
 leg at its declared order between the staged-vs-field divergence leg
 and the standby-restart leg, the leg's doctored cases are the two the
 check drives, and the run's own boundary guards — the emitted model's
-carried field output and the served pair-fault vocabulary — are the
+carried field output and pair manifest — are the
 ones the leg declares it needs. The leg's live run belongs to the
 pair stage in `ci/check.sh` against the pinned release.
 """

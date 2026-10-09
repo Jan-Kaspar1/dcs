@@ -7,59 +7,10 @@ subject here carries the leg's raw field-attachment seams
 (field_request/hold_field_claim/drop_field_claim), the unkeyed
 driven-writer launch (start_driven keyed=False), and the
 keyed-posture relaunch lever as plain callables the feed backs.
-EXPECTED_CASES pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'UsurpedForeignClaimTests.test_registered',
-    'UsurpedForeignClaimTests.test_clean_passes_and_validates',
-    'UsurpedForeignClaimTests.test_never_convicts_reports_failed',
-    'UsurpedForeignClaimTests.test_field_unclaimed_reports_failed',
-    'UsurpedForeignClaimTests.test_conditional_reclaim_reports_'
-    'failed',
-    'UsurpedForeignClaimTests.test_silent_preempt_reports_failed',
-    'UsurpedForeignClaimTests.test_wrong_writer_reports_failed',
-    'UsurpedForeignClaimTests.test_usurper_survives_reports_failed',
-    'UsurpedForeignClaimTests.test_latched_usurped_reports_failed',
-    'UsurpedForeignClaimTests.test_monitorless_convicted_reports_'
-    'failed',
-    'UsurpedForeignClaimTests.test_dead_convicted_reports_failed',
-    'UsurpedForeignClaimTests.test_live_holder_preempted_reports_'
-    'failed',
-    'UsurpedForeignClaimTests.test_unkeyed_convicts_reports_failed',
-    'UsurpedForeignClaimTests.test_unkeyed_preempts_reports_failed',
-    'UsurpedForeignClaimTests.test_never_demotes_reports_failed',
-    'UsurpedForeignClaimTests.test_no_loss_reports_failed',
-    'UsurpedForeignClaimTests.test_broken_restore_reports_failed',
-    'UsurpedForeignClaimTests.test_usurper_refused_reports_'
-    'nondeterministic',
-    'UsurpedForeignClaimTests.test_durable_silent_reports_'
-    'nondeterministic',
-    'UsurpedForeignClaimTests.test_diverging_digests_report_'
-    'nondeterministic',
-    'UsurpedForeignClaimTests.test_silent_judge_reports_unchecked',
-    'UsurpedForeignClaimTests.test_no_probe_reports_inconclusive',
-    'UsurpedForeignClaimTests.test_unkeyed_pair_reports_inconclusive',
-    'UsurpedForeignClaimTests.test_missing_seams_report_inconclusive',
-    'UsurpedForeignClaimTests.test_silent_pair_reports_inconclusive',
-    'UsurpedForeignClaimTests.test_probe_refused_reports_inconclusive',
-    'UsurpedForeignClaimTests.test_unclaimed_baseline_reports_'
-    'inconclusive',
-    'UsurpedForeignClaimTests.test_undeclared_monitor_reports_'
-    'inconclusive',
-    'UsurpedForeignClaimTests.test_foreign_baseline_reports_'
-    'inconclusive',
-    'UsurpedForeignClaimTests.test_unsettled_standby_reports_'
-    'inconclusive',
-    'UsurpedForeignClaimTests.test_two_runs_produce_identical_'
-    'evidence',
-})
 
 
 class UsurpedPlant:

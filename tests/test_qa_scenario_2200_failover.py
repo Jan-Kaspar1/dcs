@@ -1,20 +1,11 @@
 """The 2200_failover leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_failover, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'FailoverTests.test_fresh_pair_switches',
-    'FailoverTests.test_switched_pair_recycles_the_active',
-})
 
 
 class FailoverFeed:

@@ -1,0 +1,12 @@
+/target/
+/.git/
+/.dcs-agent/
+/.agents/
+/.codex/
+/.aws/
+/.venv/
+/agent_pool/
+/tests/
+/.github/
+**/__pycache__/
+*.py[cod]

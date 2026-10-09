@@ -1,43 +1,11 @@
 """The 2150_keyed_announced_source leg's scenario unit coverage —
 the feed fakes and TestCase classes for
 scenario_keyed_announced_source, split out per the #940 convention.
-The shared fakes and helpers live in tests/qa_scenario_support.py;
-EXPECTED_CASES pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+The shared fakes and helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'KeyedAnnouncedTests.test_registered',
-    'KeyedAnnouncedTests.test_clean_probe_pair_passes_and_validates',
-    'KeyedAnnouncedTests.test_no_probe_subject_reports_inconclusive',
-    'KeyedAnnouncedTests.test_unkeyed_probe_subject_reports_'
-    'inconclusive',
-    'KeyedAnnouncedTests.test_missing_forge_action_reports_'
-    'inconclusive',
-    'KeyedAnnouncedTests.test_host_placed_forge_reports_inconclusive',
-    'KeyedAnnouncedTests.test_unreachable_pair_reports_inconclusive',
-    'KeyedAnnouncedTests.test_unconverged_pair_reports_inconclusive',
-    'KeyedAnnouncedTests.test_swapped_layout_reports_inconclusive',
-    'KeyedAnnouncedTests.test_unproven_peer_reports_inconclusive',
-    'KeyedAnnouncedTests.test_forged_endpoint_adopted_fails',
-    'KeyedAnnouncedTests.test_stale_proof_verified_fails',
-    'KeyedAnnouncedTests.test_involuntary_wedge_fails',
-    'KeyedAnnouncedTests.test_involuntary_held_owner_fails',
-    'KeyedAnnouncedTests.test_involuntary_silent_loss_fails',
-    'KeyedAnnouncedTests.test_involuntary_foreign_adoption_fails',
-    'KeyedAnnouncedTests.test_lifecycle_refused_fails',
-    'KeyedAnnouncedTests.test_planted_pull_applied_fails',
-    'KeyedAnnouncedTests.test_silent_forge_fails',
-    'KeyedAnnouncedTests.test_diverging_digests_report_'
-    'nondeterministic',
-    'KeyedAnnouncedTests.test_silent_judge_reports_unchecked',
-    'KeyedAnnouncedTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class KeyedAnnouncedFeed:

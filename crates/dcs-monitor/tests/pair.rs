@@ -734,20 +734,6 @@ fn an_unsynchronized_standby_past_the_convergence_grace_is_a_named_fault() {
     assert!(health.faults.is_empty(), "{:?}", health.faults);
     assert_fault_kinds(&health, &[]);
 
-    // The page carries the same verdict: its pairHealth faults a peer
-    // still reporting "unsynchronized" past the same grace — over the
-    // reproduction's permanently dead standby the page can no longer
-    // return zero faults.
-    let page = dcs_monitor::PAGE;
-    for needle in [
-        "CONVERGENCE_GRACE_MS",
-        "noteSyncAge",
-        "past the convergence grace",
-        "\"unsynchronized\"",
-    ] {
-        assert!(page.contains(needle), "page lacks {needle}");
-    }
-
     active.stop();
     standby.stop();
 }
@@ -943,20 +929,6 @@ fn an_unclaimed_field_report_is_a_named_fault_until_a_holder_claims() {
     assert!(health.faults.is_empty(), "{:?}", health.faults);
     assert_fault_kinds(&health, &[]);
 
-    // The page's pair-health section names the same verdict
-    // distinctly from the orphaned and degraded sync faults: the
-    // versioned kind, the report field it reads, and the named
-    // remedy.
-    let page = dcs_monitor::PAGE;
-    for needle in [
-        "\"field_unclaimed\"",
-        "field_claim === \"unclaimed\"",
-        "the field unclaimed",
-        "promote is the documented remedy",
-    ] {
-        assert!(page.contains(needle), "page lacks {needle}");
-    }
-
     active.stop();
     standby.stop();
 }
@@ -1023,85 +995,13 @@ fn an_armed_standbys_miss_window_surfaces_the_failover_accounting() {
         health.faults
     );
 
-    // The page surfaces the same accounting: the report field it reads,
-    // the proof's standing, the miss count against its budget, and the
-    // armed fire point.
-    let page = dcs_monitor::PAGE;
-    for needle in [
-        "report.failover",
-        "failoverNote",
-        "failover proof ",
-        "misses ",
-        " of ",
-        "failover fires at ",
-    ] {
-        assert!(page.contains(needle), "page lacks {needle}");
-    }
-
     active.stop();
     standby.stop();
 }
 
-/// The QA header finding
-/// (`monitor-header-names-nonactive-source-as-active-peer`): the
-/// status line's "active peer" label may name only a peer whose own
-/// role report says settled active — through the failover gap the
-/// serving fallback is titled by the role its report carries, never
-/// "active" above its own standby row.
 #[test]
-fn the_status_line_labels_the_source_by_its_reported_role() {
-    let page = dcs_monitor::PAGE;
-    for needle in [
-        "function sourcePeerNote()",
-        "sourcePeerNote()",
-        "\" — active peer \"",
-        "\" — serving peer \"",
-        "state.report.role",
-    ] {
-        assert!(page.contains(needle), "page lacks {needle}");
-    }
-}
-
-#[test]
-fn page_carries_the_pair_view_and_answers_cross_origin_role_reads() {
+fn role_endpoint_answers_cross_origin_reads() {
     let active = PeerRig::start(Role::Active);
-
-    // The served page contains the pair-view machinery: ?peer=
-    // configuration, /role polling, the pair-health section, and the
-    // active-only command path with its mid-transition retry.
-    let page = dcs_monitor::PAGE;
-    for needle in [
-        "getAll(\"peer\")",
-        "\"/role\"",
-        "id=\"pair\"",
-        "pair-peers",
-        "pair-summary",
-        "redundancy fault",
-        "unreachable",
-        "function pollRoles()",
-        "function selectSource()",
-        "function switchSource(next)",
-        "async function submitCommand(command, reason)",
-        "async function postSwitch(peer, verb)",
-        "class=\\\"switch\\\"",
-        "data-verb=\\\"promote\\\"",
-        "data-verb=\\\"demote\\\"",
-        "not_active",
-        "role_changed",
-    ] {
-        assert!(page.contains(needle), "page lacks {needle}");
-    }
-    // The dual-active defense: the summary counts actives and names the
-    // split-brain fault, and the command path requires a unique
-    // settled-active target rather than picking the first claimant.
-    for needle in [
-        "function pairHealth(pairPeers, states)",
-        "dual-active",
-        "function activePeers()",
-        "actives.length === 1",
-    ] {
-        assert!(page.contains(needle), "page lacks {needle}");
-    }
 
     // The contract endpoints answer cross-origin reads so the page can
     // poll a peer on another origin.

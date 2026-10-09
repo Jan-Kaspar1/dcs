@@ -31,6 +31,7 @@ mod lint;
 mod model;
 mod schema;
 mod validate;
+mod views;
 
 pub use deploy_schema::deployment_manifest_schema;
 pub use diff::{ChangeKind, ElementChange, FieldChange, ModelDiff};
@@ -38,7 +39,11 @@ pub use index::{ComponentRecord, PointSignal, SignalIndex};
 pub use lint::{LintFinding, LintRule};
 pub use model::{
     Channel, ChannelRef, ComponentId, ComponentInstance, Connection, Device, DeviceId, Direction,
-    Endpoint, IoPoint, LoadError, MODEL_VERSION, PlantModel, Port, PortRef, Rationalization,
-    RecordingDuty, Signal,
+    Endpoint, Equipment, EquipmentControl, IoPoint, LoadError, MODEL_VERSION, PlantModel, Port,
+    PortRef, Rationalization, RecordingDuty, Signal,
 };
 pub use validate::{End, IdCollection, ValidationError};
+pub use views::{
+    PlantView, PlantViewBinding, PlantViewNode, PlantViewPipe, PlantViewPipeEnd, PlantViewPort,
+    PlantViewSymbol,
+};

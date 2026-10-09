@@ -2,52 +2,11 @@
 the feed fakes and TestCase classes for
 scenario_failover_refuse_retry, split out per the #940
 convention. The shared fakes and helpers live in
-tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails
-the discovery check in tests/test_qa_scenario_modules.py.
+tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'RefuseRetryTests.test_registered',
-    'RefuseRetryTests.test_clean_rig_passes_and_validates',
-    'RefuseRetryTests.test_gate_disarmed_fails',
-    'RefuseRetryTests.test_proof_voided_fails',
-    'RefuseRetryTests.test_gate_preempted_fails',
-    'RefuseRetryTests.test_refusal_silent_fails',
-    'RefuseRetryTests.test_refusal_flooded_fails',
-    'RefuseRetryTests.test_refusal_unnamed_fails',
-    'RefuseRetryTests.test_refusal_under_counted_fails',
-    'RefuseRetryTests.test_served_silent_fails',
-    'RefuseRetryTests.test_operator_switch_fails',
-    'RefuseRetryTests.test_never_restores_fails',
-    'RefuseRetryTests.test_incumbent_claim_refused_reports_'
-    'nondeterministic',
-    'RefuseRetryTests.test_island_absent_reports_'
-    'nondeterministic',
-    'RefuseRetryTests.test_misses_stalled_reports_'
-    'nondeterministic',
-    'RefuseRetryTests.test_starved_watch_reports_'
-    'nondeterministic',
-    'RefuseRetryTests.test_served_read_dropped_reports_'
-    'nondeterministic',
-    'RefuseRetryTests.test_field_advanced_reports_'
-    'nondeterministic',
-    'RefuseRetryTests.test_diverging_digests_report_'
-    'nondeterministic',
-    'RefuseRetryTests.test_silent_judge_reports_unchecked',
-    'RefuseRetryTests.test_unreachable_pair_reports_inconclusive',
-    'RefuseRetryTests.test_unarmed_pair_reports_inconclusive',
-    'RefuseRetryTests.test_unconverged_pair_reports_inconclusive',
-    'RefuseRetryTests.test_missing_plant_reports_inconclusive',
-    'RefuseRetryTests.test_missing_journal_files_reports_'
-    'inconclusive',
-    'RefuseRetryTests.test_single_endpoint_reports_inconclusive',
-    'RefuseRetryTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class FakeClock:

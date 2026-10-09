@@ -1,36 +1,11 @@
 """The 3700_unclaimed_rearm leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_unclaimed_rearm, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'UnclaimedRearmTests.test_registered',
-    'UnclaimedRearmTests.test_clean_pair_passes_and_validates',
-    'UnclaimedRearmTests.test_demoting_window_reports_failed',
-    'UnclaimedRearmTests.test_rearm_dropping_write_reports_failed',
-    'UnclaimedRearmTests.test_phantom_rearm_reports_failed',
-    'UnclaimedRearmTests.test_open_field_reports_failed',
-    'UnclaimedRearmTests.test_ledger_growth_reports_failed',
-    'UnclaimedRearmTests.test_journaled_claim_loss_reports_failed',
-    'UnclaimedRearmTests.test_journaled_role_change_reports_failed',
-    'UnclaimedRearmTests.test_peer_role_move_reports_failed',
-    'UnclaimedRearmTests.test_shared_claim_reports_nondeterministic',
-    'UnclaimedRearmTests.test_diverging_digests_report_nondeterministic',
-    'UnclaimedRearmTests.test_release_refusal_reports_inconclusive',
-    'UnclaimedRearmTests.test_no_active_reports_failed',
-    'UnclaimedRearmTests.test_unsettled_pair_reports_inconclusive',
-    'UnclaimedRearmTests.test_unreachable_plant_reports_inconclusive',
-    'UnclaimedRearmTests.test_missing_plant_endpoint_reports_inconclusive',
-    'UnclaimedRearmTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class RearmPlantPeer(FakePlantPeer):

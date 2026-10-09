@@ -2,44 +2,12 @@
 TestCase classes for scenario_step_bound, following the per-leg split
 convention (#940): one scenario module plus one test module, no
 shared-file edits. The shared fakes and helpers live in
-tests/qa_scenario_support.py; EXPECTED_CASES pins this module's case set
-for the discovery check in tests/test_qa_scenario_modules.py.
+tests/qa_scenario_support.py.
 """
 import importlib
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'StepBoundTests.test_registered_in_scenarios',
-    'StepBoundTests.test_clean_feed_passes_and_validates',
-    'StepBoundTests.test_two_runs_produce_identical_evidence',
-    'StepBoundTests.test_the_probes_run_over_bound_first',
-    'StepBoundTests.test_off_contract_refusal_fails',
-    'StepBoundTests.test_poisoned_read_fails',
-    'StepBoundTests.test_poisoned_census_fails',
-    'StepBoundTests.test_moved_despite_refusal_fails',
-    'StepBoundTests.test_followup_step_refused_fails',
-    'StepBoundTests.test_static_step_tick_fails',
-    'StepBoundTests.test_unrestored_image_fails',
-    'StepBoundTests.test_role_move_fails',
-    'StepBoundTests.test_stalled_scans_fail',
-    'StepBoundTests.test_io_health_counted_fails',
-    'StepBoundTests.test_no_active_is_failed',
-    'StepBoundTests.test_unreachable_pair_is_inconclusive',
-    'StepBoundTests.test_no_tracking_is_inconclusive',
-    'StepBoundTests.test_no_plant_endpoint_is_inconclusive',
-    'StepBoundTests.test_no_owner_token_is_inconclusive',
-    'StepBoundTests.test_refused_claim_is_inconclusive',
-    'StepBoundTests.test_predating_rig_is_inconclusive',
-    'StepBoundTests.test_no_float_point_is_inconclusive',
-    'StepBoundTests.test_fenced_probes_are_inconclusive',
-    'StepBoundTests.test_the_refusal_classification_names_the_bound',
-    'StepBoundTests.test_the_float_payload_scans',
-    'StepBoundTests.test_unchecked_self_check_fails',
-    'StepBoundTests.test_self_check_is_complete',
-})
 
 
 class StepBoundPlantPeer(FakePlantPeer):

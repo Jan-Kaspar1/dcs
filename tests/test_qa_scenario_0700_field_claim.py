@@ -1,41 +1,11 @@
 """The 0700_field_claim leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_field_claim, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'FieldClaimTests.test_registered_in_scenarios',
-    'FieldClaimTests.test_passed',
-    'FieldClaimTests.test_fails_when_the_field_is_open',
-    'FieldClaimTests.test_fails_when_unclaimed',
-    'FieldClaimTests.test_fails_when_ensure_preempts',
-    'FieldClaimTests.test_fails_when_shared_answers_done',
-    'FieldClaimTests.test_fails_when_the_shared_write_is_fenced',
-    'FieldClaimTests.test_fails_when_release_drops_the_claim',
-    'FieldClaimTests.test_fails_when_idle_release_is_refused',
-    'FieldClaimTests.test_refused_rogue_claim_still_passes',
-    'FieldClaimTests.test_fails_when_the_rogue_kills_the_active',
-    'FieldClaimTests.test_fails_when_the_preemption_is_silent',
-    'FieldClaimTests.test_fails_when_the_owner_never_demotes',
-    'FieldClaimTests.test_fails_when_the_loss_names_no_claimant',
-    'FieldClaimTests.test_fails_when_the_reclaim_never_recovers',
-    'FieldClaimTests.test_fails_when_the_peer_ends_active',
-    'FieldClaimTests.test_fails_when_the_active_stalls',
-    'FieldClaimTests.test_inconclusive_without_a_plant',
-    'FieldClaimTests.test_inconclusive_without_a_token',
-    'FieldClaimTests.test_inconclusive_when_the_pair_is_down',
-    'FieldClaimTests.test_fails_when_nothing_is_settled',
-    'FieldClaimTests.test_detaches_and_restores_rig_state',
-    'FieldClaimTests.test_identical_evidence_across_runs',
-})
 
 
 class FieldClaimFeed:

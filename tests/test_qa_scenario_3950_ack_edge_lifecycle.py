@@ -1,49 +1,10 @@
 """The 3950_ack_edge_lifecycle leg's scenario unit coverage — the feed
 fakes and TestCase classes for scenario_ack_edge_lifecycle. The shared
-fakes and helpers live in tests/qa_scenario_support.py;
-EXPECTED_CASES pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+fakes and helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'AckEdgeTests.test_registered_in_scenarios',
-    'AckEdgeTests.test_clean_feed_passes_and_validates',
-    'AckEdgeTests.test_two_runs_produce_identical_evidence',
-    'AckEdgeTests.test_no_active_fails',
-    'AckEdgeTests.test_missing_wiring_is_inconclusive',
-    'AckEdgeTests.test_unwritable_ack_is_inconclusive',
-    'AckEdgeTests.test_no_descriptor_is_inconclusive',
-    'AckEdgeTests.test_drifted_binding_is_inconclusive',
-    'AckEdgeTests.test_no_in_binding_is_inconclusive',
-    'AckEdgeTests.test_refused_claim_is_inconclusive',
-    'AckEdgeTests.test_standing_contact_is_inconclusive',
-    'AckEdgeTests.test_latched_baseline_is_inconclusive',
-    'AckEdgeTests.test_unack_never_reports_is_inconclusive',
-    'AckEdgeTests.test_alarm_never_asserts_fails',
-    'AckEdgeTests.test_latch_never_latches_fails',
-    'AckEdgeTests.test_press_refused_fails',
-    'AckEdgeTests.test_press_never_applies_fails',
-    'AckEdgeTests.test_latch_never_clears_fails',
-    'AckEdgeTests.test_ack_clears_the_standing_alarm_fails',
-    'AckEdgeTests.test_held_level_suppresses_fresh_trip_fails',
-    'AckEdgeTests.test_held_press_clears_the_latch_fails',
-    'AckEdgeTests.test_release_refused_fails',
-    'AckEdgeTests.test_release_never_lands_fails',
-    'AckEdgeTests.test_dropped_release_wedges_later_acks_fails',
-    'AckEdgeTests.test_journaled_role_change_is_nondeterministic',
-    'AckEdgeTests.test_unjournaled_point_recording_is_nondeterministic',
-    'AckEdgeTests.test_journal_out_of_order_is_nondeterministic',
-    'AckEdgeTests.test_missing_journal_fails',
-    'AckEdgeTests.test_missing_settle_journal_fails',
-    'AckEdgeTests.test_role_moving_under_the_lifecycle_fails',
-    'AckEdgeTests.test_peer_role_moved_fails',
-    'AckEdgeTests.test_restore_read_lying_fails',
-})
 
 
 class AckEdgePlantPeer(StagingPlantPeer):

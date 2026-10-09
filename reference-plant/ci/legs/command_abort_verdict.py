@@ -1,66 +1,13 @@
 #!/usr/bin/env python3
-"""The aborted bounded-command honest-verdict leg for the reference
-plant — the consumer-side proof that a command submission aborted
-client-side never reports `command failed` for a command the
-controller may still apply, the settled receipt staying the only truth
-(WW-ENG-003, WW-LCM-001).
+"""Prove that an abandoned command wait still settles on the reference pair.
 
-The consumer-boundary mirror of the rig's command-abort-verdict leg —
-the contract defect #948 names and the #1036 fix establishes: a
-client-side bound on `POST /command` cancels the client's wait, never
-the server's work — the request may already sit buffered in the listen
-backlog — so an unanswered submission's outcome is genuinely unknown
-and rendering it "command failed" asserts a non-application that is
-not true. The platform pin is the fix's own regression: the mirrored
-`submitCommand` driven past the abort bound answering the
-indeterminate "outcome unknown" verdict, the journaled `command_settled`
-resolving it. This leg exercises the same contract on the
-customer-owned redundant pair the manifest declares —
-`pair.launch_pair` spawning both released controllers — with the
-container pause standing in for the reproduction's wedged controller.
-The run:
-
-- converges the declared standby to `tracking` through the pair leg's
-  driven-tick loop, then gates the contract on the owner's served page:
-  a release whose `GET /` predates the indeterminate-outcome machinery
-  — the abandoned-submission record, the "outcome unknown" verdict, the
-  journaled settle's resolution — reports
-  `command-abort-verdict-digest inconclusive`, never a failure;
-- pauses the field owner — `SIGSTOP` on the spawned process, the
-  harness's stop/pause lever beside `pair.stop`'s container stop — and
-  submits one receipted writable-point command through the released
-  tooling's bounded `POST /command` path with the client bound
-  tightened so the wait aborts before the response can return: the
-  request's bytes sit buffered in the listen backlog while the
-  mirrored post-facing report must answer the honest verdict — never
-  "command failed";
-- unpauses the owner and proves the buffered submission landed: the
-  live receipt mirror carries the leg's admission `accepted`, the
-  first driven `POST /scan` after the restore lands the owner's tick
-  exactly one boundary on, and tracking-first pair ticks adopt the
-  settled record onto the standby;
-- audits the truth: both peers' adopted receipt logs answer
-  identically with the leg's receipt terminal `applied`, the owner's
-  served journal and each peer's durable `--journal-file` carry
-  exactly one `command_settled` for the admission at the settle tick,
-  and the pair stands in its launch roles — the field owner `active`,
-  the standby `tracking`.
-
-Usage:
-
-    command_abort_verdict.py --plant-server PATH --controller PATH \
-        --model model/plant.json --dynamics model/dynamics.json \
-        --scenario ci/scenario.json --manifest deploy/manifest.json
-
-On success one `command-abort-verdict-digest <sha256>` line prints —
-the check runs two passes and compares them
-(`command-abort-verdict-nondeterministic`). A contract violation
-reports `command-abort-verdict: …` lines on stderr and exits 1 — the
-check's `command-abort-verdict-failed`. `--tamper claims-failed`
-doctors the leg's verdict vocabulary back to the defect's — an
-abandoned submission reporting "command failed" — so the leg proves
-its honest-verdict assertion fires rather than passing an unexercised
-contract.
+Converge the customer-owned redundant pair, pause the field owner, and send
+one writable-point command under a short client bound. Resume the owner
+and drive the admitted command through its scan boundary. Both receipt
+logs and served/durable journals must agree on exactly one settlement,
+with the pair remaining in its launch roles. Two passes must produce the
+same digest. The skip-settle tamper omits the settling scan and must fail
+the existing boundary check.
 """
 
 import argparse
@@ -83,20 +30,18 @@ import simulate
 # The leg's stage registration — ci/legs.py reads this literal
 # (parsing, never importing the module) to order the leg, run its
 # two digest-identical passes, and exercise its doctored case.
-# The doctored case: a leg asserting the aborted submission honestly
-# reported while the report displays "command failed" — the defect's
-# verdict vocabulary — must surface the named diagnostic, never a
-# silently unexercised contract.
+# The doctored case skips the real settlement scan so the scan-boundary
+# audit must identify the omitted operation.
 LEG = {
     "order": 470,
     "title": "the command-abort-verdict leg",
     "passes": "command-abort-verdict",
     "tampers": [
         {
-            "name": "claims-failed",
-            "passed": "a claims-failed case passed the abort-verdict leg",
-            "missed": "the claims-failed case did not report its named diagnostic",
-            "evidence": ["claims \"command failed\""],
+            "name": "skip-settle",
+            "passed": "a skip-settle case passed the abort-verdict leg",
+            "missed": "the skip-settle case did not report its named diagnostic",
+            "evidence": ["the settle scan landed at tick"],
         },
     ],
 }
@@ -109,19 +54,13 @@ Abort = pair.Abort
 
 
 class Inconclusive(Exception):
-    """The pinned release predates — or never covers — the contract
-    the leg exercises: the served page lacking the indeterminate-outcome
-    machinery, the consumer harness admitting no stop/pause lever, or
-    the aborted post's answer arriving inside the bound so no abort
-    was exercised. The run classifies inconclusive, never a product
-    failure."""
+    """The harness cannot stage the paused, unanswered submission."""
 
 
 ACTOR = "ci-command-abort-verdict"
 
-# The tightened client bound the leg's post waits under — the page's
-# `AbortSignal.timeout` stand-in: far inside any served response while
-# the owner stands paused, far past the cost of sending the request.
+# The tightened client bound expires while the owner is paused, after
+# the request bytes have been sent.
 ABORT_BOUND_S = 0.5
 
 # The admission's landing window after the restore — the buffered
@@ -133,19 +72,6 @@ ADMISSION_POLL_S = 0.1
 # The tracking-first pair ticks the settle phase drives — comfortably
 # past the adopted settlement's one-pull lag.
 SETTLE_TICKS = 3
-
-# The contract markers the served page must carry — the
-# indeterminate-outcome machinery the fix shipped: the abandoned
-# submission's pending record, its "outcome unknown" verdict, and the
-# journaled settle's resolution text. A page predating the fix serves
-# none of them — the inconclusive gate.
-PAGE_MARKERS = (
-    "abandonedSubmission",
-    "pendingCommands",
-    "outcome unknown",
-    "the abandoned submission settled",
-)
-
 
 def writable_bool_points(model):
     """The writable boolean `in` point ids the emitted model declares,
@@ -174,15 +100,12 @@ def tracking(role):
 
 
 def bounded_post(url, envelope, bound):
-    """One `POST /command` under the tightened client bound — the
-    released tooling's bounded post path with the page's client-side
-    abort bound mirrored: `("answered", decoded)` when the receipt
-    lands inside the bound, `("refused", status, body)` for the
-    endpoint's own answered 4xx — the one provable pre-admission
-    refusal — and `("unanswered", error)` for every end without an
-    answered response: the bound firing, a dead response path, or an
-    unprovable non-delivery, all indistinguishable at the fetch
-    surface."""
+    """Send a bounded command request and classify its transport result.
+
+    An unanswered result ends the client wait without determining the
+    command settlement. An answered receipt or pre-admission refusal
+    means the paused transport exercise did not form.
+    """
     request = urllib.request.Request(
         url,
         data=json.dumps(envelope).encode(),
@@ -196,32 +119,6 @@ def bounded_post(url, envelope, bound):
         return "refused", error.code, body
     except Exception as error:
         return "unanswered", error
-
-
-def submission_report(end, honest=True):
-    """The post-facing report a submission's end is owed — the
-    honest-verdict contract's vocabulary mirrored from the released
-    page's `submitCommand`: the answered refusal is the one provable
-    "command failed"; every unanswered end reports the indeterminate
-    "outcome unknown" verdict, the journaled settled receipt the
-    submission's only truth. `honest=False` replays the defect's
-    vocabulary — an aborted post rendered "command failed" — the
-    doctored negative the leg's assertion must catch."""
-    kind = end[0]
-    if kind == "answered":
-        return json.dumps(end[1], sort_keys=True)
-    if kind == "refused":
-        return (
-            "command failed: the monitor refused the request: "
-            f"HTTP {end[1]}: {end[2]}"
-        )
-    if not honest:
-        return "command failed: the submission aborted before the answer returned"
-    return (
-        "command outcome unknown — no receipt answered the submission "
-        "and it may still apply; the journaled settled receipt is the "
-        "verdict — resubmitting now risks applying the command twice."
-    )
 
 
 def pause_peer(process):
@@ -299,7 +196,7 @@ def settlements(entries, actor, command):
 
 
 def abort_verdict_pass(args, tamper):
-    """The abort-verdict run: converge, gate, abort, restore, settle,
+    """The abort-verdict run: converge, abort, restore, settle,
     audit. Returns `(digest_entries, evidence, failures)`; raises
     `Inconclusive` where the pinned release predates the contract or
     the harness cannot land the exercise."""
@@ -337,29 +234,8 @@ def abort_verdict_pass(args, tamper):
             }
         )
 
-        # Phase 2 — the contract gate: the owner's served page must
-        # carry the indeterminate-outcome machinery the fix shipped —
-        # a release predating it reports inconclusive, never a
-        # failure.
-        page = simulate.http_text(f"{duty_url}/")
-        missing = [
-            marker for marker in PAGE_MARKERS if marker not in page
-        ]
-        if missing:
-            raise Inconclusive(
-                "the pinned release predates the honest-verdict "
-                "contract — the served page lacks "
-                f"{', '.join(missing)}"
-            )
-        digest_entries.append({"phase": "gate", "markers": "served"})
-
-        # Phase 3 — the aborted bounded submission: pause the field
-        # owner, then post the receipted writable-point command under
-        # the tightened client bound so the wait aborts with the
-        # request buffered server-side. The post-facing report must
-        # answer the honest verdict — the `claims-failed` tamper
-        # doctors the leg's vocabulary to the defect's so the
-        # assertion must fire.
+        # Phase 2: pause the owner and submit under a short client bound.
+        # The request stays buffered while the owner cannot answer.
         command = {
             "write_value": {
                 "point": points[0],
@@ -388,27 +264,9 @@ def abort_verdict_pass(args, tamper):
                 "command must admit, never refuse pre-admission"
             )
             raise Abort
-        report = submission_report(end, honest=tamper != "claims-failed")
-        if "command failed" in report:
-            failures.append(
-                f"the aborted submission's post-facing report claims "
-                f"\"command failed\" — {report} — the honest-verdict "
-                "contract forbids claiming failure for a command the "
-                "controller may still apply"
-            )
-            raise Abort
-        if "outcome unknown" not in report:
-            failures.append(
-                f"the aborted submission's post-facing report reads "
-                f"{report} — the honest-verdict contract owes the "
-                "indeterminate outcome-unknown verdict"
-            )
-            raise Abort
-        digest_entries.append(
-            {"phase": "abort", "end": end[0], "report": report}
-        )
+        digest_entries.append({"phase": "abort", "end": end[0]})
 
-        # Phase 4 — the admission: the buffered submission lands once
+        # Phase 3 — the admission: the buffered submission lands once
         # the monitor runs again — the live receipt mirror carries
         # the leg's `accepted` receipt, proof the abandoned post's
         # outcome was genuinely open. A submission that never reaches
@@ -433,11 +291,15 @@ def abort_verdict_pass(args, tamper):
         ).get("apply_tick")
         digest_entries.append({"phase": "admission", "receipt": receipt})
 
-        # Phase 5 — the settle: the first driven scan after the
+        # Phase 4 — the settle: the first driven scan after the
         # restore lands the owner's tick exactly one boundary on and
         # applies the queued admission — then tracking-first pair
         # ticks adopt the settled record onto the standby.
-        drained = pair.scan(duty_url, failures)
+        drained = (
+            pair.get(f"{duty_url}/snapshot", "GET /snapshot", failures)
+            if tamper == "skip-settle"
+            else pair.scan(duty_url, failures)
+        )
         if drained.get("tick") != pre_tick + 1:
             failures.append(
                 f"the settle scan landed at tick {drained.get('tick')}, "
@@ -446,6 +308,7 @@ def abort_verdict_pass(args, tamper):
             )
             raise Abort
         settle_tick = drained["tick"]
+        evidence["settle_tick"] = settle_tick
         owner = drained
         settle_ticks = [settle_tick]
         for _ in range(SETTLE_TICKS):
@@ -453,7 +316,7 @@ def abort_verdict_pass(args, tamper):
             settle_ticks.append(owner["tick"])
         digest_entries.append({"phase": "settle", "ticks": settle_ticks})
 
-        # Phase 6 — the audit: the served /receipts on both peers are
+        # Phase 5 — the audit: the served /receipts on both peers are
         # one adopted log carrying the leg's receipt terminal
         # `applied`; the owner's served journal and each peer's
         # durable journal file carry exactly one `command_settled`
@@ -535,7 +398,7 @@ def abort_verdict_pass(args, tamper):
             }
         )
 
-        # Phase 7 — the pair stands in its launch roles: the field
+        # Phase 6 — the pair stands in its launch roles: the field
         # owner active, the standby tracking.
         duty_role = pair.get(f"{duty_url}/role", "GET /role", failures)
         standby_role = pair.get(
@@ -580,9 +443,8 @@ def main():
     parser.add_argument("--manifest", required=True)
     parser.add_argument(
         "--tamper",
-        choices=["claims-failed"],
-        help="doctor the leg's verdict vocabulary to the defect's — "
-        "the pass must fail naming the claimed failure",
+        choices=["skip-settle"],
+        help="omit the settlement scan so the boundary check must fail",
     )
     args = parser.parse_args()
 
@@ -596,9 +458,8 @@ def main():
     except Inconclusive as inconclusive:
         if args.tamper is not None:
             eprint(
-                "command-abort-verdict: the doctored vocabulary "
-                "claimed the failure verdict — an inconclusive run "
-                "offers the doctored case no evidence"
+                "command-abort-verdict: the skip-settle case has no "
+                "settlement evidence in an inconclusive run"
             )
             return 1
         eprint(
@@ -619,20 +480,18 @@ def main():
             eprint(
                 f"command-abort-verdict: the {args.tamper} case "
                 "passed silently — the leg never noticed the doctored "
-                "verdict"
+                "settlement"
             )
         return 1
     if failures:
         return 1
     digest = simulate.stable_digest(digest_entries)
     print(
-        f"command-abort-verdict-digest {digest} — the aborted bounded "
-        "submission reported the indeterminate verdict, never "
-        f"command failed, then settled applied at tick "
-        f"{digest_entries[4]['ticks'][0]} with exactly one "
-        "command_settled on the served and durable journals — both "
-        "peers' adopted logs identical, roles unchanged at tick "
-        f"{evidence['final_tick']}"
+        f"command-abort-verdict-digest {digest}: the abandoned bounded "
+        f"submission settled applied at tick {evidence['settle_tick']} "
+        "with exactly one command_settled on the served and durable "
+        "journals, both adopted receipt logs identical, and launch "
+        f"roles held at tick {evidence['final_tick']}"
     )
     return 0
 

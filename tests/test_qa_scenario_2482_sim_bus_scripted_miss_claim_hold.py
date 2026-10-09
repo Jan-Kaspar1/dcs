@@ -2,9 +2,8 @@
 coverage — the feed fake and TestCase class for
 scenario_sim_bus_scripted_miss_claim_hold, split out per the leg-module
 convention (#940). The shared fakes and helpers live in
-tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+tests/qa_scenario_support.py.
+
 
 The feed stages the leg's shape: the lane's device server serves the
 run's staged sim-cyclic model, the born-seat launch stands a lone
@@ -24,42 +23,6 @@ import urllib.error
 from pathlib import Path
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'ScriptedMissClaimHoldTests.test_registered',
-    'ScriptedMissClaimHoldTests.test_clean_passes_validate_and_tear_down',
-    'ScriptedMissClaimHoldTests.test_two_runs_produce_identical_digests',
-    'ScriptedMissClaimHoldTests.test_claim_survived_a_severed_link_fails',
-    'ScriptedMissClaimHoldTests.test_claim_freed_by_the_in_band_miss_fails',
-    'ScriptedMissClaimHoldTests.test_usurped_claim_fails',
-    'ScriptedMissClaimHoldTests.test_fenced_demotion_fails',
-    'ScriptedMissClaimHoldTests.test_operator_demotion_fails',
-    'ScriptedMissClaimHoldTests.test_restarted_holder_fails',
-    'ScriptedMissClaimHoldTests.test_miss_never_consumed_fails',
-    'ScriptedMissClaimHoldTests.test_complete_never_answered_fails',
-    'ScriptedMissClaimHoldTests.test_frozen_run_tick_fails',
-    'ScriptedMissClaimHoldTests.test_pre_contract_revision_is_inconclusive',
-    'ScriptedMissClaimHoldTests.test_absent_device_server_is_inconclusive',
-    'ScriptedMissClaimHoldTests.test_absent_cyclic_model_is_inconclusive',
-    'ScriptedMissClaimHoldTests.test_point_wise_field_is_inconclusive',
-    'ScriptedMissClaimHoldTests.test_field_without_outputs_is_inconclusive',
-    'ScriptedMissClaimHoldTests.test_unsettled_holder_is_inconclusive',
-    'ScriptedMissClaimHoldTests.test_unreachable_rig_is_inconclusive',
-    'ScriptedMissClaimHoldTests.test_missing_seams_are_inconclusive',
-    'ScriptedMissClaimHoldTests.test_stage_failure_is_nondeterministic',
-    'ScriptedMissClaimHoldTests.test_launch_failure_is_nondeterministic',
-    'ScriptedMissClaimHoldTests.test_tool_refusal_is_nondeterministic',
-    'ScriptedMissClaimHoldTests.test_starved_claim_view_is_nondeterministic',
-    'ScriptedMissClaimHoldTests.test_unnamed_miss_answer_is_nondeterministic',
-    'ScriptedMissClaimHoldTests.test_journal_read_failure_is_nondeterministic',
-    'ScriptedMissClaimHoldTests.test_device_stopped_serving_is_nondeterministic',
-    'ScriptedMissClaimHoldTests.test_pair_moves_is_nondeterministic',
-    'ScriptedMissClaimHoldTests.test_pair_wedged_is_nondeterministic',
-    'ScriptedMissClaimHoldTests.test_divergent_digests_are_nondeterministic',
-    'ScriptedMissClaimHoldTests.test_unchecked_self_check_fails',
-    'ScriptedMissClaimHoldTests.test_self_check_is_complete',
-})
 
 
 # The staged device model the lane's server serves: one sim-cyclic

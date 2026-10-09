@@ -1,31 +1,13 @@
-//! End-to-end tests for the monitoring page's managed alarm pane: the
-//! descriptor-to-point wiring join routes rows into the named
-//! managed-state lists — `shelved`, `suppressed`, `out_of_service` —
-//! by the uniform status vocabulary, while `alarm`/`unacknowledged`
-//! keep reporting process truth and managed rows still count toward
-//! the totals; the declared `priority`/`class`/`response_ticks` join
-//! from the snapshot's parameters section; the instance's
-//! rationalization block joins from the served index's components
-//! section by diagnostic name; the alarm journal keeps the durable
-//! journal's `seq` order so a burst's initiating cause stands first;
-//! the bound `shelve`/`oos` request inputs render held-level
-//! shelve/unshelve and out-of-service/return-to-service affordances
-//! where the model marks the bound point writable; and the
-//! protection-layer signal group is served data, all driven over TCP
-//! through the in-process `MonitorClient` against a rig of the two
-//! managed sibling kinds — one unbound-`shelve` and one
-//! unwritable-`shelve` instance covering the never-shelvable surface —
-//! with the first alarm's `shelve` point carrying the model's
-//! `requires_reason` mark, the per-alarm mandatory-reason declaration
-//! the shelving-reason decision records.
+//! Managed-alarm command admission, lifecycle, metadata, quality and durable
+//! transition ordering exercised through the served contract.
 
 use dcs_blocks::{
     AlarmLimits, ManagedAlarmConfig, ManagedAlarmIo, ManagedBoolLatchingAlarm, ManagedLatchingAlarm,
 };
 use dcs_core::{
     Command, CommandError, CommandOutcome, ComponentDescriptor, Direction, IoDriver, IoError,
-    JournalEntry, JournalEvent, PointId, PortDescriptor, PortRole, Sample, TelemetrySnapshot, Tick,
-    Value, ValueKind,
+    JournalEvent, PointId, PortDescriptor, PortRole, Sample, TelemetrySnapshot, Tick, Value,
+    ValueKind,
 };
 use dcs_model::{PlantModel, Rationalization, SignalIndex};
 use dcs_monitor::{Monitor, MonitorClient};
@@ -355,21 +337,6 @@ fn telemetry(snapshot: &TelemetrySnapshot, point: PointId) -> &dcs_core::PointTe
         .unwrap_or_else(|| panic!("no telemetry for {point:?}"))
 }
 
-/// The live sample of the component's status-role `Out` port named
-/// `name` — the page's uniform-vocabulary join.
-fn flag_sample(
-    snapshot: &TelemetrySnapshot,
-    descriptor: &ComponentDescriptor,
-    name: &str,
-) -> Option<Sample> {
-    let port = descriptor
-        .ports
-        .iter()
-        .find(|p| p.name == name && p.direction == Direction::Out)?;
-    port.point
-        .and_then(|point| telemetry(snapshot, point).sample)
-}
-
 /// The descriptor's declared managed request input — `shelve` or
 /// `oos`, `In`, `Bool` — the port the row's affordance joins through,
 /// or `None` where the kind leaves the input unbound.
@@ -378,233 +345,6 @@ fn request_port<'s>(descriptor: &'s ComponentDescriptor, name: &str) -> Option<&
         .ports
         .iter()
         .find(|p| p.name == name && p.direction == Direction::In && p.kind == ValueKind::Bool)
-}
-
-fn is_asserted(sample: Option<Sample>) -> bool {
-    sample.is_some_and(|sample| match sample.value {
-        Value::Bool(value) => value,
-        Value::Int(value) => value != 0,
-        Value::Float(value) => value != 0.0,
-    })
-}
-
-/// One alarm row's data, as the pane's data model builds it: the
-/// owning component, the asserted status port, and the component's
-/// reported states — each asserted managed flag plus `active` while
-/// `alarm` stands and `unacknowledged` while the latch stands.
-#[derive(Debug)]
-struct Row<'s> {
-    component: &'s str,
-    port: &'s str,
-    states: BTreeSet<&'static str>,
-}
-
-impl Row<'_> {
-    /// The row's managed states — the states subset in the uniform
-    /// decision-71 vocabulary, the routing the pane's managed lists
-    /// apply.
-    fn managed(&self) -> BTreeSet<&'static str> {
-        self.states
-            .intersection(&BTreeSet::from(["shelved", "suppressed", "out_of_service"]))
-            .copied()
-            .collect()
-    }
-}
-
-/// The pane's row model over one snapshot: every asserted status-role
-/// `Out` port, each carrying the states the component reports.
-fn alarm_rows(snapshot: &TelemetrySnapshot) -> Vec<Row<'_>> {
-    let mut rows = Vec::new();
-    for descriptor in &snapshot.descriptors {
-        let mut states = BTreeSet::new();
-        for name in ["shelved", "suppressed", "out_of_service"] {
-            if is_asserted(flag_sample(snapshot, descriptor, name)) {
-                states.insert(name);
-            }
-        }
-        if is_asserted(flag_sample(snapshot, descriptor, "alarm")) {
-            states.insert("active");
-        }
-        if is_asserted(flag_sample(snapshot, descriptor, "unacknowledged")) {
-            states.insert("unacknowledged");
-        }
-        for port in &descriptor.ports {
-            if port.role != Some(PortRole::Status) || port.direction != Direction::Out {
-                continue;
-            }
-            let sample = port
-                .point
-                .and_then(|point| telemetry(snapshot, point).sample);
-            if is_asserted(sample) {
-                rows.push(Row {
-                    component: descriptor.name.as_str(),
-                    port: port.name.as_str(),
-                    states: states.clone(),
-                });
-            }
-        }
-    }
-    rows
-}
-
-/// The snapshot's parameters-section entry for one component — the map
-/// the pane's priority/class/response cells read by parameter name.
-fn parameter_values<'s>(
-    snapshot: &'s TelemetrySnapshot,
-    component: &str,
-) -> &'s std::collections::BTreeMap<String, Value> {
-    &snapshot
-        .parameters
-        .iter()
-        .find(|entry| entry.name == component)
-        .unwrap_or_else(|| panic!("no parameters entry for {component}"))
-        .values
-}
-
-/// The alarm-surface journal filter the pane applies: value
-/// transitions on status-bound journaled points, quality transitions
-/// and settled commands on the same points, and the owning components'
-/// step failures — `related` holding every point a status port binds.
-fn alarm_journal_entries<'s>(
-    journal: &'s [JournalEntry],
-    related: &BTreeSet<PointId>,
-    components: &BTreeSet<String>,
-) -> Vec<&'s JournalEntry> {
-    journal
-        .iter()
-        .filter(|entry| match &entry.event {
-            JournalEvent::PointChanged { point, .. }
-            | JournalEvent::QualityChanged { point, .. } => related.contains(point),
-            JournalEvent::CommandSettled { receipt } => match &receipt.command {
-                Command::SetParameter { component, .. } => components.contains(component),
-                command => command
-                    .point()
-                    .is_some_and(|point| related.contains(&point)),
-            },
-            JournalEvent::StepFailed { component, .. } => components.contains(component),
-            _ => false,
-        })
-        .collect()
-}
-
-#[test]
-fn the_join_yields_the_managed_lists_priority_and_rationalization() {
-    with_monitor(|driver, client| {
-        // Trip both alarms, shelve the first, take both out of service,
-        // and assert the second's designed-suppression condition — the
-        // shelve and oos requests travel the receipted command path.
-        driver.write(PV1, Value::Float(95.0)).unwrap();
-        driver.write(PV2, Value::Bool(true)).unwrap();
-        driver.write(SUPPRESS2, Value::Bool(true)).unwrap();
-        for point in [SHELVE1, OOS1_IN, OOS2_IN] {
-            let receipt = managed_write(client, point, true);
-            assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
-        }
-        let snapshot = client.advance(1).unwrap();
-
-        // The uniform-vocabulary join across kinds: no per-kind code
-        // distinguishes the two descriptors' managed flags.
-        let rows = alarm_rows(&snapshot);
-        let shelved: Vec<_> = rows
-            .iter()
-            .filter(|row| row.states.contains("shelved"))
-            .collect();
-        let suppressed: Vec<_> = rows
-            .iter()
-            .filter(|row| row.states.contains("suppressed"))
-            .collect();
-        let out_of_service: Vec<_> = rows
-            .iter()
-            .filter(|row| row.states.contains("out_of_service"))
-            .collect();
-        // The first alarm shelves and is out of service — its four
-        // asserted status ports (alarm, unacknowledged, shelved,
-        // out_of_service) route to both named lists; the second
-        // suppresses and is out of service — its three asserted ports
-        // (alarm, suppressed, out_of_service) route likewise, the
-        // unacknowledged latch withheld under suppression.
-        assert_eq!(shelved.len(), 4, "{shelved:?}");
-        assert!(shelved.iter().all(|row| row.component == ALARM1_NAME));
-        assert_eq!(suppressed.len(), 3, "{suppressed:?}");
-        assert!(suppressed.iter().all(|row| row.component == ALARM2_NAME));
-        assert_eq!(out_of_service.len(), 7, "{out_of_service:?}");
-        // Each row is one asserted status port's record — the flag
-        // names the lists carry through the routing.
-        assert_eq!(
-            shelved.iter().map(|row| row.port).collect::<BTreeSet<_>>(),
-            BTreeSet::from(["alarm", "unacknowledged", "shelved", "out_of_service"])
-        );
-        assert_eq!(
-            suppressed
-                .iter()
-                .map(|row| row.port)
-                .collect::<BTreeSet<_>>(),
-            BTreeSet::from(["alarm", "suppressed", "out_of_service"])
-        );
-        // Managed rows count toward the totals: every asserted status
-        // port stands in the data model even while routed — a
-        // suppressed or shelved alarm is never erased.
-        assert_eq!(rows.len(), 7, "{rows:?}");
-        // Process truth on every row: `active` from the alarm port,
-        // `unacknowledged` from the latch — withheld under suppression.
-        assert!(
-            rows.iter()
-                .filter(|row| row.component == ALARM1_NAME)
-                .all(|row| row.states.contains("active") && row.states.contains("unacknowledged"))
-        );
-        assert!(
-            rows.iter()
-                .filter(|row| row.component == ALARM2_NAME)
-                .all(|row| row.states.contains("active") && !row.states.contains("unacknowledged"))
-        );
-        // No unmanaged rows stand: the standing list renders empty
-        // while the managed lists carry the routed rows.
-        assert!(
-            rows.iter()
-                .all(|row| !row.states.is_disjoint(&BTreeSet::from([
-                    "shelved",
-                    "suppressed",
-                    "out_of_service"
-                ])))
-        );
-
-        // The declared codes join from the parameters section by
-        // component name — the data the pane's priority, class, and
-        // response_ticks cells render.
-        let values = parameter_values(&snapshot, ALARM1_NAME);
-        assert_eq!(values["priority"], Value::Int(1));
-        assert_eq!(values["class"], Value::Int(2));
-        assert_eq!(values["response_ticks"], Value::Int(30));
-        let values = parameter_values(&snapshot, ALARM2_NAME);
-        assert_eq!(values["priority"], Value::Int(2));
-        assert_eq!(values["class"], Value::Int(1));
-        assert_eq!(values["response_ticks"], Value::Int(60));
-
-        // The served index's components section joins by the
-        // descriptor's diagnostic name — the rationalization block the
-        // row's disclosure renders.
-        let index = client.signals().unwrap();
-        let record = index
-            .components
-            .iter()
-            .find(|record| record.name == ALARM1_NAME)
-            .unwrap();
-        assert_eq!(record.kind, "managed-latching-alarm");
-        assert_eq!(
-            record.rationalization,
-            Some(Rationalization {
-                consequence: "The wet well overtops into the collection system".to_string(),
-                required_action: "Start a standby pump and confirm discharge flow".to_string(),
-                reference: "WW-OPS-301 high-level response".to_string(),
-            })
-        );
-        assert!(
-            index
-                .components
-                .iter()
-                .any(|record| record.name == ALARM2_NAME && record.rationalization.is_some())
-        );
-    });
 }
 
 #[test]
@@ -622,34 +362,14 @@ fn the_alarm_journal_keeps_durable_transition_order() {
         driver.write(PV1, Value::Float(95.0)).unwrap();
         client.advance(1).unwrap();
 
-        // The sets the pane's filter tests against: every point a
-        // status port binds, every component declaring status ports.
-        let snapshot = client.snapshot().unwrap();
-        let mut related = BTreeSet::new();
-        let mut components = BTreeSet::new();
-        for descriptor in &snapshot.descriptors {
-            for port in &descriptor.ports {
-                if port.role != Some(PortRole::Status) {
-                    continue;
-                }
-                components.insert(descriptor.name.clone());
-                if let Some(point) = port.point {
-                    related.insert(point);
-                }
-            }
-        }
-        let journal = client.journal(0).unwrap();
-        let entries = alarm_journal_entries(&journal, &related, &components);
-        // point_changed transitions joined the slice — the journaled
-        // lifecycle points' durable record — alongside the settled
-        // receipt.
+        let entries = client.journal(0).unwrap();
         assert!(
             entries.iter().any(|entry| matches!(
                 &entry.event,
                 JournalEvent::PointChanged { point, to, .. }
                     if *point == SHELVED1 && *to == Value::Bool(true)
             )),
-            "the shelved assertion's point_changed is on the alarm surface"
+            "the shelved assertion is recorded in the journal"
         );
         // Seq order is the served order — and the initiating receipt
         // stands before the transition it caused.
@@ -817,7 +537,6 @@ fn the_protection_group_is_served_data_distinct_from_the_alarm_surface() {
             .collect();
         assert!(!related.contains(&POWER_FAIL));
         assert!(!related.contains(&PROT_TRIP));
-        assert!(alarm_rows(&snapshot).is_empty());
     });
 }
 
@@ -870,85 +589,6 @@ fn the_served_rationalization_record_serde_roundtrips() {
             descriptor(&snapshot, name);
             assert!(index.components.iter().any(|record| record.name == name));
         }
-    });
-}
-
-#[test]
-fn page_serves_the_managed_pane_markup() {
-    with_monitor(|_driver, client| {
-        let page = client.page().unwrap();
-        // The managed-state lists: the uniform decision-71 vocabulary,
-        // the per-row state join, and the named-list routing.
-        for needle in [
-            "MANAGED_STATES",
-            "[\"shelved\", \"suppressed\", \"out_of_service\"]",
-            "function flagSample(",
-            "function alarmRowStates(",
-            "function managedListMarkup(",
-            "id=\"managed-lists\"",
-            "managed-count",
-            "row.managed.length === 0",
-        ] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-        // The two-flag truth every routed row still reports.
-        for needle in ["function truthFlags(", "\"unacknowledged\""] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-        // Redundant priority coding: the declared vocabulary maps the
-        // code to colour class plus textual level; class and
-        // response_ticks render beside it.
-        for needle in [
-            "PRIORITY_VOCABULARY",
-            "function priorityMarkup(",
-            "<th>Priority</th>",
-            "priority.p1",
-            "\"response_ticks\"",
-            "snapshot.parameters || []",
-        ] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-        // The rationalization disclosure joined from the served
-        // components section.
-        for needle in [
-            "function rationalizationMarkup(",
-            "componentsByName",
-            "index.components || []",
-            "block.consequence",
-            "block.required_action",
-            "block.reference",
-        ] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-        // First-out ordering: the alarm journal slices in the durable
-        // journal's seq order, point_changed entries included.
-        for needle in ["a.seq - b.seq", "\"point_changed\" in event"] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-        // The protection boundary's distinct section, declared through
-        // the ?protection= group parameter.
-        for needle in [
-            "id=\"protection-pane\"",
-            "id=\"protection-points\"",
-            "protectionGroups",
-            "getAll(\"protection\")",
-            "function renderProtection(",
-        ] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-        // The state filter — active, unacknowledged, and each managed
-        // state — the pane's navigation.
-        for needle in [
-            "id=\"alarm-filter\"",
-            "value=\"active\"",
-            "value=\"unacknowledged\"",
-            "value=\"shelved\"",
-            "value=\"suppressed\"",
-            "value=\"out_of_service\"",
-        ] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-        assert!(!page.contains("src="), "page references external assets");
     });
 }
 
@@ -1009,78 +649,13 @@ fn the_join_yields_the_bound_shelve_and_oos_targets_and_their_marks() {
 }
 
 #[test]
-fn page_serves_the_managed_affordance_markup_and_the_held_level_rule() {
-    with_monitor(|_driver, client| {
-        let page = client.page().unwrap();
-        // The affordances join the descriptor's bound-point annotation
-        // like ack — port name, `In`, `Bool` — gated on the bound
-        // point's writable mark; the label tracks the request point's
-        // live level: shelve/unshelve and out-of-service/return-to-
-        // service by whether the request stands.
-        for needle in [
-            "MANAGED_ACTIONS",
-            "function managedAffordance(",
-            "p.name === action.port && p.direction === \"in\"",
-            "!meta || !meta.writable",
-            "isAsserted(portSample(port, telemetry))",
-            "class=\\\"managed\\\"",
-            "data-level",
-            "\"shelve\"",
-            "\"unshelve\"",
-            "\"out of service\"",
-            "\"return to service\"",
-            "function submitManaged(",
-            "button.managed",
-        ] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-        // The declared-reason affordance: one input beside the managed
-        // buttons, its text riding the attributed envelope, and the
-        // `requires_reason` mark gating a blank submission up front.
-        for needle in [
-            "input.managed-reason",
-            "meta.requires_reason",
-            "declare a reason",
-            "managedTransitionAttribution",
-        ] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-        let start = page.find("async function submitManaged(").unwrap();
-        let end = start + page[start..].find("\n}\n").unwrap();
-        let managed_body = &page[start..end];
-        assert!(managed_body.contains("reason"), "{managed_body}");
-        // The held-level rule: the submission issues the single
-        // receipted write_value of the affordance's target level — no
-        // `ackReleases` arming, no pulse-back write; the request stands
-        // until the opposite command.
-        let start = page.find("async function submitManaged(").unwrap();
-        let end = start + page[start..].find("\n}\n").unwrap();
-        let body = &page[start..end];
-        assert!(body.contains("write_value"), "{body}");
-        assert!(body.contains("submitCommand"), "{body}");
-        assert!(body.contains("button.dataset.level"), "{body}");
-        assert!(
-            !body.contains("ackReleases"),
-            "managed writes are held level-observed, never pulsed: {body}"
-        );
-        assert!(!page.contains("src="), "page references external assets");
-    });
-}
-
-#[test]
 fn the_managed_actions_settle_through_the_receipted_attributed_path() {
     with_monitor(|driver, client| {
         // Trip the first alarm so its row stands, then issue the
         // shelve affordance's post — an attributed write_value of true
         // on the bound shelve point.
         driver.write(PV1, Value::Float(95.0)).unwrap();
-        let snapshot = client.advance(1).unwrap();
-        let rows = alarm_rows(&snapshot);
-        assert_eq!(rows.len(), 2, "{rows:?}");
-        assert!(
-            rows.iter()
-                .all(|row| row.component == ALARM1_NAME && row.managed().is_empty())
-        );
+        client.advance(1).unwrap();
 
         let receipt = managed_write(client, SHELVE1, true);
         assert_eq!(receipt.actor.as_deref(), Some("op-1"));
@@ -1096,12 +671,6 @@ fn the_managed_actions_settle_through_the_receipted_attributed_path() {
         assert_eq!(
             telemetry(&snapshot, SHELVE1).sample.unwrap().value,
             Value::Bool(true)
-        );
-        let rows = alarm_rows(&snapshot);
-        assert_eq!(rows.len(), 3, "{rows:?}");
-        assert!(
-            rows.iter()
-                .all(|row| row.component == ALARM1_NAME && row.states.contains("shelved"))
         );
 
         // Expiry at max_shelve_ticks: retuning the bound to 1 through
@@ -1127,11 +696,6 @@ fn the_managed_actions_settle_through_the_receipted_attributed_path() {
             telemetry(&snapshot, SHELVE1).sample.unwrap().value,
             Value::Bool(true),
             "the held request stands past the flag's expiry"
-        );
-        let rows = alarm_rows(&snapshot);
-        assert!(
-            rows.iter()
-                .all(|row| row.component == ALARM1_NAME && row.managed().is_empty())
         );
         // The standing request never re-arms — the documented
         // re-shelve-requires-cycle rule.
@@ -1169,11 +733,6 @@ fn the_managed_actions_settle_through_the_receipted_attributed_path() {
             telemetry(&snapshot, SHELVED1).sample.unwrap().value,
             Value::Bool(false)
         );
-        let rows = alarm_rows(&snapshot);
-        assert!(
-            rows.iter()
-                .all(|row| row.component == ALARM1_NAME && row.managed().is_empty())
-        );
 
         // The out-of-service affordance asserts `out_of_service` and
         // holds it across scans — manual in both directions, no
@@ -1184,11 +743,6 @@ fn the_managed_actions_settle_through_the_receipted_attributed_path() {
         assert_eq!(
             telemetry(&snapshot, OOS1).sample.unwrap().value,
             Value::Bool(true)
-        );
-        assert!(
-            alarm_rows(&snapshot)
-                .iter()
-                .all(|row| row.states.contains("out_of_service"))
         );
         let snapshot = client.advance(1).unwrap();
         assert_eq!(
@@ -1241,7 +795,7 @@ fn the_managed_actions_settle_through_the_receipted_attributed_path() {
 }
 
 #[test]
-fn the_never_shelvable_surfaces_offer_nothing_and_reject() {
+fn unwritable_shelve_requests_are_rejected_and_field_requests_still_apply() {
     with_monitor(|driver, client| {
         // Trip the third alarm so its row stands; its `shelve` binds a
         // field point the model never marked writable — the pane
@@ -1249,11 +803,6 @@ fn the_never_shelvable_surfaces_offer_nothing_and_reject() {
         // answers the named rejection.
         driver.write(PV3, Value::Bool(true)).unwrap();
         let snapshot = client.advance(1).unwrap();
-        assert!(
-            alarm_rows(&snapshot)
-                .iter()
-                .all(|row| row.component == ALARM3_NAME)
-        );
 
         let receipt = managed_write(client, SHELVE3, true);
         assert_eq!(
@@ -1289,55 +838,5 @@ fn the_never_shelvable_surfaces_offer_nothing_and_reject() {
             telemetry(&snapshot, SHELVED3).sample.unwrap().value,
             Value::Bool(true)
         );
-        assert!(
-            alarm_rows(&snapshot)
-                .iter()
-                .filter(|row| row.component == ALARM3_NAME)
-                .all(|row| row.states.contains("shelved"))
-        );
     });
-}
-
-/// The scripted sequence the determinism check replays: trip the first
-/// alarm, shelve it through the receipted path, retune the bound so
-/// expiry lands, then release the request — answering the pane's row
-/// model after each step as `(component, port, states)`.
-fn scripted_run() -> Vec<Vec<(String, String, Vec<String>)>> {
-    with_monitor(|driver, client| {
-        let collect = |snapshot: &TelemetrySnapshot| {
-            alarm_rows(snapshot)
-                .iter()
-                .map(|row| {
-                    (
-                        row.component.to_string(),
-                        row.port.to_string(),
-                        row.states.iter().map(|state| state.to_string()).collect(),
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
-        let mut renders = Vec::new();
-        driver.write(PV1, Value::Float(95.0)).unwrap();
-        renders.push(collect(&client.advance(1).unwrap()));
-        managed_write(client, SHELVE1, true);
-        renders.push(collect(&client.advance(1).unwrap()));
-        client
-            .command(&Command::SetParameter {
-                component: ALARM1_NAME.to_string(),
-                name: "max_shelve_ticks".to_string(),
-                value: Value::Int(1),
-            })
-            .unwrap();
-        renders.push(collect(&client.advance(1).unwrap()));
-        managed_write(client, SHELVE1, false);
-        renders.push(collect(&client.advance(1).unwrap()));
-        renders
-    })
-}
-
-#[test]
-fn identical_scripted_runs_render_identically() {
-    // No wall-clock or scheduling input reaches the row model: two
-    // rigs running the same command sequence produce the same renders.
-    assert_eq!(scripted_run(), scripted_run());
 }

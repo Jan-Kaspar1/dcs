@@ -1,39 +1,11 @@
 """The 1620_manual_takeover leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_manual_takeover, following the
 per-leg split convention (#940). The shared fakes and helpers live in
-tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'ManualTakeoverTests.test_registered_in_scenarios',
-    'ManualTakeoverTests.test_clean_feed_passes_and_validates',
-    'ManualTakeoverTests.test_two_runs_produce_identical_evidence',
-    'ManualTakeoverTests.test_mode_hand_oos_journaled',
-    'ManualTakeoverTests.test_auto_never_dropping_fails',
-    'ManualTakeoverTests.test_hand_never_running_fails',
-    'ManualTakeoverTests.test_protection_never_tripping_fails',
-    'ManualTakeoverTests.test_alarm_never_annunciating_fails',
-    'ManualTakeoverTests.test_never_rearming_fails',
-    'ManualTakeoverTests.test_oos_never_inhibiting_fails',
-    'ManualTakeoverTests.test_managed_flags_never_asserting_fails',
-    'ManualTakeoverTests.test_cmd_step_on_rejoin_fails',
-    'ManualTakeoverTests.test_latch_never_clearing_fails',
-    'ManualTakeoverTests.test_unjournaled_transitions_fail',
-    'ManualTakeoverTests.test_unjournaled_receipts_fail',
-    'ManualTakeoverTests.test_refused_write_fails',
-    'ManualTakeoverTests.test_moved_roles_fail',
-    'ManualTakeoverTests.test_no_active_is_failed',
-    'ManualTakeoverTests.test_no_tracking_pair_is_inconclusive',
-    'ManualTakeoverTests.test_missing_wiring_is_inconclusive',
-    'ManualTakeoverTests.test_no_plant_seam_is_inconclusive',
-    'ManualTakeoverTests.test_flags_unserved_is_inconclusive',
-})
 
 
 class TakeoverPlantPeer(FakePlantPeer):

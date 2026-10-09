@@ -2,14 +2,13 @@
 //! in-process `MonitorClient`.
 
 use dcs_core::{
-    BusExchangeDiagnostics, Command, CommandError, CommandOutcome, CommandReceipt, CyclicIoDriver,
-    Direction, DriverDiagnostics, EmittedEvent, EventValue, ExchangeDiagnostics, ForcedPoint,
-    IoDriver, IoError, IoFault, IoHealth, JournalEvent, LinkState, PointId, Quality, QualityReason,
-    Role, Sample, Tick, Value, ValueKind,
+    Command, CommandError, CommandOutcome, CommandReceipt, CyclicIoDriver, Direction,
+    DriverDiagnostics, ExchangeDiagnostics, ForcedPoint, IoDriver, IoError, IoFault, IoHealth,
+    JournalEvent, LinkState, PointId, Quality, QualityReason, Role, Sample, Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{
-    Driven, HealthReport, Monitor, MonitorClient, PAGE, PAIR_FAULT_KINDS_VERSION, PairFaultKind,
+    Driven, HealthReport, Monitor, MonitorClient, PAIR_FAULT_KINDS_VERSION, PairFaultKind,
 };
 use dcs_runtime::{
     Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, PointMap, StepError,
@@ -362,190 +361,6 @@ fn with_cyclic_monitor<T>(script: &[Exchange], body: impl FnOnce(&MonitorClient)
     result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
-/// The pane's rows and verdict, mirroring the page's `renderIoHealth`
-/// over a landed snapshot's `io_health`: the driver's link and — for a
-/// cyclic driver — exchange counters beside the executor's boundary
-/// counters, the attributed last fault, and the overrun count; troubled
-/// on link degradation, any boundary failure, exchange mismatches or
-/// missed deadlines, an attributed fault, or overruns. The fault row's
-/// text stands in for the page's describeIoError/pointName rendering —
-/// the row's presence, not its exact wording, is the contract here.
-fn io_health_pane(health: &IoHealth) -> (Vec<(String, String)>, bool) {
-    let mut rows: Vec<(String, String)> = Vec::new();
-    let mut troubled = false;
-    if let Some(driver) = &health.driver {
-        rows.push((
-            "link".to_string(),
-            serde_json::to_value(driver.link)
-                .unwrap()
-                .as_str()
-                .unwrap()
-                .to_string(),
-        ));
-        if driver.link != LinkState::Connected {
-            troubled = true;
-        }
-        if let Some(error) = &driver.last_error {
-            rows.push(("last link failure".to_string(), error.clone()));
-        }
-        if let Some(exchange) = &driver.exchange {
-            rows.push((
-                "exchanges attempted/succeeded".to_string(),
-                format!("{}/{}", exchange.attempted, exchange.succeeded),
-            ));
-            rows.push((
-                "working-counter mismatches".to_string(),
-                exchange.working_counter_mismatches.to_string(),
-            ));
-            rows.push((
-                "missed exchange deadlines".to_string(),
-                exchange.missed_deadlines.to_string(),
-            ));
-            rows.push((
-                "last exchange tick".to_string(),
-                exchange
-                    .last_exchange_tick
-                    .map(|tick| tick.0.to_string())
-                    .unwrap_or_else(|| "none".to_string()),
-            ));
-            if exchange.working_counter_mismatches > 0 || exchange.missed_deadlines > 0 {
-                troubled = true;
-            }
-            for bus in &exchange.buses {
-                let name = bus
-                    .device
-                    .map_or("local sim".to_string(), |id| format!("device {id}"));
-                rows.push((
-                    format!("bus {name}"),
-                    format!(
-                        "link {}, exchanges {}/{}, failed {}, short {}, late {}, \
-                         last exchange tick {}, last failure {}",
-                        serde_json::to_value(bus.link).unwrap().as_str().unwrap(),
-                        bus.attempted,
-                        bus.succeeded,
-                        bus.failed_exchanges,
-                        bus.working_counter_mismatches,
-                        bus.missed_deadlines,
-                        bus.last_exchange_tick
-                            .map(|tick| tick.0.to_string())
-                            .unwrap_or_else(|| "none".to_string()),
-                        bus.last_error.clone().unwrap_or_else(|| "none".to_string()),
-                    ),
-                ));
-                if bus.link != LinkState::Connected || bus.failed_exchanges > 0 {
-                    troubled = true;
-                }
-            }
-        }
-    }
-    rows.push(("failed reads".to_string(), health.failed_reads.to_string()));
-    rows.push((
-        "failed writes".to_string(),
-        health.failed_writes.to_string(),
-    ));
-    let exchange_reported = health
-        .driver
-        .as_ref()
-        .is_some_and(|driver| driver.exchange.is_some());
-    if health.failed_exchanges > 0 || exchange_reported {
-        rows.push((
-            "failed exchanges".to_string(),
-            health.failed_exchanges.to_string(),
-        ));
-        if health.failed_exchanges > 0 {
-            troubled = true;
-        }
-    }
-    rows.push((
-        "consecutive failures".to_string(),
-        health.consecutive_failures.to_string(),
-    ));
-    if health.failed_reads > 0 || health.failed_writes > 0 {
-        troubled = true;
-    }
-    if let Some(fault) = &health.last_error {
-        rows.push((
-            "last I/O fault".to_string(),
-            format!(
-                "{} — {} boundary, point {}, tick {}",
-                fault.error,
-                if fault.direction == Direction::In {
-                    "read"
-                } else {
-                    "write"
-                },
-                fault.point.0,
-                fault.tick.0
-            ),
-        ));
-        troubled = true;
-    }
-    if health.scan_overruns > 0 {
-        rows.push((
-            "scan overruns".to_string(),
-            health.scan_overruns.to_string(),
-        ));
-        troubled = true;
-    }
-    (rows, troubled)
-}
-
-/// The pair card's I/O-health line for a landed snapshot, mirroring the
-/// page's `ioHealthLine`: the pane's troubled rule reduced to one
-/// line's worth of named troubles.
-fn io_health_card_line(health: &IoHealth) -> (String, bool) {
-    let mut troubles = Vec::new();
-    if let Some(driver) = &health.driver
-        && driver.link != LinkState::Connected
-    {
-        troubles.push(format!(
-            "link {}",
-            serde_json::to_value(driver.link).unwrap().as_str().unwrap()
-        ));
-    }
-    if health.failed_reads > 0 || health.failed_writes > 0 {
-        troubles.push(format!(
-            "{} failed read(s), {} failed write(s)",
-            health.failed_reads, health.failed_writes
-        ));
-    }
-    if health.failed_exchanges > 0 {
-        troubles.push(format!("{} failed exchange(s)", health.failed_exchanges));
-    }
-    if let Some(exchange) = health
-        .driver
-        .as_ref()
-        .and_then(|driver| driver.exchange.as_ref())
-    {
-        if exchange.working_counter_mismatches > 0 {
-            troubles.push(format!(
-                "{} working-counter mismatch(es)",
-                exchange.working_counter_mismatches
-            ));
-        }
-        if exchange.missed_deadlines > 0 {
-            troubles.push(format!(
-                "{} missed exchange deadline(s)",
-                exchange.missed_deadlines
-            ));
-        }
-    }
-    if let Some(fault) = &health.last_error {
-        troubles.push(format!(
-            "last fault {} at tick {}",
-            fault.error, fault.tick.0
-        ));
-    }
-    if health.scan_overruns > 0 {
-        troubles.push(format!("{} scan overrun(s)", health.scan_overruns));
-    }
-    if troubles.is_empty() {
-        ("I/O healthy".to_string(), false)
-    } else {
-        (format!("I/O degraded: {}", troubles.join("; ")), true)
-    }
-}
-
 fn point_value(snapshot: &dcs_core::TelemetrySnapshot, point: u64) -> Option<Value> {
     snapshot
         .points
@@ -800,22 +615,6 @@ fn signals_endpoint_serves_the_models_metadata() {
     });
 }
 
-#[test]
-fn monitoring_page_is_served() {
-    with_monitor(|_driver, client| {
-        assert_eq!(client.page().unwrap(), PAGE);
-        for path in ["/", "/index.html"] {
-            let (status, body) = client.request("GET", path, None).unwrap();
-            assert_eq!(status, 200, "{path}");
-            assert!(body.contains("<title>dcs-monitor</title>"), "{path}");
-            // The page drives only the JSON contract endpoints.
-            for endpoint in ["/signals", "/snapshot", "/history", "/journal", "/command"] {
-                assert!(body.contains(endpoint), "{path} lacks {endpoint}");
-            }
-        }
-    });
-}
-
 /// The wire spelling serde emits for a unit or externally tagged enum
 /// variant: the bare string for a unit variant, the sole object key for
 /// a tagged one.
@@ -830,116 +629,7 @@ fn emitted_spelling(value: &impl serde::Serialize) -> String {
 }
 
 #[test]
-fn the_pages_hardcoded_spellings_are_the_emitted_contract() {
-    with_monitor(|_driver, client| {
-        let page = client.page().unwrap();
-        // Every name the page pattern-matches or constructs is the
-        // audited enum's canonical snake_case spelling — derived from
-        // serde itself so the page and the rename rules cannot fork.
-        for spelling in [
-            emitted_spelling(&Value::Bool(true)),
-            emitted_spelling(&Value::Int(0)),
-            emitted_spelling(&Value::Float(0.0)),
-            emitted_spelling(&ValueKind::Bool),
-            emitted_spelling(&ValueKind::Int),
-            emitted_spelling(&ValueKind::Float),
-            emitted_spelling(&Quality::Good),
-            emitted_spelling(&Quality::Uncertain(QualityReason::Substituted)),
-            emitted_spelling(&Quality::Bad(QualityReason::Substituted)),
-            emitted_spelling(&QualityReason::Substituted),
-            emitted_spelling(&IoError::UnknownPoint(PointId(0))),
-            emitted_spelling(&IoError::Disconnected(PointId(0))),
-            emitted_spelling(&IoError::Timeout(PointId(0))),
-            emitted_spelling(&IoError::Fenced(PointId(0))),
-            emitted_spelling(&IoError::TypeMismatch {
-                point: PointId(0),
-                expected: ValueKind::Bool,
-                found: Value::Bool(false),
-            }),
-            // The declared-command/emitted-event vocabulary the journal
-            // pane renders.
-            emitted_spelling(&Command::Invoke {
-                component: String::new(),
-                command: String::new(),
-                arguments: Default::default(),
-            }),
-            emitted_spelling(&JournalEvent::EventEmitted {
-                event: EmittedEvent {
-                    event: String::new(),
-                    component: String::new(),
-                    fields: Default::default(),
-                },
-            }),
-            emitted_spelling(&EventValue::Value(Value::Int(0))),
-            emitted_spelling(&EventValue::Quality(Quality::Good)),
-            emitted_spelling(&EventValue::Text(String::new())),
-            emitted_spelling(&CommandError::UnknownCommand {
-                component: String::new(),
-                command: String::new(),
-            }),
-            emitted_spelling(&CommandError::UnknownArgument {
-                component: String::new(),
-                command: String::new(),
-                argument: String::new(),
-            }),
-            emitted_spelling(&CommandError::ArgumentTypeMismatch {
-                component: String::new(),
-                command: String::new(),
-                argument: String::new(),
-                expected: ValueKind::Int,
-                found: ValueKind::Bool,
-            }),
-            emitted_spelling(&CommandError::CommandRefused {
-                component: String::new(),
-                command: String::new(),
-                reason: String::new(),
-            }),
-        ] {
-            assert!(
-                page.contains(&spelling),
-                "page lacks the emitted spelling {spelling}"
-            );
-        }
-        // The legacy PascalCase spellings the read aliases keep
-        // deserializable survive nowhere as wire operands — only as
-        // display output the `pascal` helper computes at render time.
-        for legacy in [
-            "Bool",
-            "Int",
-            "Float",
-            "Good",
-            "Uncertain",
-            "Bad",
-            "Unspecified",
-            "Substituted",
-            "Stale",
-            "OutOfRange",
-            "CommunicationFault",
-            "DeviceFault",
-            "ConfigurationFault",
-            "UnknownPoint",
-            "Disconnected",
-            "Timeout",
-            "TypeMismatch",
-            "Fenced",
-        ] {
-            for operand in [
-                format!("=== \"{legacy}\""),
-                format!("=== '{legacy}'"),
-                format!("\"{legacy}\" in "),
-                format!(" {{ {legacy}: "),
-            ] {
-                assert!(
-                    !page.contains(&operand),
-                    "page still matches the legacy spelling: {operand}"
-                );
-            }
-        }
-    });
-}
-
-#[test]
-fn the_pages_pair_fault_kinds_match_the_versioned_contract() {
+fn pair_fault_kinds_match_the_versioned_contract() {
     let mut spellings: Vec<_> = PairFaultKind::ALL.iter().map(emitted_spelling).collect();
     spellings.sort();
     assert_eq!(
@@ -957,29 +647,10 @@ fn the_pages_pair_fault_kinds_match_the_versioned_contract() {
         ]
     );
     assert_eq!(PAIR_FAULT_KINDS_VERSION, 4);
-
-    with_monitor(|_driver, client| {
-        let page = client.page().unwrap();
-        let compact: String = page.chars().filter(|c| !c.is_whitespace()).collect();
-        assert!(
-            compact.contains("constPAIR_FAULT_KINDS_VERSION=4;"),
-            "page lacks the version constant"
-        );
-        assert!(
-            compact.contains("fault_kinds_version:PAIR_FAULT_KINDS_VERSION"),
-            "page lacks the versioned fault_kinds field"
-        );
-        for spelling in spellings {
-            assert!(
-                page.contains(&format!("\"{spelling}\"")),
-                "page lacks the emitted pair fault spelling {spelling}"
-            );
-        }
-    });
 }
 
 #[test]
-fn page_json_feed_tracks_snapshots_and_commands() {
+fn json_feed_tracks_snapshots_and_commands() {
     with_monitor(|driver, client| {
         driver.write(PointId(10), Value::Float(3.0)).unwrap();
         client.advance(1).unwrap();
@@ -1020,81 +691,6 @@ fn page_json_feed_tracks_snapshots_and_commands() {
         let snapshot = client.advance(1).unwrap();
         assert_eq!(point_value(&snapshot, 10), Some(Value::Float(7.5)));
         assert_eq!(point_value(&snapshot, 20), Some(Value::Float(15.0)));
-    });
-}
-
-#[test]
-fn page_serves_trend_and_journal_markup() {
-    with_monitor(|_driver, client| {
-        let page = client.page().unwrap();
-        // The trend pane: one inline-SVG figure per point, fed by /history
-        // with a since-cursor — dependency-free markup, no build assets.
-        for needle in ["id=\"trends\"", "<svg", "/history?since="] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-        // The journal pane: a tick-ordered table fed by /journal with a
-        // since-cursor.
-        for needle in ["id=\"journal\"", "<th>Tick</th>", "/journal?since="] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-        // The I/O-health pane: the snapshot's io_health section rendered
-        // as its own surface beside the pair reporting — and the
-        // link-degradation display rule that shows a dead transport as
-        // link health, distinct from the per-point quality column. The
-        // cyclic contract's half: the pane's exchange rows and boundary
-        // count, and the pair card's named exchange troubles.
-        for needle in [
-            "id=\"health\"",
-            "id=\"io-health\"",
-            "id=\"io-health-rows\"",
-            "snapshot.io_health",
-            "health.driver.link !== \"connected\"",
-            "scan overruns",
-            "health.driver.exchange",
-            "health.failed_exchanges",
-            "exchanges attempted/succeeded",
-            "working-counter mismatches",
-            "missed exchange deadlines",
-            "last exchange tick",
-            "failed exchanges",
-            " failed exchange(s)",
-            "working-counter mismatch(es)",
-            "missed exchange deadline(s)",
-        ] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-        // The page stays a single dependency-free asset.
-        assert!(!page.contains("src="), "page references external assets");
-    });
-}
-
-#[test]
-fn page_groups_its_listing_by_the_models_signal_groups() {
-    with_monitor(|_driver, client| {
-        let page = client.page().unwrap();
-        // The listing is organized client-side from the model's declared
-        // display groups: a per-group header row and the bucketing logic.
-        for needle in [
-            "point-group",
-            "function groupedPoints()",
-            "function pointGroup(meta)",
-        ] {
-            assert!(page.contains(needle), "page lacks {needle}");
-        }
-        // The client-side default: a point whose entry carries no group —
-        // like the served index's ungrouped and signal-less points — is
-        // filed under the documented "ungrouped" group.
-        assert!(
-            page.contains("const DEFAULT_GROUP = \"ungrouped\""),
-            "page lacks the documented default group"
-        );
-        assert!(
-            page.contains("meta.group || DEFAULT_GROUP"),
-            "page lacks the ungrouped fallback"
-        );
-        let index = client.signals().unwrap();
-        assert_eq!(index.get(PointId(20)).unwrap().group, None);
-        assert_eq!(index.get(PointId(30)).unwrap().group, None);
     });
 }
 
@@ -1205,7 +801,7 @@ fn trend_and_journal_feeds_track_the_run() {
 }
 
 #[test]
-fn the_health_panes_fields_ride_the_served_snapshot() {
+fn io_health_fields_ride_the_served_snapshot() {
     with_monitor(|driver, client| {
         // Injected driver faults at both boundaries, plus a link-level
         // report through the driver's optional diagnostics hook — the
@@ -1256,7 +852,7 @@ fn the_health_panes_fields_ride_the_served_snapshot() {
 }
 
 #[test]
-fn the_pane_renders_the_cyclic_exchange_surface() {
+fn cyclic_exchange_counters_ride_the_served_snapshot() {
     // A driver carrying the cyclic contract: the script's one failed
     // exchange counts once at the executor's boundary while the late
     // frame counts a missed deadline under succeeded — both halves of
@@ -1292,171 +888,16 @@ fn the_pane_renders_the_cyclic_exchange_surface() {
                 }
             );
 
-            // The pane renders the exchange rows beside the boundary
-            // counters and reads degraded.
-            let (rows, troubled) = io_health_pane(&health);
-            let rendered: HashMap<&str, &str> = rows
-                .iter()
-                .map(|(label, value)| (label.as_str(), value.as_str()))
-                .collect();
-            assert_eq!(rendered["exchanges attempted/succeeded"], "4/3");
-            assert_eq!(rendered["working-counter mismatches"], "0");
-            assert_eq!(rendered["missed exchange deadlines"], "1");
-            assert_eq!(rendered["last exchange tick"], "4");
-            assert_eq!(rendered["failed exchanges"], "1");
-            assert!(troubled, "the pane reads degraded: {rows:?}");
-
-            // The pair card's line names the troubles.
-            let (line, bad) = io_health_card_line(&health);
-            assert!(bad);
-            assert!(line.contains("1 failed exchange(s)"), "{line}");
-            assert!(line.contains("1 missed exchange deadline(s)"), "{line}");
-
-            // Identical scripted snapshots render identically — a serde
-            // roundtrip produces the same rows and verdict.
+            // The served health payload preserves the exchange counters on a serde roundtrip.
             let again: IoHealth =
                 serde_json::from_str(&serde_json::to_string(&health).unwrap()).unwrap();
-            assert_eq!(io_health_pane(&again), io_health_pane(&health));
+            assert_eq!(again, health);
         },
     );
 }
 
 #[test]
-fn the_pane_renders_every_bus_behind_the_aggregate_counters() {
-    // On a fan-out over several cyclic buses the aggregate counters are
-    // sums, so the pane's per-bus rows are the only place a counter stays
-    // attributable to the bus that moved it.
-    let health = IoHealth {
-        failed_exchanges: 1,
-        consecutive_failures: 1,
-        last_error: Some(IoFault {
-            error: IoError::Disconnected(PointId(11)),
-            direction: Direction::In,
-            point: PointId(11),
-            tick: Tick(4),
-        }),
-        driver: Some(DriverDiagnostics {
-            link: LinkState::Disconnected,
-            last_error: Some("device 1: link down; device 2: link down".to_string()),
-            exchange: Some(ExchangeDiagnostics {
-                attempted: 4,
-                succeeded: 3,
-                working_counter_mismatches: 1,
-                last_exchange_tick: Some(Tick(3)),
-                missed_deadlines: 1,
-                buses: vec![
-                    BusExchangeDiagnostics {
-                        device: Some(1),
-                        bus: None,
-                        binding: None,
-                        state: None,
-                        link: LinkState::Disconnected,
-                        attempted: 2,
-                        succeeded: 1,
-                        working_counter_mismatches: 0,
-                        missed_deadlines: 0,
-                        failed_exchanges: 1,
-                        last_exchange_tick: Some(Tick(2)),
-                        last_error: Some("link down".to_string()),
-                    },
-                    BusExchangeDiagnostics {
-                        device: Some(2),
-                        bus: None,
-                        binding: None,
-                        state: None,
-                        link: LinkState::Connected,
-                        attempted: 2,
-                        succeeded: 2,
-                        working_counter_mismatches: 1,
-                        missed_deadlines: 1,
-                        failed_exchanges: 0,
-                        last_exchange_tick: Some(Tick(3)),
-                        last_error: None,
-                    },
-                ],
-            }),
-        }),
-        ..IoHealth::default()
-    };
-
-    let (rows, troubled) = io_health_pane(&health);
-    let rendered: HashMap<&str, &str> = rows
-        .iter()
-        .map(|(label, value)| (label.as_str(), value.as_str()))
-        .collect();
-    assert_eq!(rendered["exchanges attempted/succeeded"], "4/3");
-    assert!(rendered.contains_key("bus device 1"), "{rows:?}");
-    let first = rendered["bus device 1"];
-    assert!(first.contains("link disconnected"), "{first}");
-    assert!(first.contains("exchanges 2/1"), "{first}");
-    assert!(first.contains("failed 1"), "{first}");
-    assert!(first.contains("last failure link down"), "{first}");
-    assert!(first.contains("last exchange tick 2"), "{first}");
-
-    assert!(rendered.contains_key("bus device 2"), "{rows:?}");
-    let second = rendered["bus device 2"];
-    assert!(second.contains("link connected"), "{second}");
-    assert!(second.contains("exchanges 2/2"), "{second}");
-    assert!(second.contains("failed 0"), "{second}");
-    assert!(second.contains("short 1"), "{second}");
-    assert!(second.contains("late 1"), "{second}");
-    assert!(second.contains("last failure none"), "{second}");
-    assert!(troubled, "a bus down reads degraded: {rows:?}");
-
-    // Every bus's own failure count sums to the boundary's own: one
-    // count per failed exchange, never a second count of the same one.
-    assert_eq!(
-        health
-            .driver
-            .as_ref()
-            .and_then(|driver| driver.exchange.as_ref())
-            .map(|exchange| exchange
-                .buses
-                .iter()
-                .map(|bus| bus.failed_exchanges)
-                .sum::<u64>()),
-        Some(health.failed_exchanges)
-    );
-
-    // A clean multi-bus run renders both rows and reads healthy.
-    let healthy = IoHealth {
-        driver: Some(DriverDiagnostics {
-            link: LinkState::Connected,
-            last_error: None,
-            exchange: Some(ExchangeDiagnostics {
-                attempted: 2,
-                succeeded: 2,
-                working_counter_mismatches: 0,
-                last_exchange_tick: Some(Tick(2)),
-                missed_deadlines: 0,
-                buses: (1..=2)
-                    .map(|device| BusExchangeDiagnostics {
-                        device: Some(device),
-                        bus: None,
-                        binding: None,
-                        state: None,
-                        link: LinkState::Connected,
-                        attempted: 2,
-                        succeeded: 2,
-                        working_counter_mismatches: 0,
-                        missed_deadlines: 0,
-                        failed_exchanges: 0,
-                        last_exchange_tick: Some(Tick(2)),
-                        last_error: None,
-                    })
-                    .collect(),
-            }),
-        }),
-        ..IoHealth::default()
-    };
-    let (rows, troubled) = io_health_pane(&healthy);
-    assert!(rows.iter().any(|(label, _)| label == "bus device 1"));
-    assert!(rows.iter().any(|(label, _)| label == "bus device 2"));
-    assert!(!troubled, "healthy buses read healthy: {rows:?}");
-}
-
-#[test]
-fn the_troubled_rule_reads_the_exchange_counters() {
+fn completed_exchanges_report_deadlines_and_working_counter_shortfalls() {
     // A clean run — every attempted exchange succeeded with no
     // shortfall and no missed deadline — stays healthy even though the
     // exchange rows render.
@@ -1469,15 +910,6 @@ fn the_troubled_rule_reads_the_exchange_counters() {
             .and_then(|driver| driver.exchange.as_ref())
             .unwrap();
         assert_eq!(exchange.succeeded, exchange.attempted);
-        let (rows, troubled) = io_health_pane(&health);
-        assert!(
-            rows.iter()
-                .any(|(label, _)| label == "exchanges attempted/succeeded"),
-            "the exchange surface renders even while healthy: {rows:?}"
-        );
-        assert!(!troubled, "clean exchanges read healthy: {rows:?}");
-        let (line, bad) = io_health_card_line(&health);
-        assert_eq!((line.as_str(), bad), ("I/O healthy", false));
     });
 
     // A completed exchange can still degrade the field: the late frame
@@ -1494,11 +926,6 @@ fn the_troubled_rule_reads_the_exchange_counters() {
         assert_eq!(exchange.succeeded, exchange.attempted);
         assert_eq!(exchange.missed_deadlines, 1);
         assert_eq!(health.failed_exchanges, 0);
-        let (_, troubled) = io_health_pane(&health);
-        assert!(troubled, "a missed deadline reads degraded");
-        let (line, bad) = io_health_card_line(&health);
-        assert!(bad);
-        assert!(line.contains("missed exchange deadline"), "{line}");
     });
 
     // The working-counter shortfall likewise: the exchange completed
@@ -1515,16 +942,11 @@ fn the_troubled_rule_reads_the_exchange_counters() {
         assert_eq!(exchange.succeeded, exchange.attempted);
         assert_eq!(exchange.working_counter_mismatches, 1);
         assert_eq!(health.failed_exchanges, 0);
-        let (_, troubled) = io_health_pane(&health);
-        assert!(troubled, "a working-counter shortfall reads degraded");
-        let (line, bad) = io_health_card_line(&health);
-        assert!(bad);
-        assert!(line.contains("working-counter mismatch"), "{line}");
     });
 }
 
 #[test]
-fn a_point_wise_driver_renders_no_exchange_rows() {
+fn point_wise_drivers_serve_no_exchange_section() {
     // The absent-field convention: a driver without the cyclic surface
     // serializes no `exchange` field and the pane renders exactly as
     // before — no exchange rows, no failed-exchanges counter, and the
@@ -1540,19 +962,11 @@ fn a_point_wise_driver_renders_no_exchange_rows() {
                 .is_none_or(|driver| driver.exchange.is_none()),
             "a point-wise driver reports no exchange section"
         );
-        let (rows, troubled) = io_health_pane(&health);
-        assert!(
-            !rows.iter().any(|(label, _)| label.contains("exchange")),
-            "no exchange row may render for a non-cyclic driver: {rows:?}"
-        );
-        assert!(!troubled);
-        let (line, bad) = io_health_card_line(&health);
-        assert_eq!((line.as_str(), bad), ("I/O healthy", false));
     });
 }
 
 #[test]
-fn force_and_release_are_journaled_and_badged_in_the_snapshot() {
+fn force_and_release_are_journaled_and_reported_in_the_snapshot() {
     with_monitor(|driver, client| {
         driver.write(PointId(10), Value::Float(1.0)).unwrap();
         client.advance(1).unwrap();

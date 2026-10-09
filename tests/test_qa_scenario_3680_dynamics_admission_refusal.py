@@ -2,43 +2,9 @@
 the feed fake, the stubbed doctored-document lever, and the TestCase
 class for scenario_dynamics_admission_refusal, per the module-per-leg
 test convention (#940). The shared fakes and helpers live in
-tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+tests/qa_scenario_support.py.
 """
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'DynamicsAdmissionTests.test_registered_in_scenarios',
-    'DynamicsAdmissionTests.test_clean_rig_passes_and_validates',
-    'DynamicsAdmissionTests.test_two_passes_share_one_digest',
-    'DynamicsAdmissionTests.test_two_runs_produce_identical_records',
-    'DynamicsAdmissionTests.test_scenario_ctx_carries_the_lever',
-    'DynamicsAdmissionTests.test_missing_lever_is_inconclusive',
-    'DynamicsAdmissionTests.test_unreachable_rig_is_inconclusive',
-    'DynamicsAdmissionTests.test_unsettled_pair_is_inconclusive',
-    'DynamicsAdmissionTests.test_no_active_is_failed',
-    'DynamicsAdmissionTests.test_predated_tooling_is_inconclusive',
-    'DynamicsAdmissionTests.test_failed_lever_is_inconclusive',
-    'DynamicsAdmissionTests.test_no_out_points_is_inconclusive',
-    'DynamicsAdmissionTests.test_refused_claim_is_inconclusive',
-    'DynamicsAdmissionTests.test_check_accepts_malformed_fails',
-    'DynamicsAdmissionTests.test_serve_accepts_malformed_fails',
-    'DynamicsAdmissionTests.test_panic_at_check_fails',
-    'DynamicsAdmissionTests.test_unnamed_refusal_fails',
-    'DynamicsAdmissionTests.test_served_listener_fails',
-    'DynamicsAdmissionTests.test_honest_control_refused_fails',
-    'DynamicsAdmissionTests.test_plant_silent_fails',
-    'DynamicsAdmissionTests.test_stomped_command_fails',
-    'DynamicsAdmissionTests.test_rewound_field_fails',
-    'DynamicsAdmissionTests.test_moved_kind_fails',
-    'DynamicsAdmissionTests.test_frozen_field_fails',
-    'DynamicsAdmissionTests.test_step_refused_fails',
-    'DynamicsAdmissionTests.test_moved_roles_restore_and_fail',
-    'DynamicsAdmissionTests.test_swapped_launch_layout_restores',
-    'DynamicsAdmissionTests.test_silenced_judges_report_unchecked',
-})
 
 
 class AdmissionPlantPeer(ClaimPlantPeer):

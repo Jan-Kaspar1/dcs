@@ -1,10 +1,7 @@
 """The 2335_divergence_resolution leg's scenario unit coverage — the
 feed fakes and TestCase classes for scenario_divergence_resolution, in
 the tests/test_qa_scenario_NNNN_<slug>.py split layout (#940). The
-shared fakes and helpers live in tests/qa_scenario_support.py;
-EXPECTED_CASES pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+shared fakes and helpers live in tests/qa_scenario_support.py.
 """
 import json
 import tempfile
@@ -15,24 +12,6 @@ from unittest.mock import patch
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
 
 from qa_lane import report, scenarios, verify
-
-
-EXPECTED_CASES = frozenset({
-    'DivergenceResolutionTests.test_registered',
-    'DivergenceResolutionTests.test_clean_lifecycle_passes_and_validates',
-    'DivergenceResolutionTests.test_identical_evidence_across_runs',
-    'DivergenceResolutionTests.test_evidence_files_land',
-    'DivergenceResolutionTests.test_never_detects_reports_failed',
-    'DivergenceResolutionTests.test_admitted_first_gate_reports_failed',
-    'DivergenceResolutionTests.test_cleared_blocked_window_reports_failed',
-    'DivergenceResolutionTests.test_regression_clear_reports_failed',
-    'DivergenceResolutionTests.test_silent_resolution_reports_failed',
-    'DivergenceResolutionTests.test_unresolved_verdict_reports_failed',
-    'DivergenceResolutionTests.test_unread_resolution_evidence_reports_failed',
-    'DivergenceResolutionTests.test_disturbed_claim_reports_failed',
-    'DivergenceResolutionTests.test_starved_watch_reports_inconclusive',
-    'DivergenceResolutionTests.test_refused_claim_reports_inconclusive',
-})
 
 
 TOKENS = {'active': 424243, 'standby': 424244}

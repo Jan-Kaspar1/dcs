@@ -1,48 +1,11 @@
 """The 3900_power_fail_trip leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_power_fail_trip, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'PowerTripTests.test_registered_in_scenarios',
-    'PowerTripTests.test_clean_feed_passes_and_validates',
-    'PowerTripTests.test_two_runs_produce_identical_evidence',
-    'PowerTripTests.test_no_active_fails',
-    'PowerTripTests.test_missing_wiring_is_inconclusive',
-    'PowerTripTests.test_unwritable_ack_is_inconclusive',
-    'PowerTripTests.test_bare_schema_is_inconclusive',
-    'PowerTripTests.test_refused_claim_is_inconclusive',
-    'PowerTripTests.test_standing_contact_is_inconclusive',
-    'PowerTripTests.test_power_ok_never_reports_is_inconclusive',
-    'PowerTripTests.test_power_ok_never_drops_fails',
-    'PowerTripTests.test_availability_never_drops_fails',
-    'PowerTripTests.test_commands_never_release_fails',
-    'PowerTripTests.test_none_available_never_asserts_fails',
-    'PowerTripTests.test_demand_drops_under_outage_fails',
-    'PowerTripTests.test_duty_never_releases_fails',
-    'PowerTripTests.test_mute_alarm_fails',
-    'PowerTripTests.test_mute_unack_fails',
-    'PowerTripTests.test_ack_rejected_fails',
-    'PowerTripTests.test_ack_never_applies_fails',
-    'PowerTripTests.test_unack_stuck_fails',
-    'PowerTripTests.test_never_recovers_fails',
-    'PowerTripTests.test_slow_restage_is_nondeterministic',
-    'PowerTripTests.test_early_restage_is_nondeterministic',
-    'PowerTripTests.test_journaled_role_change_is_nondeterministic',
-    'PowerTripTests.test_unjournaled_point_recording_is_nondeterministic',
-    'PowerTripTests.test_missing_journal_fails',
-    'PowerTripTests.test_role_moving_under_the_drive_fails',
-    'PowerTripTests.test_moved_pump_operator_state_fails',
-    'PowerTripTests.test_restore_write_lying_fails',
-})
 
 
 class PowerTripPlantPeer(StagingPlantPeer):

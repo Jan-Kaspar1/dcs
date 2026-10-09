@@ -160,6 +160,7 @@ pub mod ethercat;
 pub mod filter_bank;
 pub mod ijmuiden;
 pub mod library_plant;
+pub mod pump;
 mod spec;
 pub mod specs;
 pub mod station;
@@ -178,5 +179,7 @@ pub use spec::{
 // `dcs-build` consumer needs no other crate's imports.
 pub use dcs_core::{Direction, PointId, PointType, SignalId, Value, ValueKind};
 pub use dcs_model::{
-    ChannelRef, ComponentId, DeviceId, Endpoint, PortRef, Rationalization, RecordingDuty,
+    ChannelRef, ComponentId, DeviceId, Endpoint, Equipment, EquipmentControl, PlantView,
+    PlantViewBinding, PlantViewNode, PlantViewPipe, PlantViewPipeEnd, PlantViewPort,
+    PlantViewSymbol, PortRef, Rationalization, RecordingDuty,
 };

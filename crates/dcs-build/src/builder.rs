@@ -27,8 +27,8 @@ use crate::endpoint::{InPoint, OutPoint, Sink, Source};
 use crate::spec::{ParamDecl, PortDecl, Spec};
 use dcs_core::{Direction, PointId, PointType, SignalId, Value, ValueKind};
 use dcs_model::{
-    Channel, ChannelRef, ComponentId, ComponentInstance, Connection, Device, DeviceId, IoPoint,
-    MODEL_VERSION, PlantModel, Port, RecordingDuty, Signal, ValidationError,
+    Channel, ChannelRef, ComponentId, ComponentInstance, Connection, Device, DeviceId, Equipment,
+    IoPoint, MODEL_VERSION, PlantModel, Port, RecordingDuty, Signal, ValidationError,
 };
 use std::collections::BTreeMap;
 use std::fmt;
@@ -41,6 +41,14 @@ use std::fmt;
 /// document cannot fail a check a hand-written document would pass.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BuildError {
+    /// An equipment composition's configuration cannot produce a valid
+    /// model, detected before it mutates the builder.
+    InvalidConfiguration {
+        /// The configuration field that could not be used.
+        field: String,
+        /// Why the value is invalid.
+        reason: String,
+    },
     /// An instance's parameter map omits a parameter its spec declares
     /// required.
     MissingParameter {
@@ -90,6 +98,9 @@ pub enum BuildError {
 impl fmt::Display for BuildError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidConfiguration { field, reason } => {
+                write!(f, "invalid configuration {field:?}: {reason}")
+            }
             Self::MissingParameter {
                 component,
                 parameter,
@@ -153,6 +164,8 @@ pub struct PlantBuilder {
     signals: Vec<Signal>,
     components: Vec<ComponentInstance>,
     connections: Vec<Connection>,
+    equipment: Vec<Equipment>,
+    views: Vec<dcs_model::PlantView>,
     /// Each component's spec-declared parameter set, for `build`'s
     /// checks; `None` marks a spec leaving its parameters unchecked.
     parameter_sets: Vec<(ComponentId, Option<Vec<ParamDecl>>)>,
@@ -181,11 +194,28 @@ impl PlantBuilder {
             signals: Vec::new(),
             components: Vec::new(),
             connections: Vec::new(),
+            equipment: Vec::new(),
+            views: Vec::new(),
             parameter_sets: Vec::new(),
             port_sets: Vec::new(),
             next_device: 1,
             next_component: 1,
         }
+    }
+
+    /// Registers an equipment's ownership and operator surface using the
+    /// already declared component and point identities. [`build`](Self::build)
+    /// validates references, exclusive ownership, and writable controls.
+    pub fn equipment(&mut self, equipment: Equipment) -> &mut Self {
+        self.equipment.push(equipment);
+        self
+    }
+
+    /// Registers a code-engineered process drawing. [`build`](Self::build)
+    /// validates references, geometry, pipework, and area navigation.
+    pub fn view(&mut self, view: dcs_model::PlantView) -> &mut Self {
+        self.views.push(view);
+        self
     }
 
     /// Declares a field or simulated I/O device of `kind` and returns it
@@ -853,6 +883,8 @@ impl PlantBuilder {
             signals: self.signals,
             components: self.components,
             connections: self.connections,
+            equipment: self.equipment,
+            views: self.views,
         };
         let errors = model.validate();
         if errors.is_empty() {

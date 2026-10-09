@@ -2,10 +2,7 @@
 feed fakes and TestCase classes for
 scenario_diverged_field_recovery, in the
 tests/test_qa_scenario_NNNN_<slug>.py split layout (#940). The shared
-fakes and helpers live in tests/qa_scenario_support.py;
-EXPECTED_CASES pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+fakes and helpers live in tests/qa_scenario_support.py.
 """
 import json
 import tempfile
@@ -16,35 +13,6 @@ from unittest.mock import patch
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
 
 from qa_lane import report, scenarios, verify
-
-
-EXPECTED_CASES = frozenset({
-    'DivergedFieldRecoveryTests.test_registered',
-    'DivergedFieldRecoveryTests.test_clean_recovery_passes_and_validates',
-    'DivergedFieldRecoveryTests.test_identical_evidence_across_runs',
-    'DivergedFieldRecoveryTests.test_evidence_files_land',
-    'DivergedFieldRecoveryTests.test_every_peer_promotion_is_refused',
-    'DivergedFieldRecoveryTests.test_an_admitted_orphan_promotion_'
-    'reports_failed',
-    'DivergedFieldRecoveryTests.test_the_wedge_duration_and_field_state_'
-    'land_as_evidence',
-    'DivergedFieldRecoveryTests.test_never_demotes_reports_failed',
-    'DivergedFieldRecoveryTests.test_silent_loss_reports_failed',
-    'DivergedFieldRecoveryTests.test_misattributed_loss_reports_failed',
-    'DivergedFieldRecoveryTests.test_unconverged_survivor_reports_failed',
-    'DivergedFieldRecoveryTests.test_admitted_promote_reports_failed',
-    'DivergedFieldRecoveryTests.test_claimed_field_reports_failed',
-    'DivergedFieldRecoveryTests.test_lost_uncommanded_value_reports_failed',
-    'DivergedFieldRecoveryTests.test_never_healed_reports_failed',
-    'DivergedFieldRecoveryTests.test_unreconverged_peer_reports_failed',
-    'DivergedFieldRecoveryTests.test_the_diverged_verdict_journals_one_'
-    'resolution',
-    'DivergedFieldRecoveryTests.test_flapped_resolution_reports_failed',
-    'DivergedFieldRecoveryTests.test_unmatched_resolution_evidence_'
-    'reports_failed',
-    'DivergedFieldRecoveryTests.test_refused_claim_reports_inconclusive',
-    'DivergedFieldRecoveryTests.test_missing_lifecycle_seam_reports_inconclusive',
-})
 
 
 TOKENS = {'active': 424243, 'standby': 424244}

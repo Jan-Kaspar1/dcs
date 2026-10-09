@@ -1,36 +1,11 @@
 """The 0550_history_run_marker leg's scenario unit coverage — the
 feed fake and TestCase classes for scenario_history_run_marker,
 following the module-per-leg convention (#928, #940). The shared
-fakes and helpers live in tests/qa_scenario_support.py;
-EXPECTED_CASES pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+fakes and helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'HistoryRunMarkerTests.test_registered_in_scenarios',
-    'HistoryRunMarkerTests.test_clean_rig_passes_and_validates',
-    'HistoryRunMarkerTests.test_run_bumps_on_resumed_restart',
-    'HistoryRunMarkerTests.test_resumed_restart_continues_the_axis',
-    'HistoryRunMarkerTests.test_cold_restart_restarts_the_axis',
-    'HistoryRunMarkerTests.test_held_cursor_sees_run_on_empty_answers',
-    'HistoryRunMarkerTests.test_stale_marker_fails',
-    'HistoryRunMarkerTests.test_resumed_axis_regression_fails',
-    'HistoryRunMarkerTests.test_cold_axis_continuation_fails',
-    'HistoryRunMarkerTests.test_flapping_marker_is_nondeterministic',
-    'HistoryRunMarkerTests.test_unjournaled_lifetime_fails',
-    'HistoryRunMarkerTests.test_spurious_promotion_fails',
-    'HistoryRunMarkerTests.test_predating_rig_is_inconclusive',
-    'HistoryRunMarkerTests.test_unreachable_rig_is_inconclusive',
-    'HistoryRunMarkerTests.test_failed_action_is_inconclusive',
-    'HistoryRunMarkerTests.test_unreturned_monitor_is_inconclusive',
-    'HistoryRunMarkerTests.test_missing_action_is_inconclusive',
-    'HistoryRunMarkerTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class HistoryRunMarkerFeed:

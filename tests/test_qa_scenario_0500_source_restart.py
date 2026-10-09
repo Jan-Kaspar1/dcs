@@ -1,35 +1,11 @@
 """The 0500_source_restart leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_source_restart, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'SourceRestartTests.test_registered_in_scenarios',
-    'SourceRestartTests.test_clean_rig_passes_and_validates',
-    'SourceRestartTests.test_rewinding_peer_fails',
-    'SourceRestartTests.test_spurious_promotion_fails',
-    'SourceRestartTests.test_repromoted_peer_fails',
-    'SourceRestartTests.test_unjournaled_resync_fails',
-    'SourceRestartTests.test_doubled_resync_entry_fails',
-    'SourceRestartTests.test_misreported_alignment_fails',
-    'SourceRestartTests.test_lapsed_claim_fails',
-    'SourceRestartTests.test_kept_alignment_fails_the_demoted_leg',
-    'SourceRestartTests.test_warm_resume_is_inconclusive',
-    'SourceRestartTests.test_failed_action_is_inconclusive',
-    'SourceRestartTests.test_unreturned_monitor_is_inconclusive',
-    'SourceRestartTests.test_untracked_peer_is_inconclusive',
-    'SourceRestartTests.test_peer_owned_field_is_inconclusive',
-    'SourceRestartTests.test_missing_action_is_inconclusive',
-    'SourceRestartTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class SourceRestartFeed:

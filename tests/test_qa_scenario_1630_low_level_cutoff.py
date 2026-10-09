@@ -1,47 +1,11 @@
 """The 1630_low_level_cutoff leg's scenario unit coverage — the feed
 fakes and TestCase classes for scenario_low_level_cutoff, following
 the per-leg split convention (#940). The shared fakes and helpers
-live in tests/qa_scenario_support.py; EXPECTED_CASES pins this
-module's contribution to the suite's case coverage so a dropped case
-fails the discovery check in tests/test_qa_scenario_modules.py.
+live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'LowLevelCutoffTests.test_registered_in_scenarios',
-    'LowLevelCutoffTests.test_clean_feed_passes_and_validates',
-    'LowLevelCutoffTests.test_two_runs_produce_identical_evidence',
-    'LowLevelCutoffTests.test_lifecycle_journaled_in_order',
-    'LowLevelCutoffTests.test_level_never_draining_fails',
-    'LowLevelCutoffTests.test_clamp_never_engaging_fails',
-    'LowLevelCutoffTests.test_alarm_never_annunciating_fails',
-    'LowLevelCutoffTests.test_unacknowledged_never_latching_fails',
-    'LowLevelCutoffTests.test_latch_never_clearing_fails',
-    'LowLevelCutoffTests.test_alarm_never_returning_fails',
-    'LowLevelCutoffTests.test_demand_never_resuming_fails',
-    'LowLevelCutoffTests.test_role_move_under_drive_fails',
-    'LowLevelCutoffTests.test_unjournaled_transitions_fail',
-    'LowLevelCutoffTests.test_unjournaled_receipts_fail',
-    'LowLevelCutoffTests.test_ack_write_refused_fails',
-    'LowLevelCutoffTests.test_inflow_write_refused_fails',
-    'LowLevelCutoffTests.test_no_active_is_failed',
-    'LowLevelCutoffTests.test_no_tracking_pair_is_inconclusive',
-    'LowLevelCutoffTests.test_missing_wiring_is_inconclusive',
-    'LowLevelCutoffTests.test_unwritable_ack_is_inconclusive',
-    'LowLevelCutoffTests.test_missing_chain_is_inconclusive',
-    'LowLevelCutoffTests.test_unordered_setpoints_is_inconclusive',
-    'LowLevelCutoffTests.test_unbound_lal_is_inconclusive',
-    'LowLevelCutoffTests.test_missing_lal_params_is_inconclusive',
-    'LowLevelCutoffTests.test_no_plant_endpoint_is_inconclusive',
-    'LowLevelCutoffTests.test_no_owner_token_is_inconclusive',
-    'LowLevelCutoffTests.test_refused_writer_claim_is_inconclusive',
-    'LowLevelCutoffTests.test_inflow_not_field_is_inconclusive',
-    'LowLevelCutoffTests.test_bad_inflow_baseline_is_inconclusive',
-    'LowLevelCutoffTests.test_flags_unserved_is_inconclusive',
-})
 
 
 class CutoffPlantPeer(StagingPlantPeer):

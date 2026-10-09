@@ -2867,6 +2867,13 @@ impl<'d> Monitor<'d> {
         let mut terminal = false;
         let response = match (method, path) {
             (Method::Get, "/") | (Method::Get, "/index.html") => html(PAGE),
+            (Method::Get, "/plant-view.js") => static_asset(
+                include_str!("plant-view.js"),
+                "text/javascript; charset=utf-8",
+            ),
+            (Method::Get, "/plant-view.css") => {
+                static_asset(include_str!("plant-view.css"), "text/css; charset=utf-8")
+            }
             (Method::Get, "/signals") => json(200, &self.signals),
             // The read endpoints fetch the published copy — an `Arc`
             // clone or an owned stream — releasing the store's lock
@@ -5121,11 +5128,15 @@ fn read_command_submission(
 
 /// An HTML response with a `Content-Type: text/html` header.
 fn html(body: &'static str) -> Response<Cursor<Vec<u8>>> {
+    static_asset(body, "text/html; charset=utf-8")
+}
+
+/// A bundled presentation asset served independently of controller execution.
+fn static_asset(body: &'static str, content_type: &'static str) -> Response<Cursor<Vec<u8>>> {
     Response::from_data(body.as_bytes().to_vec())
         .with_status_code(200)
         .with_header(
-            Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
-                .expect("static header is valid"),
+            Header::from_bytes("Content-Type", content_type).expect("static header is valid"),
         )
 }
 
@@ -6201,6 +6212,8 @@ mod tests {
             SignalIndex {
                 points: Vec::new(),
                 components: Vec::new(),
+                equipment: Vec::new(),
+                views: Vec::new(),
             },
         )
         .unwrap();

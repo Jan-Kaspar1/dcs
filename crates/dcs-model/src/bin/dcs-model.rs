@@ -193,6 +193,8 @@ fn format_diff(diff: &ModelDiff) -> String {
         ("signals", &diff.signals),
         ("components", &diff.components),
         ("connections", &diff.connections),
+        ("equipment", &diff.equipment),
+        ("views", &diff.views),
     ] {
         if entries.is_empty() {
             continue;

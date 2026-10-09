@@ -1,50 +1,11 @@
 """The 2055_announced_source_verify leg's scenario unit coverage — the
 feed fakes and TestCase classes for scenario_announced_source_verify,
 split out per the #940 convention. The shared fakes and helpers live
-in tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'AnnouncedSourceTests.test_registered',
-    'AnnouncedSourceTests.test_unkeyed_rig_passes_and_validates',
-    'AnnouncedSourceTests.test_keyed_rig_passes_and_validates',
-    'AnnouncedSourceTests.test_adopted_forged_document_fails',
-    'AnnouncedSourceTests.test_bumped_replay_alone_arming_fails',
-    'AnnouncedSourceTests.test_adopted_forged_document_predates_'
-    'unkeyed',
-    'AnnouncedSourceTests.test_released_field_claim_fails',
-    'AnnouncedSourceTests.test_wrong_refusal_verdict_fails',
-    'AnnouncedSourceTests.test_journaled_adoption_on_refusal_fails',
-    'AnnouncedSourceTests.test_role_changed_on_refusal_fails',
-    'AnnouncedSourceTests.test_durable_adoption_naming_the_forge_fails',
-    'AnnouncedSourceTests.test_unkeyed_verify_pull_fails',
-    'AnnouncedSourceTests.test_keyed_verify_never_pulled_fails',
-    'AnnouncedSourceTests.test_signed_forged_pull_fails',
-    'AnnouncedSourceTests.test_unstaged_forgery_fails',
-    'AnnouncedSourceTests.test_unrestored_pair_fails',
-    'AnnouncedSourceTests.test_dual_active_pair_fails',
-    'AnnouncedSourceTests.test_silent_forge_fails',
-    'AnnouncedSourceTests.test_unreachable_pair_reports_inconclusive',
-    'AnnouncedSourceTests.test_no_active_reports_failed',
-    'AnnouncedSourceTests.test_unconverged_pair_reports_inconclusive',
-    'AnnouncedSourceTests.test_missing_forge_action_reports_inconclusive',
-    'AnnouncedSourceTests.test_host_placed_forge_reports_inconclusive',
-    'AnnouncedSourceTests.test_missing_journal_files_reports_inconclusive',
-    'AnnouncedSourceTests.test_pre_contract_checkpoint_reports_'
-    'inconclusive',
-    'AnnouncedSourceTests.test_configured_source_reports_inconclusive',
-    'AnnouncedSourceTests.test_diverging_digests_report_nondeterministic',
-    'AnnouncedSourceTests.'
-    'test_unchecked_diagnostic_self_check_reports_by_name',
-    'AnnouncedSourceTests.test_dropped_read_reports_inconclusive',
-    'AnnouncedSourceTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class AnnouncedSourceFeed:

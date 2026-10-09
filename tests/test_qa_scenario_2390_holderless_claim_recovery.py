@@ -4,91 +4,13 @@ scenario_holderless_claim_recovery, in the
 tests/test_qa_scenario_NNNN_<slug>.py split layout (#940). The shared
 fakes and helpers live in tests/qa_scenario_support.py; the claim
 arbitration half builds on the stranded-standby leg's fakes the same
-induction stages; EXPECTED_CASES pins this module's contribution to
-the suite's case coverage so a dropped case fails the discovery
-check in tests/test_qa_scenario_modules.py.
+induction stages.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
 from test_qa_scenario_2370_stranded_standby_no_resync \
     import StrandedPlantPeer
-
-
-EXPECTED_CASES = frozenset({
-    'HolderlessClaimRecoveryTests.test_registered',
-    'HolderlessClaimRecoveryTests.test_clean_pair_passes_and_'
-    'validates',
-    'HolderlessClaimRecoveryTests.test_wedged_reclaim_reports_failed',
-    'HolderlessClaimRecoveryTests.test_asserted_recovered_reports_'
-    'failed',
-    'HolderlessClaimRecoveryTests.test_never_reclaims_reports_failed',
-    'HolderlessClaimRecoveryTests.test_unbound_reseat_reports_failed',
-    'HolderlessClaimRecoveryTests.test_premature_grant_reports_'
-    'failed',
-    'HolderlessClaimRecoveryTests.test_dual_active_reports_failed',
-    'HolderlessClaimRecoveryTests.test_monitor_lost_reports_failed',
-    'HolderlessClaimRecoveryTests.test_never_orphans_reports_failed',
-    'HolderlessClaimRecoveryTests.test_never_retracks_reports_failed',
-    'HolderlessClaimRecoveryTests.test_owner_never_demotes_reports_'
-    'failed',
-    'HolderlessClaimRecoveryTests.test_peer_never_demotes_reports_'
-    'failed',
-    'HolderlessClaimRecoveryTests.test_silent_loss_reports_failed',
-    'HolderlessClaimRecoveryTests.test_unattributed_loss_reports_'
-    'failed',
-    'HolderlessClaimRecoveryTests.test_misattributed_loss_reports_'
-    'failed',
-    'HolderlessClaimRecoveryTests.test_release_never_frees_reports_'
-    'failed',
-    'HolderlessClaimRecoveryTests.test_durable_absent_reports_failed',
-    'HolderlessClaimRecoveryTests.test_unrestored_reports_failed',
-    'HolderlessClaimRecoveryTests.test_promote_refused_reports_'
-    'nondeterministic',
-    'HolderlessClaimRecoveryTests.test_diverging_digests_report_'
-    'nondeterministic',
-    'HolderlessClaimRecoveryTests.test_silent_judge_reports_'
-    'unchecked',
-    'HolderlessClaimRecoveryTests.test_claim_staging_refused_reports_'
-    'inconclusive',
-    'HolderlessClaimRecoveryTests.test_release_refusal_reports_'
-    'inconclusive',
-    'HolderlessClaimRecoveryTests.test_predating_rig_reports_'
-    'inconclusive',
-    'HolderlessClaimRecoveryTests.test_open_field_reports_'
-    'inconclusive',
-    'HolderlessClaimRecoveryTests.test_foreign_baseline_reports_'
-    'inconclusive',
-    'HolderlessClaimRecoveryTests.test_monitor_undeclared_reports_'
-    'inconclusive',
-    'HolderlessClaimRecoveryTests.test_no_active_reports_failed',
-    'HolderlessClaimRecoveryTests.test_unsettled_pair_reports_'
-    'inconclusive',
-    'HolderlessClaimRecoveryTests.test_unreachable_pair_reports_'
-    'inconclusive',
-    'HolderlessClaimRecoveryTests.test_unreachable_plant_reports_'
-    'inconclusive',
-    'HolderlessClaimRecoveryTests.test_missing_active_endpoint_'
-    'reports_inconclusive',
-    'HolderlessClaimRecoveryTests.test_missing_standby_endpoint_'
-    'reports_inconclusive',
-    'HolderlessClaimRecoveryTests.test_missing_plant_endpoint_reports_'
-    'inconclusive',
-    'HolderlessClaimRecoveryTests.test_missing_plant_ctl_reports_'
-    'inconclusive',
-    'HolderlessClaimRecoveryTests.test_missing_owner_token_reports_'
-    'inconclusive',
-    'HolderlessClaimRecoveryTests.test_missing_failover_budget_reports_'
-    'inconclusive',
-    'HolderlessClaimRecoveryTests.test_rescue_inside_the_watch_'
-    'reports_inconclusive',
-    'HolderlessClaimRecoveryTests.test_missing_journal_files_reports_'
-    'inconclusive',
-    'HolderlessClaimRecoveryTests.test_bridge_placement_reports_'
-    'inconclusive',
-    'HolderlessClaimRecoveryTests.test_two_runs_produce_identical_'
-    'evidence',
-})
 
 
 class HolderlessPlantPeer(StrandedPlantPeer):

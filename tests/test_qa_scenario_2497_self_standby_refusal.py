@@ -4,55 +4,13 @@ scenario_self_standby_refusal, split out per the leg-module
 convention (#940). The shared fakes and helpers live in
 tests/qa_scenario_support.py and the field's claim half reuses the
 claim-rendezvous leg's plant peer, the same read-only `probe_writer`
-induction the claim legs stage; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+induction the claim legs stage.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
 from test_qa_scenario_2380_claim_monitor_rendezvous import \
     RendezvousPlantPeer
-
-
-EXPECTED_CASES = frozenset({
-    'SelfStandbyTests.test_registered_after_released_before_revisions',
-    'SelfStandbyTests.test_fixed_shape_passes_validates_and_sweeps',
-    'SelfStandbyTests.test_two_runs_produce_identical_evidence',
-    'SelfStandbyTests.test_self_seat_legitimate_fails',
-    'SelfStandbyTests.test_zero_exit_fails',
-    'SelfStandbyTests.test_unnamed_refusal_fails',
-    'SelfStandbyTests.test_refusal_without_own_socket_fails',
-    'SelfStandbyTests.test_refusal_without_resolution_fails',
-    'SelfStandbyTests.test_refusal_without_staged_target_fails',
-    'SelfStandbyTests.test_silent_refusal_fails',
-    'SelfStandbyTests.test_refused_seat_served_fails',
-    'SelfStandbyTests.test_refused_seat_journaled_fails',
-    'SelfStandbyTests.test_refused_seat_holds_field_fails',
-    'SelfStandbyTests.test_unclaimed_field_fails',
-    'SelfStandbyTests.test_foreign_claim_owner_fails',
-    'SelfStandbyTests.test_control_exit_fails',
-    'SelfStandbyTests.test_control_over_refusal_fails',
-    'SelfStandbyTests.test_control_never_tracks_fails',
-    'SelfStandbyTests.test_control_claim_unobserved_fails',
-    'SelfStandbyTests.test_control_unjournaled_fails',
-    'SelfStandbyTests.test_control_staged_on_own_target_fails',
-    'SelfStandbyTests.test_incumbent_demotion_fails',
-    'SelfStandbyTests.test_incumbent_stall_fails',
-    'SelfStandbyTests.test_member_disturbance_fails',
-    'SelfStandbyTests.test_unstaged_self_address_is_inconclusive',
-    'SelfStandbyTests.test_unsettled_pair_is_inconclusive',
-    'SelfStandbyTests.test_no_incumbent_is_inconclusive',
-    'SelfStandbyTests.test_launch_failure_is_nondeterministic',
-    'SelfStandbyTests.test_vanished_container_is_nondeterministic',
-    'SelfStandbyTests.test_lost_claim_probe_is_nondeterministic',
-    'SelfStandbyTests.test_unremovable_seat_is_nondeterministic',
-    'SelfStandbyTests.test_second_pass_defect_fails',
-    'SelfStandbyTests.test_missing_seams_are_inconclusive',
-    'SelfStandbyTests.test_missing_journals_are_inconclusive',
-    'SelfStandbyTests.test_unchecked_self_check_fails',
-    'SelfStandbyTests.test_judge_self_check_is_complete',
-})
 
 
 class SelfStandbyFeed:

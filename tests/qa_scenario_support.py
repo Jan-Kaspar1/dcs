@@ -73,8 +73,7 @@ when the served sections omit the records.
 Split layout (#940): each leg of the scenario suite
 carries its own test module —
 tests/test_qa_scenario_NNNN_<slug>.py — holding its
-leg-private feed fakes and TestCase classes plus an
-EXPECTED_CASES pin of its case contribution. This
+leg-private feed fakes and TestCase classes. This
 module is the shared seam those modules bind through
 `from qa_scenario_support import *`: the monitor-feed
 and plant-peer fakes, the dcs-plant-ctl wire stubs, and

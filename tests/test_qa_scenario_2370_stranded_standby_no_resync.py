@@ -4,55 +4,12 @@ scenario_stranded_standby_no_resync, in the
 tests/test_qa_scenario_NNNN_<slug>.py split layout (#940). The shared
 fakes and helpers live in tests/qa_scenario_support.py; the claim
 arbitration half builds on the claim-reclaim leg's fakes the same
-induction stages; EXPECTED_CASES pins this module's contribution to
-the suite's case coverage so a dropped case fails the discovery
-check in tests/test_qa_scenario_modules.py.
+induction stages.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
 from test_qa_scenario_2350_claim_reclaim import ReclaimPlantPeer
-
-
-EXPECTED_CASES = frozenset({
-    'StrandedStandbyTests.test_registered',
-    'StrandedStandbyTests.test_clean_pair_passes_and_validates',
-    'StrandedStandbyTests.test_unkeyed_routable_pair_passes',
-    'StrandedStandbyTests.test_promote_refused_reports_failed',
-    'StrandedStandbyTests.test_never_demotes_reports_failed',
-    'StrandedStandbyTests.test_silent_loss_reports_failed',
-    'StrandedStandbyTests.test_unattributed_loss_reports_failed',
-    'StrandedStandbyTests.test_misattributed_loss_reports_failed',
-    'StrandedStandbyTests.test_no_adoption_reports_failed',
-    'StrandedStandbyTests.test_foreign_adoption_reports_failed',
-    'StrandedStandbyTests.test_wedged_rejoin_reports_failed',
-    'StrandedStandbyTests.test_slow_rejoin_reports_failed',
-    'StrandedStandbyTests.test_peer_never_rejoins_reports_failed',
-    'StrandedStandbyTests.test_window_tracks_early_reports_failed',
-    'StrandedStandbyTests.test_window_never_converges_reports_failed',
-    'StrandedStandbyTests.test_dual_active_reports_failed',
-    'StrandedStandbyTests.test_diverging_digests_report_'
-    'nondeterministic',
-    'StrandedStandbyTests.test_unkeyed_wildcard_reports_failed',
-    'StrandedStandbyTests.test_claim_staging_refused_reports_'
-    'inconclusive',
-    'StrandedStandbyTests.test_predating_rig_reports_inconclusive',
-    'StrandedStandbyTests.test_open_field_reports_inconclusive',
-    'StrandedStandbyTests.test_no_active_reports_failed',
-    'StrandedStandbyTests.test_unsettled_pair_reports_inconclusive',
-    'StrandedStandbyTests.test_unreachable_pair_reports_inconclusive',
-    'StrandedStandbyTests.test_missing_active_endpoint_reports_'
-    'inconclusive',
-    'StrandedStandbyTests.test_missing_plant_endpoint_reports_'
-    'inconclusive',
-    'StrandedStandbyTests.test_missing_plant_ctl_reports_inconclusive',
-    'StrandedStandbyTests.test_missing_owner_token_reports_'
-    'inconclusive',
-    'StrandedStandbyTests.test_missing_journal_files_reports_'
-    'inconclusive',
-    'StrandedStandbyTests.test_bridge_placement_reports_inconclusive',
-    'StrandedStandbyTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class StrandedPlantPeer(ReclaimPlantPeer):

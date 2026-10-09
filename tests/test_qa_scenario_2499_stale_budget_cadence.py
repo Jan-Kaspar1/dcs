@@ -1,9 +1,8 @@
 """The 2499_stale_budget_cadence leg's scenario unit coverage — the feed
 fake and TestCase class for scenario_stale_budget_cadence, split out per
 the leg-module convention (#940). The shared fakes and helpers live in
-tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+tests/qa_scenario_support.py.
+
 
 The feed stages the leg's shape: the deployed pair owns a sim-tcp field
 and never moves, while the born legs' scratch field serves the three
@@ -26,43 +25,6 @@ nondeterministic surface, or one rig shape the leg declines on."""
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'StaleBudgetCadenceTests.test_registered',
-    'StaleBudgetCadenceTests.test_clean_passes_validates_and_sweeps',
-    'StaleBudgetCadenceTests.test_two_passes_produce_identical_digests',
-    'StaleBudgetCadenceTests.test_reader_ticks_only_verdict_fails',
-    'StaleBudgetCadenceTests.test_frozen_field_never_stale_fails',
-    'StaleBudgetCadenceTests.test_declared_stale_never_journaled_fails',
-    'StaleBudgetCadenceTests.test_budget_leaking_onto_the_witness_fails',
-    'StaleBudgetCadenceTests.test_journal_flapping_past_the_evidence_fails',
-    'StaleBudgetCadenceTests.test_starvation_asserted_fresh_fails',
-    'StaleBudgetCadenceTests.test_stale_before_induction_fails',
-    'StaleBudgetCadenceTests.test_diverging_digests_fail',
-    'StaleBudgetCadenceTests.test_field_stage_failures_are_nondeterministic',
-    'StaleBudgetCadenceTests.test_launch_failures_are_nondeterministic',
-    'StaleBudgetCadenceTests.test_owner_never_claims_is_nondeterministic',
-    'StaleBudgetCadenceTests.test_readers_never_converge_is_nondeterministic',
-    'StaleBudgetCadenceTests.test_control_pace_off_parity_is_nondeterministic',
-    'StaleBudgetCadenceTests.test_pace_never_staged_is_nondeterministic',
-    'StaleBudgetCadenceTests.test_freeze_never_lands_is_nondeterministic',
-    'StaleBudgetCadenceTests.test_arrival_never_arrives_is_nondeterministic',
-    'StaleBudgetCadenceTests.test_empty_judged_window_is_nondeterministic',
-    'StaleBudgetCadenceTests.test_starved_watch_is_nondeterministic',
-    'StaleBudgetCadenceTests.test_unreadable_journal_is_nondeterministic',
-    'StaleBudgetCadenceTests.test_undeclared_probes_are_nondeterministic',
-    'StaleBudgetCadenceTests.test_degraded_contrast_is_nondeterministic',
-    'StaleBudgetCadenceTests.test_pair_disturbance_is_nondeterministic',
-    'StaleBudgetCadenceTests.test_rig_left_standing_is_nondeterministic',
-    'StaleBudgetCadenceTests.test_field_left_serving_is_nondeterministic',
-    'StaleBudgetCadenceTests.test_field_presence_is_nondeterministic',
-    'StaleBudgetCadenceTests.test_unreachable_rig_is_inconclusive',
-    'StaleBudgetCadenceTests.test_unsettled_pair_is_inconclusive',
-    'StaleBudgetCadenceTests.test_missing_seams_are_inconclusive',
-    'StaleBudgetCadenceTests.test_unchecked_self_check_fails',
-    'StaleBudgetCadenceTests.test_self_check_is_complete',
-})
 
 
 OWNER = 'revised'

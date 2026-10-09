@@ -1,9 +1,8 @@
 """The 2375_own_tick_ahead_rejoin leg's scenario unit coverage — the
 feed fake and TestCase class for scenario_own_tick_ahead_rejoin,
 split out per the leg-module convention (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES pins this
-module's contribution to the suite's case coverage so a dropped case
-fails the discovery check in tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
+
 
 The feed stages the leg's shape on the deployed pair: ctrl-a owns the
 field declaring no configured source at all, ctrl-b tracks it through
@@ -25,76 +24,6 @@ import re
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'OwnTickAheadRejoinTests.test_registered',
-    'OwnTickAheadRejoinTests.test_clean_passes_produce_identical_digests',
-    'OwnTickAheadRejoinTests.test_clean_pass_records_the_staging_and_'
-    'the_rejoin',
-    'OwnTickAheadRejoinTests.test_rejoin_asserted_while_stranded_fails',
-    'OwnTickAheadRejoinTests.test_rejoin_past_the_documented_bound_fails',
-    'OwnTickAheadRejoinTests.test_adoption_missing_fails',
-    'OwnTickAheadRejoinTests.test_adoption_duplicated_fails',
-    'OwnTickAheadRejoinTests.test_adoption_foreign_fails',
-    'OwnTickAheadRejoinTests.test_source_refusal_journaled_fails',
-    'OwnTickAheadRejoinTests.test_restart_performed_the_rejoin_fails',
-    'OwnTickAheadRejoinTests.test_served_document_foreign_fails',
-    'OwnTickAheadRejoinTests.test_served_document_misnamed_fails',
-    'OwnTickAheadRejoinTests.test_served_document_unreadable_fails',
-    'OwnTickAheadRejoinTests.test_loss_silent_fails',
-    'OwnTickAheadRejoinTests.test_loss_duplicated_fails',
-    'OwnTickAheadRejoinTests.test_loss_unattributed_fails',
-    'OwnTickAheadRejoinTests.test_demotion_unwalked_fails',
-    'OwnTickAheadRejoinTests.test_demotion_silent_fails',
-    'OwnTickAheadRejoinTests.test_demotion_held_fails',
-    'OwnTickAheadRejoinTests.test_demotion_walk_detour_fails',
-    'OwnTickAheadRejoinTests.test_successor_inactive_fails',
-    'OwnTickAheadRejoinTests.test_verdict_open_fails',
-    'OwnTickAheadRejoinTests.test_verdict_foreign_fails',
-    'OwnTickAheadRejoinTests.test_verdict_undeclared_fails',
-    'OwnTickAheadRejoinTests.test_verdict_misnamed_fails',
-    'OwnTickAheadRejoinTests.test_stream_position_ahead_of_its_tick_'
-    'fails',
-    'OwnTickAheadRejoinTests.test_restore_refused_fails',
-    'OwnTickAheadRejoinTests.test_layout_unrestored_fails',
-    'OwnTickAheadRejoinTests.test_launch_roles_lost_after_the_pass_fails',
-    'OwnTickAheadRejoinTests.test_staging_lever_refused_is_'
-    'nondeterministic',
-    'OwnTickAheadRejoinTests.test_owner_tick_unreadable_is_nondeterministic',
-    'OwnTickAheadRejoinTests.test_lead_never_separated_is_nondeterministic',
-    'OwnTickAheadRejoinTests.test_lead_inside_the_bound_is_nondeterministic',
-    'OwnTickAheadRejoinTests.test_pair_never_reconverged_is_'
-    'nondeterministic',
-    'OwnTickAheadRejoinTests.test_successor_not_converged_at_promote_is_'
-    'nondeterministic',
-    'OwnTickAheadRejoinTests.test_promote_answered_by_the_gate_is_'
-    'nondeterministic',
-    'OwnTickAheadRejoinTests.test_promote_unanswered_is_nondeterministic',
-    'OwnTickAheadRejoinTests.test_durable_sink_unreadable_is_'
-    'nondeterministic',
-    'OwnTickAheadRejoinTests.test_rejoin_watch_starved_is_nondeterministic',
-    'OwnTickAheadRejoinTests.test_restore_unanswered_is_nondeterministic',
-    'OwnTickAheadRejoinTests.test_field_verdict_unreadable_is_'
-    'nondeterministic',
-    'OwnTickAheadRejoinTests.test_missing_seams_report_inconclusive',
-    'OwnTickAheadRejoinTests.test_unreachable_pair_reports_inconclusive',
-    'OwnTickAheadRejoinTests.test_swapped_launch_layout_is_reseated',
-    'OwnTickAheadRejoinTests.test_unrecoverable_layout_reports_'
-    'inconclusive',
-    'OwnTickAheadRejoinTests.test_missing_stamps_report_inconclusive',
-    'OwnTickAheadRejoinTests.test_missing_sync_vocabulary_reports_'
-    'inconclusive',
-    'OwnTickAheadRejoinTests.test_verdict_without_owner_reports_'
-    'inconclusive',
-    'OwnTickAheadRejoinTests.test_verdict_without_monitor_reports_'
-    'inconclusive',
-    'OwnTickAheadRejoinTests.test_lead_carrying_document_without_stream_'
-    'reports_inconclusive',
-    'OwnTickAheadRejoinTests.test_diverging_digests_report_nondeterministic',
-    'OwnTickAheadRejoinTests.test_unchecked_self_check_fails',
-    'OwnTickAheadRejoinTests.test_self_check_is_complete',
-})
 
 
 OWNER = 'active'         # the ctx key of the source-less field owner

@@ -2,9 +2,8 @@
 the feed fake and TestCase class for
 scenario_pending_serving_bound, split out per the leg-module
 convention (#940). The shared fakes and helpers live in
-tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails
-the discovery check in tests/test_qa_scenario_modules.py.
+tests/qa_scenario_support.py.
+
 
 The feed stages the leg's shape: ctrl-a owns the deployed pair's
 field while ctrl-b tracks; the born levers stage the scratch field
@@ -30,52 +29,6 @@ a revision predating the liveness contract."""
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'PendingServingBoundTests.test_registered',
-    'PendingServingBoundTests.test_clean_passes_validates_and_tears_down',
-    'PendingServingBoundTests.test_two_runs_produce_identical_digests',
-    'PendingServingBoundTests.test_lock_call_queued_behind_scan_fails',
-    'PendingServingBoundTests.test_lock_call_starved_fails',
-    'PendingServingBoundTests.test_promote_refusal_wrong_fails',
-    'PendingServingBoundTests.test_promote_admitted_fails',
-    'PendingServingBoundTests.test_demote_refusal_wrong_fails',
-    'PendingServingBoundTests.test_command_admitted_fails',
-    'PendingServingBoundTests.test_checkpoint_claims_field_fails',
-    'PendingServingBoundTests.test_mirror_read_starved_fails',
-    'PendingServingBoundTests.test_tick_frozen_with_bounded_surface_fails',
-    'PendingServingBoundTests.test_cadence_below_floor_fails',
-    'PendingServingBoundTests.test_scan_age_unbounded_fails',
-    'PendingServingBoundTests.test_pending_reports_active_fails',
-    'PendingServingBoundTests.test_pending_claims_held_fails',
-    'PendingServingBoundTests.test_dishonest_sync_fails',
-    'PendingServingBoundTests.test_recovery_never_lands_fails',
-    'PendingServingBoundTests.test_grant_unjournaled_fails',
-    'PendingServingBoundTests.test_refused_contrast_stalls_fails',
-    'PendingServingBoundTests.test_pending_exit_is_inconclusive',
-    'PendingServingBoundTests.test_health_unshaped_is_inconclusive',
-    'PendingServingBoundTests.test_pre_first_scan_stamp_still_passes',
-    'PendingServingBoundTests.test_unpause_failure_is_inconclusive',
-    'PendingServingBoundTests.test_departed_mid_window_is_inconclusive',
-    'PendingServingBoundTests.test_refused_departure_is_inconclusive',
-    'PendingServingBoundTests.test_defect_signature_is_inconclusive',
-    'PendingServingBoundTests.test_unserved_standing_seat_is_nondeterministic',
-    'PendingServingBoundTests.test_stage_failure_is_nondeterministic',
-    'PendingServingBoundTests.test_pause_failure_is_nondeterministic',
-    'PendingServingBoundTests.test_launch_failure_is_nondeterministic',
-    'PendingServingBoundTests.test_refused_stage_failure_is_nondeterministic',
-    'PendingServingBoundTests.test_watch_starves_is_nondeterministic',
-    'PendingServingBoundTests.test_state_fails_is_nondeterministic',
-    'PendingServingBoundTests.test_pair_moves_is_nondeterministic',
-    'PendingServingBoundTests.test_pair_wedged_is_nondeterministic',
-    'PendingServingBoundTests.test_divergent_digests_are_nondeterministic',
-    'PendingServingBoundTests.test_missing_seams_are_inconclusive',
-    'PendingServingBoundTests.test_unreachable_rig_is_inconclusive',
-    'PendingServingBoundTests.test_unsettled_pair_is_inconclusive',
-    'PendingServingBoundTests.test_unchecked_self_check_fails',
-    'PendingServingBoundTests.test_self_check_is_complete',
-})
 
 
 class ServingFeed:

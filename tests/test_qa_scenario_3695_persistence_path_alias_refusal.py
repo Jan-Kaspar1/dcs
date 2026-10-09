@@ -2,41 +2,11 @@
 coverage — the feed fake, the stubbed doctored-launch lever, and the
 TestCase class for scenario_persistence_path_alias_refusal, per the
 module-per-leg test convention (#940). The shared fakes and helpers
-live in tests/qa_scenario_support.py; EXPECTED_CASES pins this
-module's contribution to the suite's case coverage so a dropped case
-fails the discovery check in tests/test_qa_scenario_modules.py.
+live in tests/qa_scenario_support.py.
 """
 import shutil
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'PersistenceAliasTests.test_registered_in_scenarios',
-    'PersistenceAliasTests.test_clean_rig_passes_and_validates',
-    'PersistenceAliasTests.test_two_passes_share_one_digest',
-    'PersistenceAliasTests.test_two_runs_produce_identical_records',
-    'PersistenceAliasTests.test_scenario_ctx_carries_the_lever',
-    'PersistenceAliasTests.test_lever_argv_carries_the_alias',
-    'PersistenceAliasTests.test_missing_lever_is_inconclusive',
-    'PersistenceAliasTests.test_unreachable_rig_is_inconclusive',
-    'PersistenceAliasTests.test_unsettled_pair_is_inconclusive',
-    'PersistenceAliasTests.test_no_active_is_failed',
-    'PersistenceAliasTests.test_predated_revision_is_inconclusive',
-    'PersistenceAliasTests.test_failed_lever_is_inconclusive',
-    'PersistenceAliasTests.test_state_history_accepted_fails',
-    'PersistenceAliasTests.test_state_journal_accepted_fails',
-    'PersistenceAliasTests.test_journal_history_accepted_fails',
-    'PersistenceAliasTests.test_unnamed_refusal_fails',
-    'PersistenceAliasTests.test_lock_refusal_named_by_others_fails',
-    'PersistenceAliasTests.test_unread_verdict_fails',
-    'PersistenceAliasTests.test_distinct_refused_fails',
-    'PersistenceAliasTests.test_distinct_unscanned_fails',
-    'PersistenceAliasTests.test_moved_pair_fails',
-    'PersistenceAliasTests.test_frozen_owner_fails',
-    'PersistenceAliasTests.test_swapped_launch_layout_passes',
-    'PersistenceAliasTests.test_silenced_judges_report_unchecked',
-})
 
 
 class AliasFeed:

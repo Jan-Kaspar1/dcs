@@ -1,33 +1,11 @@
 """The 3800_unavailable_fallback leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_unavailable_fallback, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'UnavailableFallbackTests.test_registered_in_scenarios',
-    'UnavailableFallbackTests.test_clean_feed_passes_and_validates',
-    'UnavailableFallbackTests.test_two_runs_produce_identical_evidence',
-    'UnavailableFallbackTests.test_silent_annunciation_fails',
-    'UnavailableFallbackTests.test_backup_only_fault_moving_the_selection_fails',
-    'UnavailableFallbackTests.test_backup_only_fault_journaling_a_failover_fails',
-    'UnavailableFallbackTests.test_annunciation_never_journaled_fails',
-    'UnavailableFallbackTests.test_all_bad_never_engaging_the_fallback_fails',
-    'UnavailableFallbackTests.test_held_output_under_all_bad_fails',
-    'UnavailableFallbackTests.test_controlling_on_untrusted_level_fails',
-    'UnavailableFallbackTests.test_recovered_primary_never_reselected_fails',
-    'UnavailableFallbackTests.test_annunciation_never_clearing_fails',
-    'UnavailableFallbackTests.test_no_plant_endpoint_is_inconclusive',
-    'UnavailableFallbackTests.test_unwired_annunciation_port_is_inconclusive',
-    'UnavailableFallbackTests.test_no_healthy_baseline_is_inconclusive',
-})
 
 
 class FallbackFeed:

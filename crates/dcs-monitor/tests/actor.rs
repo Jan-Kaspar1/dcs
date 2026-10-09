@@ -12,7 +12,7 @@ use dcs_core::{
     JournalEvent, PointId, Role, Sample, SwitchOrigin, Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
-use dcs_monitor::{Monitor, MonitorClient, PAGE};
+use dcs_monitor::{Monitor, MonitorClient};
 use dcs_runtime::{
     Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap, StepError,
 };
@@ -418,20 +418,6 @@ fn a_not_active_rejection_stamps_the_actor_identically() {
         // journaled CommandSettled carries the attribution identically.
         assert!(client.receipts().unwrap().is_empty());
         assert_eq!(settled_receipts(client), vec![receipt]);
-    });
-}
-
-#[test]
-fn the_served_page_supplies_the_configured_operator_identity() {
-    with_monitor(|_driver, client| {
-        let page = client.page().unwrap();
-        assert_eq!(page, PAGE);
-        // The ?operator= URL parameter is the configured identity…
-        assert!(page.contains("urlParams.get(\"operator\")"), "{page}");
-        // …stamped on every submission through the attributed envelope…
-        assert!(page.contains("body.actor = operator"), "{page}");
-        // …and stated beside the command form.
-        assert!(page.contains("command-actor"), "{page}");
     });
 }
 

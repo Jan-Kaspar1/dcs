@@ -1,23 +1,11 @@
 """The 3600_field_fault leg's scenario unit coverage — the feed fakes
 and TestCase classes for scenario_field_fault, split out of the
 test_qa_scenarios monolith (#940). The shared fakes and
-helpers live in tests/qa_scenario_support.py; EXPECTED_CASES
-pins this module's contribution to the suite's case
-coverage so a dropped case fails the discovery check in
-tests/test_qa_scenario_modules.py.
+helpers live in tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'FieldFaultTests.test_clean_feed_passes_and_validates',
-    'FieldFaultTests.test_quality_fault_kept_good_fails',
-    'FieldFaultTests.test_error_fault_hidden_from_io_health_fails',
-    'FieldFaultTests.test_role_change_under_field_fault_fails',
-    'FieldFaultTests.test_clear_without_recovery_fails',
-})
 
 
 class FieldFaultFeed:

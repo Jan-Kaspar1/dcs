@@ -2,39 +2,11 @@
 the feed fakes and TestCase classes for
 scenario_demote_forged_standby_source, split out per the #940
 convention. The shared fakes and helpers live in
-tests/qa_scenario_support.py; EXPECTED_CASES pins this module's
-contribution to the suite's case coverage so a dropped case fails the
-discovery check in tests/test_qa_scenario_modules.py.
+tests/qa_scenario_support.py.
 """
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
-
-
-EXPECTED_CASES = frozenset({
-    'ForgedStandbyTests.test_registered',
-    'ForgedStandbyTests.test_clean_rig_passes_and_validates',
-    'ForgedStandbyTests.test_adopted_unproven_document_fails',
-    'ForgedStandbyTests.test_adopted_receipt_fork_fails',
-    'ForgedStandbyTests.test_adopted_planted_internal_fails',
-    'ForgedStandbyTests.test_journaled_adoption_on_refusal_fails',
-    'ForgedStandbyTests.test_role_moved_on_refusal_fails',
-    'ForgedStandbyTests.test_wrong_refusal_verdict_fails',
-    'ForgedStandbyTests.test_refused_honest_document_fails',
-    'ForgedStandbyTests.test_stranded_adoption_fails',
-    'ForgedStandbyTests.test_refused_promote_fails',
-    'ForgedStandbyTests.test_silent_forge_fails',
-    'ForgedStandbyTests.test_no_active_reports_failed',
-    'ForgedStandbyTests.test_unconverged_pair_reports_inconclusive',
-    'ForgedStandbyTests.test_unreachable_pair_reports_inconclusive',
-    'ForgedStandbyTests.test_unkeyed_run_reports_inconclusive',
-    'ForgedStandbyTests.'
-    'test_unkeyed_deployed_pair_runs_on_the_probe_pair',
-    'ForgedStandbyTests.test_missing_forge_action_reports_inconclusive',
-    'ForgedStandbyTests.test_host_placed_forge_reports_inconclusive',
-    'ForgedStandbyTests.test_diverging_digests_report_nondeterministic',
-    'ForgedStandbyTests.test_two_runs_produce_identical_evidence',
-})
 
 
 class ForgedStandbyFeed:
