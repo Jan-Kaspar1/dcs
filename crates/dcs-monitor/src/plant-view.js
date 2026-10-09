@@ -75,6 +75,7 @@
     roots.canvas.setAttribute("role", "group");
     roots.canvas.setAttribute("aria-label", "Plant schematic; select equipment to open its controls");
     window.addEventListener("resize", updateViewport);
+    if (window.ResizeObserver) new window.ResizeObserver(updateViewport).observe(roots.canvas.parentElement);
     return true;
   }
   function renderNavigation() {
@@ -88,7 +89,7 @@
         "aria-current": view.id === state.view ? "page" : "false", "data-workspace": "plant" });
       button.style.setProperty("--area-depth", String(depth));
       button.append(element("span", { class: "plant-area-name" }, view.label));
-      button.append(element("span", { class: "plant-area-count", "aria-label": "symbols" }, String(view.nodes.length)));
+      button.append(element("span", { class: "plant-area-count" }, view.nodes.length + " symbols"));
       button.addEventListener("click", () => selectArea(view.id));
       nav.append(button);
       state.views.filter(child => child.parent === view.id).forEach(child => visit(child, depth + 1));
@@ -117,11 +118,11 @@
       group.append(svg("path", { d: "M " + x + " " + (y - 23) + " V " + (y - 35) + " M " + (x - 12) + " " + (y - 35) + " H " + (x + 12), class: "plant-symbol-line" }));
     } else if (node.symbol === "tank") {
       group.append(svg("path", { d: "M 18 20 L 18 110 Q " + x + " 130 " + (width - 18) + " 110 L " + (width - 18) + " 20 M 18 20 Q " + x + " 0 " + (width - 18) + " 20 M 18 20 Q " + x + " 40 " + (width - 18) + " 20", class: "plant-symbol-body plant-tank" }));
-    } else if (node.symbol === "measurement") group.append(svg("rect", { x: 6, y: 4, width: width - 12, height: 62, rx: 2, class: "plant-measurement-body" }));
-    const labelY = node.symbol === "label" ? 26 : node.symbol === "tank" ? 143 : node.symbol === "measurement" ? 25 : 91;
+    } else if (node.symbol === "measurement") group.append(svg("path", { d: "M 30 66 H " + (width - 30), class: "plant-measurement-body" }));
+    const labelY = node.symbol === "label" ? 26 : node.symbol === "tank" ? 143 : node.symbol === "measurement" ? 20 : 91;
     group.append(svg("text", { x, y: labelY, "text-anchor": "middle", class: "plant-label" }, node.label));
     if (node.symbol !== "label") {
-      group.append(svg("text", { x, y: node.symbol === "tank" ? 162 : node.symbol === "measurement" ? 50 : 111,
+      group.append(svg("text", { x, y: node.symbol === "tank" ? 162 : node.symbol === "measurement" ? 52 : 111,
         "text-anchor": "middle", class: node.symbol === "measurement" ? "plant-value" : "plant-status" }, ""));
       group.append(svg("text", { x, y: node.symbol === "measurement" ? 83 : node.symbol === "tank" ? 183 : 129,
         "text-anchor": "middle", class: "plant-tag" }, ""));
@@ -175,15 +176,26 @@
       canvas.style.minWidth = bounds.width + "px";
       canvas.style.minHeight = bounds.height + "px";
     } else {
-      canvas.setAttribute("viewBox", "0 0 " + WIDTH + " " + HEIGHT);
       canvas.style.removeProperty("min-width");
       canvas.style.removeProperty("min-height");
+      if (bounds) {
+        // Crop unused drawing margins while keeping library glyphs at most
+        // their authored size. A narrower workspace pans rather than making
+        // equipment labels illegible when its faceplate opens.
+        const width = Math.max(bounds.width, canvas.clientWidth || WIDTH);
+        const height = Math.max(bounds.height, canvas.clientHeight || HEIGHT);
+        canvas.setAttribute("viewBox", [bounds.x - (width - bounds.width) / 2,
+          bounds.y - (height - bounds.height) / 2, width, height].join(" "));
+        canvas.style.minWidth = bounds.width + "px";
+        canvas.style.minHeight = bounds.height + "px";
+      } else canvas.setAttribute("viewBox", "0 0 " + WIDTH + " " + HEIGHT);
     }
   }
   function renderCanvas() {
     const view = currentView(), canvas = state.roots.canvas;
     if (!view) return;
     state.roots.title.textContent = view.label;
+    if (document.body.classList.contains("workspace-plant")) document.getElementById("plant-location").textContent = view.label;
     canvas.replaceChildren(); state.elements.clear();
     const defs = svg("defs"); canvas.append(defs);
     const nodes = new Map(view.nodes.filter(node => SIZES[node.symbol]).map(node => [node.id, node]));
@@ -201,17 +213,17 @@
         "data-node": node.id, role: interactive ? "button" : "img", "aria-label": node.label });
       if (interactive) group.setAttribute("tabindex", "0");
       group.append(svg("title", {}, node.label));
-      group.append(svg("rect", { width, height, rx: 3, class: "plant-node-hit" }));
+      group.append(svg("rect", { width, height, rx: 8, class: "plant-node-hit" }));
       const clipId = "plant-clip-" + state.elements.size;
       const clip = svg("clipPath", { id: clipId }); clip.append(svg("rect", { width, height })); defs.append(clip);
       const drawing = svg("g", { "clip-path": "url(#" + clipId + ")" }); drawSymbol(node, drawing); group.append(drawing);
       if (interactive) {
-        const indicator = svg("g", { transform: "translate(" + (width - 58) + " 2)", class: "plant-alarm-indicator", hidden: "" });
+        const indicator = svg("g", { transform: "translate(" + (width - 46) + " 2)", class: "plant-alarm-indicator", hidden: "" });
         indicator.append(svg("title", {}));
-        indicator.append(svg("rect", { x: 0, y: 0, width: 56, height: 34, rx: 3, class: "plant-alarm-badge" }));
+        indicator.append(svg("rect", { x: 0, y: 0, width: 44, height: 34, rx: 5, class: "plant-alarm-badge" }));
         indicator.append(svg("path", { class: "plant-alarm-priority-mark", "aria-hidden": "true" }));
-        indicator.append(svg("text", { x: 34, y: 14, "text-anchor": "middle", class: "plant-alarm-badge-label" }));
-        indicator.append(svg("text", { x: 28, y: 28, "text-anchor": "middle", class: "plant-alarm-badge-priority" }));
+        indicator.append(svg("text", { x: 28, y: 14, "text-anchor": "middle", class: "plant-alarm-badge-label" }));
+        indicator.append(svg("text", { x: 22, y: 28, "text-anchor": "middle", class: "plant-alarm-badge-priority" }));
         group.append(indicator);
       }
       if (interactive) {
@@ -235,7 +247,6 @@
     state.elements.forEach((element, id) => element.classList.toggle("is-selected", id === node.id));
     if (typeof state.context.selectEquipment === "function") state.context.selectEquipment(selection);
   }
-  function sample(point) { return (state.model.telemetry.get(point) || {}).sample || null; }
   function value(reading) {
     if (!reading || !reading.value) return null;
     const entries = Object.entries(reading.value); return entries.length ? entries[0][1] : null;
@@ -248,27 +259,29 @@
     const entry = Object.entries(reading.quality || {})[0];
     return entry ? entry[0] + " · " + String(entry[1]) : "Unknown quality";
   }
-  function descriptorsFor(node) {
+  function descriptorsFor(node, model = state.model) {
     const binding = node.binding;
     if (!binding) return [];
-    const ids = binding.equipment != null ? (state.model.equipment.get(binding.equipment) || {}).components || []
+    const ids = binding.equipment != null ? (model.equipment.get(binding.equipment) || {}).components || []
       : binding.component != null ? [binding.component] : [];
-    return ids.map(id => state.model.components.get(id)).filter(Boolean)
-      .map(component => state.model.descriptors.get(component.name)).filter(Boolean);
+    return ids.map(id => model.components.get(id)).filter(Boolean)
+      .map(component => model.descriptors.get(component.name)).filter(Boolean);
   }
-  function liveState(node) {
+  function liveState(node, model = state.model, context = state.context) {
+    const sample = point => (model.telemetry.get(point) || {}).sample || null;
     const binding = node.binding;
     if (!binding) return { text: "", tag: "", running: false, fault: false, degraded: false };
-    if (state.context.stale) return { text: "Data stale", tag: "Offline", description: "Connection lost; current data is stale",
+    if (context.stale) return { text: "Data stale", tag: "Offline", description: "Connection lost; current data is stale",
       running: false, fault: false, degraded: true };
     if (binding.point != null) {
-      const reading = sample(binding.point), meta = state.model.points.get(binding.point);
+      const reading = sample(binding.point), meta = model.points.get(binding.point);
       const current = value(reading);
       const text = typeof current === "number" && Number.isFinite(current)
-        ? current.toLocaleString(undefined, { maximumFractionDigits: 3 }) + (meta && meta.unit ? " " + meta.unit : "") : "—";
-      return { text, tag: good(reading) ? "" : quality(reading), running: false, fault: false, degraded: !good(reading) };
+        ? current.toLocaleString(undefined, { maximumFractionDigits: 3 }) : "—";
+      const unit = text !== "—" && meta ? meta.unit || "" : "";
+      return { text, unit, tag: good(reading) ? "" : quality(reading), running: false, fault: false, degraded: !good(reading) };
     }
-    const descriptors = descriptorsFor(node), important = [];
+    const descriptors = descriptorsFor(node, model), important = [];
     const actuators = descriptors.filter(descriptor => descriptor.kind === "motor" || /valve/.test(descriptor.kind));
     let running = null, command = null, fault = false, tripped = false, position = null, positionUnit = "";
     descriptors.forEach(descriptor => (descriptor.ports || []).forEach(port => {
@@ -278,7 +291,7 @@
       if (actuator && port.name === "out" && typeof current === "boolean") command = good(reading) ? current : null;
       if (actuator && ["position", "fb"].includes(port.name) && typeof current === "number") {
         position = good(reading) ? current : null;
-        positionUnit = (state.model.points.get(port.point) || {}).unit || "";
+        positionUnit = (model.points.get(port.point) || {}).unit || "";
       }
       if (port.name === "fault" || port.name === "discrepancy") fault = fault || current === true;
       if (port.name === "tripped" && port.direction === "out") { tripped = tripped || current === true; important.push(reading); }
@@ -293,7 +306,7 @@
     }
     let tag = degraded && (fault || tripped) ? "Data uncertain" : "";
     if (binding.equipment != null) {
-      const equipment = state.model.equipment.get(binding.equipment);
+      const equipment = model.equipment.get(binding.equipment);
       const mode = equipment && (equipment.controls || []).find(control => /mode/i.test(control.label || ""));
       if (mode) {
         const reading = sample(mode.point);
@@ -401,10 +414,13 @@
       element.classList.toggle("is-unbound", !node.binding);
       element.classList.toggle("is-selected", state.selected === node.id);
       const status = element.querySelector(".plant-status, .plant-value"), tag = element.querySelector(".plant-tag");
-      if (status) status.textContent = live.text;
+      if (status) {
+        status.textContent = live.text;
+        if (live.unit) status.append(svg("tspan", { class: "plant-unit", dx: 5 }, live.unit));
+      }
       if (tag) tag.textContent = live.tag;
       const alarmDescription = updateAlarmIndicator(node, element);
-      const description = node.label + (live.description || live.text ? " · " + (live.description || live.text) : "") + (live.tag ? " · " + live.tag : "")
+      const description = node.label + (live.description || live.text ? " · " + (live.description || live.text) : "") + (live.unit ? " " + live.unit : "") + (live.tag ? " · " + live.tag : "")
         + (alarmDescription ? " · " + alarmDescription : "");
       element.setAttribute("aria-label", description);
       element.querySelector("title").textContent = description;
@@ -421,5 +437,9 @@
       state.selected = null; renderNavigation(); renderCanvas();
     } else updateLive();
   }
-  window.DcsPlantViews = { update, selectArea, selectView: selectArea };
+  window.DcsPlantViews = { update, selectArea, selectView: selectArea,
+    equipmentState(context, id) {
+      return liveState({ binding: { equipment: id } }, modelMap(context), context);
+    }
+  };
 })();

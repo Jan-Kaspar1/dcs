@@ -79,7 +79,14 @@ python3 scripts/pump_demo.py --monitor http://192.168.178.107:9080 fault p101
 
 The steps below use the default local launch and helper addresses.
 
-The compact operator layout follows the documented
+The operator workspace uses a modern light presentation: white process and
+equipment surfaces, a quiet navigation column, compact alarm cards, and grouped
+command choices. Measurements use aligned readouts with smaller units. The
+schematic crops unused margins and pans when needed to keep equipment labels
+readable, including when the drawer narrows the desktop workspace. The
+equipment drawer leads with actual feedback state, then shows requested controls
+and diagnostics; command settlement remains separate from equipment completion.
+The layout follows the documented
 [HMI presentation policy](research/operator-hmi.md): neutral normal equipment,
 priority-coded alarm badges, and details on selection. Alarm descriptions come
 from the model's signal metadata; signal identities remain available in alarm

@@ -2666,7 +2666,7 @@
       "name": "p101-fault-alarm",
       "source": 1073,
       "unit": "",
-      "description": "Standing alarm state — process truth under every managed flag",
+      "description": "Feedback mismatch",
       "group": "pump-p101"
     },
     {
@@ -2714,7 +2714,7 @@
       "name": "p101-thermal-alarm",
       "source": 1083,
       "unit": "",
-      "description": "Standing alarm state — process truth under every managed flag",
+      "description": "Thermal trip",
       "group": "pump-p101"
     },
     {
@@ -2762,7 +2762,7 @@
       "name": "p101-moisture-alarm",
       "source": 1093,
       "unit": "",
-      "description": "Standing alarm state — process truth under every managed flag",
+      "description": "Moisture detected",
       "group": "pump-p101"
     },
     {
@@ -3098,7 +3098,7 @@
       "name": "p102-fault-alarm",
       "source": 1103,
       "unit": "",
-      "description": "Standing alarm state — process truth under every managed flag",
+      "description": "Feedback mismatch",
       "group": "pump-p102"
     },
     {
@@ -3146,7 +3146,7 @@
       "name": "p102-thermal-alarm",
       "source": 1113,
       "unit": "",
-      "description": "Standing alarm state — process truth under every managed flag",
+      "description": "Thermal trip",
       "group": "pump-p102"
     },
     {
@@ -3194,7 +3194,7 @@
       "name": "p102-moisture-alarm",
       "source": 1123,
       "unit": "",
-      "description": "Standing alarm state — process truth under every managed flag",
+      "description": "Moisture detected",
       "group": "pump-p102"
     },
     {

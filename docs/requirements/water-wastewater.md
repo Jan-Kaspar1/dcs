@@ -6,6 +6,8 @@ Station operating-policy evidence and open assumptions are recorded in `docs/res
 
 ## Accepted foundation requirements
 
+The [training-plant research](../research/training-plants.md), checked 2026-10-09, links vendor curricula, university process benchmarks, a physical water-treatment testbed, and owner operating guidance to the code-configured equipment/control/UI goal. Its proposed next slice deepens the existing station's `WW-OPS-001`–`003` presentation and demonstrates `WW-FND-001`, `WW-FND-003`–`004`, and `WW-ENG-003` through reusable elements and repeatable simulated scenarios. It adds evidence and planning input without changing requirement statuses, closing customer assumptions, or promoting candidate `WW-LCM-002` through its deployment-workflow proposal.
+
 ### WW-FND-001 — One plant contract
 
 - **Status:** implemented — the checked-in reference station (`crates/dcs-demo/fixtures/pump_station.json`, emitted by `dcs-build`'s `pumping_station` composition under #220, and the consumer-owned `reference-plant/model/plant.json` under #351) validates, lints, assembles through `dcs-controller --check`, and runs its scripted scenario in the consumer's own clean CI, while the served signal index, descriptors, and block-interface registry drive the generic monitoring surface with no second hand-maintained UI configuration (#366, #379, #384, #486).

@@ -124,32 +124,33 @@
 </head>
 <body class="workspace-plant">
 <header id="plant-header">
-  <a class="plant-brand" href="#plant" aria-label="Plant overview">DCS</a>
-  <div class="plant-header-title"><h1>Operations</h1></div>
+  <a class="plant-brand" href="#plant" aria-label="Plant overview"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17V7h6v10zm10 0V7h6v10M10 12h4"/></svg><span>DCS<small>Operations</small></span></a>
+  <div class="plant-header-title"><span class="plant-header-label">Workspace</span><h1 id="plant-location">Plant overview</h1></div>
   <p id="status">Connecting…</p>
   <p id="feed-state" hidden></p>
   <div id="plant-alarm-strip" aria-live="polite"><span>Waiting for alarm state…</span></div>
 </header>
 <aside id="plant-sidebar" aria-label="Plant navigation">
-  <div class="plant-sidebar-heading">PLANT</div>
+  <div class="plant-sidebar-heading">Plant areas</div>
   <nav id="plant-area-list" aria-label="Plant areas"></nav>
-  <div class="plant-sidebar-heading">OPERATIONS</div>
-  <button type="button" class="plant-nav-button" data-workspace="plant">Schematic</button>
-  <button type="button" class="plant-nav-button" data-workspace="alarms">Alarms</button>
-  <div class="plant-sidebar-footer"><span id="plant-connection-state">Connecting</span></div>
+  <div class="plant-sidebar-heading">Workspace</div>
+  <button type="button" class="plant-nav-button" data-workspace="plant"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2 4h6v5H2zm10 7h6v5h-6M5 9v5h7M8 6h7v5"/></svg><span>Schematic</span></button>
+  <button type="button" class="plant-nav-button" data-workspace="alarms"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 13h12l-2-3V7a4 4 0 0 0-8 0v3zm4 3h4"/></svg><span>Alarms</span></button>
+  <div class="plant-sidebar-footer"><span class="plant-sidebar-heading">Field connection</span><span id="plant-connection-state">Connecting</span></div>
 </aside>
 <main id="plant-content">
   <section id="plant-workspace">
-    <div class="plant-view-heading"><h2 id="plant-view-title">Plant overview</h2></div>
+    <div class="plant-view-heading"><div><p class="plant-eyebrow">Process view</p><h2 id="plant-view-title">Plant overview</h2></div><span class="plant-view-hint">Select equipment to operate</span></div>
     <p id="plant-view-note"></p>
     <div class="plant-canvas-wrap"><svg id="plant-canvas" viewBox="0 0 1200 760" role="group" aria-label="Live plant schematic"></svg></div>
+    <div class="plant-canvas-footer" aria-label="Equipment state legend"><span><i class="legend-running" aria-hidden="true"></i>Running</span><span><i class="legend-stopped" aria-hidden="true"></i>Stopped</span><span><i class="legend-uncertain" aria-hidden="true"></i>Data uncertain</span><span class="plant-canvas-caption">Live equipment feedback</span></div>
   </section>
   <section id="alarm-workspace" hidden><section id="alarm-pane" hidden>
 <h2>Alarm management</h2>
 <p id="alarm-summary"></p>
 <p id="alarm-command-status" role="status" aria-live="polite"></p>
 <section id="alarm-selection" hidden aria-label="Selected alarm"></section>
-<p><label>state
+<p class="alarm-filter-row"><label>Show
   <select id="alarm-filter">
     <option value="all">all</option>
     <option value="active">active</option>
@@ -277,11 +278,11 @@ own surface: the HMI alarm path is never presented as the safeguard.</p>
 </section>
 </main>
 <section id="equipment" hidden>
-<h2><span id="equipment-name"></span></h2>
-<p class="equipment-nav"><button type="button" data-workspace="alarms">Alarm list</button>
-<button type="button" id="equipment-close">close</button></p>
+<div class="equipment-heading"><div><p class="plant-eyebrow">Equipment</p><h2><span id="equipment-name"></span></h2></div><button type="button" id="equipment-close" aria-label="Close equipment controls"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button></div>
+<p class="equipment-nav"><span>Operation &amp; diagnostics</span><button type="button" data-workspace="alarms">View alarms <span aria-hidden="true">↗</span></button></p>
 <p id="equipment-pair" class="equipment-line"></p>
 <p id="equipment-io" class="equipment-line"></p>
+<div id="equipment-state" hidden></div>
 <div id="equipment-faceplate"></div>
 <div id="equipment-rationalization" hidden></div>
 <details class="equipment-observation"><summary>Measurements and signals</summary>
@@ -3587,6 +3588,8 @@ function setPlantWorkspace(mode) {
   if (!["plant", "alarms", "engineering"].includes(mode)) return;
   document.body.classList.remove("workspace-plant", "workspace-alarms", "workspace-engineering");
   document.body.classList.add("workspace-" + mode);
+  document.getElementById("plant-location").textContent = mode === "plant" ?
+    document.getElementById("plant-view-title").textContent : mode === "alarms" ? "Alarm management" : "Engineering";
   if (mode === "alarms") selectEquipment(null);
   for (const name of ["plant", "alarm", "engineering"]) {
     document.getElementById(name + "-workspace").hidden =
@@ -3612,14 +3615,16 @@ function renderPlantWorkspace() {
     });
   }
   const io = ioHealthSummary(snapshot.io_health);
-  document.getElementById("plant-connection-state").textContent = stale ? "Connection stale" : io.text;
+  const connection = document.getElementById("plant-connection-state");
+  connection.textContent = stale ? "Connection stale" : io.text;
+  connection.classList.toggle("is-bad", stale || io.bad);
   const unacknowledged = alarms.filter(row => row.unacknowledged).sort(compareAlarmPriority);
   const active = alarms.filter(row => row.active).length;
   const strip = document.getElementById("plant-alarm-strip");
   const count = "<button type=\"button\" class=\"plant-alarm-count" + (unacknowledged.length ? " is-alarm" : "") +
     "\" data-workspace=\"alarms\" aria-label=\"Alarm management: " + unacknowledged.length +
-    " unacknowledged, " + active + " active\">" + unacknowledged.length + " unack<br><small>" +
-    active + " active</small></button>";
+    " unacknowledged, " + active + " active\"><strong>" + unacknowledged.length + " unacknowledged</strong><small>" +
+    active + " active · Manage alarms</small></button>";
   const limit = Math.max(2, Math.min(4, ALARM_PRESENTATION.maxUnacknowledged));
   const cards = unacknowledged.slice(0, limit).map(row => {
     const owner = declaredEquipment().find(item => equipmentMembers(item).some(member => member.name === row.name));
@@ -3630,7 +3635,7 @@ function renderPlantWorkspace() {
       (alarmSelection === row.name ? " is-selected" : "") + "\" data-manage-alarm=\"" + esc(row.name) + "\" " +
       "title=\"Open alarm management: " + esc(row.label) + " · " + esc(portMeta(row.port)?.name || row.name) + "\">" + alarmPriorityBadge(row.priority) +
       "<span class=\"plant-alarm-copy\"><span class=\"plant-alarm-title\">" +
-      (owner ? esc(owner.label) + " · " : "") + esc(row.label) + "</span>" +
+      (owner ? "<span class=\"plant-alarm-owner\">" + esc(owner.label) + "</span>" : "") + esc(row.label) + "</span>" +
       "<span class=\"plant-alarm-state\">" + (stale ? "Last known · stale" :
         row.degraded ? "Unack · data degraded" : row.active ? "Active · unack" : "Returned · unack") +
       (managed.length ? " · " + esc(managed.map(name => MANAGED_LABELS[name]).join(" · ")) : "") +
@@ -3692,7 +3697,7 @@ function equipmentControls(equipment, telemetry, forced, members) {
         (known ? String(sample.value.bool === level) : "mixed") + "\" title=\"" +
         esc(control.label + ": " + current + " · " + meta.name) + "\">" + esc(label) + "</button>";
     }).join(" ");
-    return caption + reason + buttons + forcedBadge(control.point, forced) + "</div>";
+    return caption + reason + "<div class=\"equipment-command-options\">" + buttons + "</div>" + forcedBadge(control.point, forced) + "</div>";
   }).join("");
   const alarms = members.filter(descriptor => descriptor.ports.some(port =>
     port.name === "alarm" && port.direction === "out" && port.kind === "bool")).filter(descriptor => {
@@ -3750,6 +3755,15 @@ function renderEquipment(snapshot, telemetry, forced) {
   const captured = captureEdits("#equipment-faceplate");
   pane.hidden = false;
   document.getElementById("equipment-name").textContent = equipment ? equipment.label : descriptor.label;
+  const equipmentState = document.getElementById("equipment-state");
+  equipmentState.hidden = !equipment || !window.DcsPlantViews;
+  if (!equipmentState.hidden) {
+    const live = window.DcsPlantViews.equipmentState({ index, snapshot, telemetry,
+      descriptors: snapshot.descriptors || [], stale: feed.stale !== null }, equipment.id);
+    equipmentState.className = live.fault ? "is-fault" : live.degraded ? "is-degraded" : "";
+    equipmentState.innerHTML = "<span class=\"plant-eyebrow\">Actual equipment state</span><strong>" +
+      esc(live.text) + "</strong>" + (live.tag ? "<span class=\"equipment-state-mode\">" + esc(live.tag) + "</span>" : "");
+  }
   // The pair-health line — the pair section's own verdict, so the
   // navigation surface carries the same redundancy reading.
   const pairLine = document.getElementById("equipment-pair");
@@ -3773,8 +3787,8 @@ function renderEquipment(snapshot, telemetry, forced) {
   const parameters = new Map(
     (snapshot.parameters || []).map(p => [p.name, p.values]));
   const surface = document.getElementById("equipment-faceplate");
-  const markup = equipment ? equipmentFeedback(equipment, telemetry, members) +
-    equipmentControls(equipment, telemetry, forced, members) :
+  const markup = equipment ? equipmentControls(equipment, telemetry, forced, members) +
+    equipmentFeedback(equipment, telemetry, members) :
     faceplateMarkup(descriptor, diagnostics.get(descriptor.name), telemetry, forced, parameters);
   // Keep operator buttons in place between actual state changes. A poll must
   // not replace a button under a pointer or repeatedly discard keyboard focus.
@@ -4926,7 +4940,7 @@ async function init() {
       const point = Number(equipmentWrite.dataset.point);
       const meta = metaByPoint.get(point);
       if (!meta || !meta.writable || meta.direction !== "in" || meta.value_type !== "bool") return;
-      const reasonInput = equipmentWrite.parentElement.querySelector(".equipment-reason");
+      const reasonInput = equipmentWrite.closest(".role").querySelector(".equipment-reason");
       const reason = reasonInput ? reasonInput.value.trim() : "";
       if (meta.requires_reason && reason === "") {
         document.getElementById("receipt").textContent = "enter a reason for " + meta.name;

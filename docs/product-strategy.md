@@ -28,6 +28,8 @@ Research may prepare a later stage while the active stage is being built. Implem
 - A reusable library item is complete only when it meets the contract in the Library completeness section below; control behavior and operator experience ship as one verified slice.
 - Alarm management is foundation work for water and wastewater. An alarm is actionable operator guidance with priority, state, context, history, and a defined response; it is not only a Boolean flag. Alarm handling does not replace an independent automatic protection function where hazard analysis requires one.
 - Representative applications validate shared contracts before the library grows broadly.
+- Plant engineering, including equipment composition, I/O bindings, site policy, alarms, and operator layout, is expressed in typed code in the customer-owned repository. The operator UI supports declared operation and tuning; an engineering UI is outside this direction.
+- Standard control elements and their operator presentation are completed together. Use familiar industrial behavior as documented design and test input, with original DCS visuals and explicit DCS interfaces. The [training-plant research](research/training-plants.md) records the 2026-10-09 user brief and the proposed connected station slice; consolidate existing water-library coverage before expanding the catalogue.
 - Research supplies evidence and alternatives. Architecture decisions define this product's semantics; vendor behavior is inspiration rather than a compatibility target.
 - Customer evidence outranks vendor feature breadth. Record assumptions that still need an operator, integrator, or plant owner to validate.
 
