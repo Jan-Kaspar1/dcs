@@ -147,6 +147,27 @@ impl StubTransport {
                     if !filled {
                         return;
                     }
+                    // Read the declared body before replying. Head and body
+                    // are separate client writes; closing with unread body
+                    // bytes can reset TCP and erase a prompt response, making
+                    // the answered cases depend on packet scheduling.
+                    let header_end = head
+                        .windows(4)
+                        .position(|window| window == b"\r\n\r\n")
+                        .unwrap()
+                        + 4;
+                    let body_length = String::from_utf8_lossy(&head[..header_end])
+                        .lines()
+                        .filter_map(|line| line.split_once(':'))
+                        .find(|(name, _)| name.eq_ignore_ascii_case("Content-Length"))
+                        .and_then(|(_, length)| length.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    while head.len() < header_end + body_length {
+                        match stream.read(&mut chunk) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => head.extend_from_slice(&chunk[..n]),
+                        }
+                    }
                     let request = String::from_utf8_lossy(&head);
                     let mut parts = request.lines().next().unwrap_or("").split_whitespace();
                     let (method, path) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
