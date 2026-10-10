@@ -65,6 +65,9 @@ pub struct PointSignal {
     /// served before the field existed decodes it `false`.
     #[serde(default)]
     pub requires_reason: bool,
+    /// Declared numeric presentation bounds from the point contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<crate::MeasurementDisplay>,
 }
 
 /// A component instance's monitoring record — the per-instance model
@@ -175,6 +178,7 @@ impl PlantModel {
                     group: signal.group.clone(),
                     writable: point.writable,
                     requires_reason: point.requires_reason,
+                    display: point.display,
                 },
                 None => PointSignal {
                     point: point.id,
@@ -187,6 +191,7 @@ impl PlantModel {
                     group: None,
                     writable: point.writable,
                     requires_reason: point.requires_reason,
+                    display: point.display,
                 },
             })
             .collect();

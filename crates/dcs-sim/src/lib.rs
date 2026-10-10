@@ -77,6 +77,6 @@ pub use driver::{Fault, MAX_STEP_DT, PointInfo, SimDriver};
 pub use map::{
     BoolFlow, BoundedIntegrator, ChannelId, ChannelMap, ConfigError, DeadTime, Direction,
     FirstOrderLag, FlowSum, GatedFlow, Integrator, Loopback, Noise, PointBinding, ProcessElement,
-    ScaledFlow, SecondOrderLag, Threshold,
+    ScaledFlow, SecondOrderLag, TankFlow, TankFlowMode, Threshold,
 };
 pub use scripted::{RecordedWrite, ScriptEntry, ScriptError, ScriptedDriver};

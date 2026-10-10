@@ -96,6 +96,17 @@ fn emitted_schema_is_deterministic_across_calls() {
 /// schema must accept, serialized the way a document writes it.
 fn one_element_per_kind() -> Vec<ProcessElement> {
     vec![
+        ProcessElement::TankFlow(dcs_sim::TankFlow {
+            level: PointId(1),
+            inflow: PointId(2),
+            outlet: PointId(3),
+            output: PointId(4),
+            mode: dcs_sim::TankFlowMode::Outlet,
+            min: 0.0,
+            max: 5.0,
+            flow_per_level: 720.0,
+            initial: 0.0,
+        }),
         ProcessElement::BoundedIntegrator(dcs_sim::BoundedIntegrator {
             input: PointId(1),
             output: PointId(2),

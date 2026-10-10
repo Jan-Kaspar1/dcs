@@ -206,6 +206,7 @@ fn every_element_kind_emits_the_dynamics_grammar() {
             ProcessElement::Integrator(_) => "Integrator",
             ProcessElement::BoundedIntegrator(_) => "BoundedIntegrator",
             ProcessElement::GatedFlow(_) => "GatedFlow",
+            ProcessElement::TankFlow(_) => "TankFlow",
             ProcessElement::DeadTime(_) => "DeadTime",
             ProcessElement::Noise(_) => "Noise",
             ProcessElement::BoolFlow(_) => "BoolFlow",

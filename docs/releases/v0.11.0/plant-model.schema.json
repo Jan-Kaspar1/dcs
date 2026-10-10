@@ -688,6 +688,28 @@
       "allOf": [
         {
           "if": {
+            "properties": {
+              "display": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "display"
+            ]
+          },
+          "then": {
+            "properties": {
+              "value_type": {
+                "enum": [
+                  "float",
+                  "int"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
             "anyOf": [
               {
                 "not": {
@@ -916,6 +938,16 @@
         },
         "direction": {
           "$ref": "#/$defs/direction"
+        },
+        "display": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/measurement-display"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "id": {
           "$ref": "#/$defs/id"
@@ -1529,40 +1561,6 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "allOf": [
-    {
-      "if": {
-        "properties": {
-          "equipment": {
-            "contains": {
-              "properties": {
-                "controls": {
-                  "contains": {
-                    "required": [
-                      "limits"
-                    ]
-                  }
-                }
-              },
-              "required": [
-                "controls"
-              ]
-            }
-          }
-        },
-        "required": [
-          "equipment"
-        ]
-      },
-      "then": {
-        "properties": {
-          "version": {
-            "const": 2
-          }
-        }
-      }
-    }
-  ],
   "description": "The versioned plant-model document: devices, logical io_points, signals, components, connections, and optional equipment surfaces and code-engineered process views. The schema covers structure, field types, and intra-element rules; cross-reference and wiring checks remain with the Rust validator (docs/architecture.md).",
   "properties": {
     "components": {
@@ -1606,10 +1604,7 @@
       "uniqueItems": true
     },
     "version": {
-      "enum": [
-        1,
-        2
-      ]
+      "const": 0
     },
     "views": {
       "items": {

@@ -467,6 +467,13 @@ fn shift_element(frame: IdFrame, element: DynamicsElement) -> DynamicsElement {
             e.output = frame.point(e.output);
             GatedFlow(e)
         }
+        TankFlow(mut e) => {
+            e.level = frame.point(e.level);
+            e.inflow = frame.point(e.inflow);
+            e.outlet = frame.point(e.outlet);
+            e.output = frame.point(e.output);
+            TankFlow(e)
+        }
         Integrator(mut e) => {
             e.input = frame.point(e.input);
             e.output = frame.point(e.output);

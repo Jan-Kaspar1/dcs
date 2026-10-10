@@ -206,7 +206,10 @@
     if (document.body.classList.contains("workspace-plant")) document.getElementById("plant-location").textContent = view.label;
     canvas.replaceChildren(); state.elements.clear();
     const defs = svg("defs"); canvas.append(defs);
-    const nodes = new Map(view.nodes.filter(node => SIZES[node.symbol]).map(node => [node.id, node]));
+    const nodes = new Map(view.nodes.filter(node => SIZES[node.symbol]).map(node => [node.id,
+      node.symbol === "measurement" && !node.display
+        ? { ...node, display: state.model.points.get(node.binding?.point)?.display }
+        : node]));
     state.bounds = viewBounds(view, nodes);
     updateViewport();
     (view.pipes || []).forEach(pipe => {

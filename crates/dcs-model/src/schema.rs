@@ -618,9 +618,14 @@ const SCHEMA_SOURCE: &str = r##"{
         "record": {
           "anyOf": [{ "$ref": "#/$defs/recording-duty" }, { "type": "null" }]
         },
+        "display": { "anyOf": [{ "$ref": "#/$defs/measurement-display" }, { "type": "null" }] },
         "unit": { "type": ["string", "null"] }
       },
       "allOf": [
+        {
+          "if": { "required": ["display"], "properties": { "display": { "type": "object" } } },
+          "then": { "properties": { "value_type": { "enum": ["float", "int"] } } }
+        },
         {
           "if": {
             "anyOf": [

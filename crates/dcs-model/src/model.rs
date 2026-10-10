@@ -279,6 +279,9 @@ pub struct IoPoint {
     /// documents predating the field load with `record` unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record: Option<RecordingDuty>,
+    /// Numeric presentation bounds, independent of command and alarm limits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<crate::MeasurementDisplay>,
     /// The declared engineering unit of the carried value — see the
     /// type docs. `None` declares no unit: the point stays uncheckable
     /// on connections, the gradual-adoption half of the discipline.

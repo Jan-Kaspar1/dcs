@@ -307,7 +307,7 @@ fn recorded_release_schema_matches_the_emitted_output() {
             .unwrap();
     assert_eq!(
         sha256_hex(&candidate),
-        "78f165a00a9e77cdaeb0b876cab1649f0209d20d6869be0b3d8d4c802cf72bba",
+        "3ceb14e825ef914c49c3ab201efc7a980131b00fd4bf2d7804f3cfc3b5d462e2",
         "candidate record digest drift"
     );
     assert!(

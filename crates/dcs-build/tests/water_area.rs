@@ -40,6 +40,194 @@ fn scans(executor: &mut dcs_runtime::Executor<'_>, driver: &FanoutDriver, count:
 }
 
 #[test]
+fn healthy_travel_setpoint_changes_and_mode_transfers_do_not_raise_feedback_alarms() {
+    let area = water_area(&WaterAreaConfig::default()).unwrap();
+    let field = driver(&area);
+    let mut executor = assemble(&area.model, &dcs_controller::registry(), &field).unwrap();
+    for tick in 0..6000 {
+        match tick {
+            1600 => command(
+                &mut executor,
+                area.level_loop.setpoint.id(),
+                Value::Float(2.8),
+            ),
+            2400 => {
+                command(&mut executor, area.outlet.mode.id(), Value::Bool(true));
+                command(&mut executor, area.outlet.manual.id(), Value::Float(100.0));
+            }
+            3000 => command(&mut executor, area.outlet.manual.id(), Value::Float(0.0)),
+            3600 => command(&mut executor, area.outlet.mode.id(), Value::Bool(false)),
+            _ => {}
+        }
+        scans(&mut executor, &field, 1);
+        for point in [area.outlet.fault.id(), PointId(24_022), PointId(24_023)] {
+            assert_eq!(
+                executor.sample(point).unwrap().value,
+                Value::Bool(false),
+                "healthy valve raised feedback diagnostic/alarm at scan {tick}: requested {}, applied {}, feedback {}",
+                number(&executor, area.outlet.requested.id().0),
+                number(&executor, area.outlet.applied.id().0),
+                number(&executor, 20_013)
+            );
+        }
+    }
+}
+
+#[test]
+fn stuck_good_position_is_detected_within_engineered_dwell_and_recovers() {
+    use dcs_core::IoDriver;
+    let area = water_area(&WaterAreaConfig::default()).unwrap();
+    let field = driver(&area);
+    let mut executor = assemble(&area.model, &dcs_controller::registry(), &field).unwrap();
+    command(&mut executor, area.outlet.mode.id(), Value::Bool(true));
+    command(&mut executor, area.outlet.manual.id(), Value::Float(30.0));
+    scans(&mut executor, &field, 100);
+    for _ in 0..65 {
+        // The mechanics keep moving; only the fresh, Good reported contact
+        // is stuck. This proves numerical disagreement independently of quality.
+        field
+            .sim()
+            .unwrap()
+            .write(PointId(20_013), Value::Float(0.0))
+            .unwrap();
+        scans(&mut executor, &field, 1);
+    }
+    assert!(executor.sample(PointId(20_013)).unwrap().quality.is_good());
+    assert_eq!(
+        executor.sample(area.outlet.fault.id()).unwrap().value,
+        Value::Bool(true)
+    );
+    assert_eq!(
+        executor.sample(PointId(24_022)).unwrap().value,
+        Value::Bool(true)
+    );
+    scans(&mut executor, &field, 80);
+    assert_eq!(
+        executor.sample(area.outlet.fault.id()).unwrap().value,
+        Value::Bool(false)
+    );
+}
+
+#[test]
+fn every_recorded_operational_series_has_declared_display_bounds() {
+    let area = water_area(&WaterAreaConfig::default()).unwrap();
+    for point in area
+        .model
+        .io_points
+        .iter()
+        .filter(|point| point.record.is_some())
+    {
+        assert!(
+            point.display.is_some(),
+            "recorded point {} has no declared trend scale",
+            point.id.0
+        );
+        assert_eq!(
+            area.model.signal_index().get(point.id).unwrap().display,
+            point.display
+        );
+    }
+}
+
+#[test]
+fn both_vessels_conserve_inventory_through_emptying_overflow_and_sensor_failure() {
+    use dcs_core::IoDriver;
+    fn physical(field: &FanoutDriver, point: u64) -> f64 {
+        let sample = field.sim().unwrap().read(PointId(point)).unwrap();
+        assert!(
+            sample.quality.is_good(),
+            "physical point {point}: {sample:?}"
+        );
+        let Value::Float(value) = sample.value else {
+            panic!("physical float")
+        };
+        value
+    }
+    for stressed in [false, true] {
+        let mut config = WaterAreaConfig::default();
+        if stressed {
+            // One scan spans far more than either vessel's full inventory.
+            config.inflow = 10_000.0;
+            config.pump_flow = 50_000.0;
+            config.tank_area = 0.002;
+        }
+        let area = water_area(&config).unwrap();
+        let field = driver(&area);
+        let mut executor = assemble(&area.model, &dcs_controller::registry(), &field).unwrap();
+        command(&mut executor, area.outlet.mode.id(), Value::Bool(true));
+        command(&mut executor, area.outlet.manual.id(), Value::Float(100.0));
+        let mut empty = false;
+        let mut wet_spill = false;
+        let mut balance_spill = false;
+        for tick in 0..3200 {
+            if tick == 1000 {
+                command(
+                    &mut executor,
+                    area.isolation.request.id(),
+                    Value::Bool(false),
+                );
+            }
+            if tick == 2200 {
+                for pump in &area.station.pumps {
+                    command(&mut executor, pump.out_of_service, Value::Bool(true));
+                }
+            }
+            if tick == 2600 {
+                field
+                    .sim()
+                    .unwrap()
+                    .inject_fault(
+                        area.level.id(),
+                        Fault::Quality(Quality::Bad(QualityReason::DeviceFault)),
+                    )
+                    .unwrap();
+            }
+            let wet_before = physical(&field, area.physical_wet_level.id().0);
+            let balance_before = physical(&field, area.physical_balance_level.id().0);
+            scans(&mut executor, &field, 1);
+            let wet_after = physical(&field, area.physical_wet_level.id().0);
+            let balance_after = physical(&field, area.physical_balance_level.id().0);
+            let incoming = physical(&field, 20_018);
+            let transfer = physical(&field, 20_017);
+            let discharge = physical(&field, 20_016);
+            let wet_overflow = physical(&field, area.wet_overflow.id().0);
+            let balance_overflow = physical(&field, area.balance_overflow.id().0);
+            let actual_pump_draw: f64 = area
+                .station
+                .pumps
+                .iter()
+                .map(|p| physical(&field, p.draw.0))
+                .sum();
+            assert!((actual_pump_draw + transfer).abs() < 1e-8);
+            let wet_delta = (incoming - transfer - wet_overflow) * config.dt / 3600.0;
+            let balance_delta = (transfer - discharge - balance_overflow) * config.dt / 3600.0;
+            assert!(
+                ((wet_after - wet_before) * config.tank_area - wet_delta).abs() < 1e-9,
+                "wet-well mass imbalance at {tick}, stress={stressed}"
+            );
+            assert!(
+                ((balance_after - balance_before) * config.tank_area - balance_delta).abs() < 1e-9,
+                "balance mass imbalance at {tick}, stress={stressed}"
+            );
+            assert!((0.0..=5.0).contains(&wet_after) && (0.0..=5.0).contains(&balance_after));
+            if balance_after <= 1e-10 && balance_before <= 1e-10 {
+                assert!(discharge <= transfer + 1e-8, "empty vessel creates water");
+                empty = true;
+            }
+            wet_spill |= wet_overflow > 0.0;
+            balance_spill |= balance_overflow > 0.0;
+        }
+        assert!(
+            wet_spill && balance_spill,
+            "both overflow routes must operate"
+        );
+        if !stressed {
+            assert!(empty, "100% manual demand must empty the vessel");
+        }
+    }
+}
+
+#[test]
 fn another_pump_instance_gets_controls_alarms_and_topology_without_browser_code() {
     for count in [2, 3] {
         let mut config = WaterAreaConfig::default();
@@ -362,6 +550,62 @@ fn engineering_rejects_invalid_limits_display_and_overflowing_allocations() {
     let builder = dcs_build::PlantBuilder::from_model(area.model).unwrap();
     assert!(builder.input::<bool>(area.level.id()).is_err());
     assert!(builder.output::<f64>(area.level.id()).is_err());
+}
+
+#[test]
+fn point_display_contract_rejects_non_numeric_invalid_and_non_finite_ranges() {
+    use dcs_build::MeasurementDisplay;
+    use dcs_model::ValidationError;
+    let area = water_area(&WaterAreaConfig::default()).unwrap();
+    for display in [
+        MeasurementDisplay {
+            min: 5.0,
+            max: 0.0,
+            normal: None,
+        },
+        MeasurementDisplay {
+            min: f64::NAN,
+            max: 5.0,
+            normal: None,
+        },
+        MeasurementDisplay {
+            min: 0.0,
+            max: 5.0,
+            normal: Some([-1.0, 6.0]),
+        },
+    ] {
+        let mut model = area.model.clone();
+        let point = model
+            .io_points
+            .iter_mut()
+            .find(|p| p.id == area.level.id())
+            .unwrap();
+        point.display = Some(display);
+        assert!(
+            model
+                .validate()
+                .contains(&ValidationError::InvalidPointDisplay {
+                    point: area.level.id()
+                })
+        );
+    }
+    let mut model = area.model;
+    let point = model
+        .io_points
+        .iter_mut()
+        .find(|p| p.value_type == ValueKind::Bool)
+        .unwrap();
+    point.display = Some(MeasurementDisplay {
+        min: 0.0,
+        max: 1.0,
+        normal: None,
+    });
+    let id = point.id;
+    assert!(
+        model
+            .validate()
+            .contains(&ValidationError::InvalidPointDisplay { point: id })
+    );
 }
 
 #[test]

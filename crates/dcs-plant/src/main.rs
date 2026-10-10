@@ -299,6 +299,7 @@ fn element_kind(element: &ProcessElement) -> &'static str {
         ProcessElement::Integrator(_) => "integrator",
         ProcessElement::BoundedIntegrator(_) => "bounded_integrator",
         ProcessElement::GatedFlow(_) => "gated_flow",
+        ProcessElement::TankFlow(_) => "tank_flow",
         ProcessElement::DeadTime(_) => "dead_time",
         ProcessElement::Noise(_) => "noise",
         ProcessElement::BoolFlow(_) => "bool_flow",

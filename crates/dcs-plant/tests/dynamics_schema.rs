@@ -116,7 +116,7 @@ fn recorded_release_dynamics_schema_matches_the_emitted_output() {
         std::fs::read(workspace_root().join("docs/releases/v0.11.0/dynamics.schema.json")).unwrap();
     assert_eq!(
         sha256_hex(&candidate),
-        "e2e8b903d899148788cf37bc845464898c3226c3b7edb8dd39285b5a74a9b3ff",
+        "730a3dd6d80bf69f744a22d64e5c356e2d342f9603bbd9226cca5d2b2da0313d",
         "candidate record digest drift"
     );
     assert!(

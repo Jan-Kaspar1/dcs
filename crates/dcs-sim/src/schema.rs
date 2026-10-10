@@ -92,6 +92,7 @@ const SCHEMA_SOURCE: &str = r##"{
         "second_order_lag": { "$ref": "#/$defs/second-order-lag" },
         "bounded_integrator": { "$ref": "#/$defs/bounded-integrator" },
         "gated_flow": { "$ref": "#/$defs/gated-flow" },
+        "tank_flow": { "$ref": "#/$defs/tank-flow" },
         "integrator": { "$ref": "#/$defs/integrator" },
         "dead_time": { "$ref": "#/$defs/dead-time" },
         "noise": { "$ref": "#/$defs/noise" },
@@ -139,6 +140,21 @@ const SCHEMA_SOURCE: &str = r##"{
       "type": "object", "additionalProperties": false,
       "required": ["input", "gate", "output", "initial", "gain"],
       "properties": { "input": { "$ref": "#/$defs/id" }, "gate": { "$ref": "#/$defs/id" }, "output": { "$ref": "#/$defs/id" }, "initial": { "type": "number" }, "gain": { "type": "number" } }
+    },
+    "tank-flow": {
+      "type": "object", "additionalProperties": false,
+      "required": ["level", "inflow", "outlet", "output", "mode", "min", "max", "flow_per_level", "initial"],
+      "properties": {
+        "level": { "$ref": "#/$defs/id" },
+        "inflow": { "$ref": "#/$defs/id" },
+        "outlet": { "$ref": "#/$defs/id" },
+        "output": { "$ref": "#/$defs/id" },
+        "mode": { "enum": ["outlet", "overflow"] },
+        "min": { "$ref": "#/$defs/number" },
+        "max": { "$ref": "#/$defs/number" },
+        "flow_per_level": { "$ref": "#/$defs/positive" },
+        "initial": { "$ref": "#/$defs/nonnegative" }
+      }
     },
     "integrator": {
       "type": "object",

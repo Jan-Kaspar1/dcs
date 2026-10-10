@@ -19,26 +19,29 @@ emissions and fixture fingerprints remain unchanged. Optional display bounds and
 typed control roles describe presentation; limits govern writes and forces at
 admission and dispatch, including restored runtimes.
 
-Rust consumers constructing equipment controls/view nodes directly must supply
-the new optional fields. Exhaustive matches must handle the new validation,
-command-range, bounded-integrator and gated-flow variants. Equipment/view records
+Rust consumers constructing equipment controls, view nodes, `IoPoint` or
+`PointSignal` directly must supply the new optional fields. Point display bounds
+use the same `MeasurementDisplay` type as view nodes and pass through the derived
+signal index; contextual drawing bounds may override them. Exhaustive matches must handle the new validation,
+command-range, bounded-integrator, gated-flow and inventory-flow variants. Equipment/view records
 with floating-point metadata implement PartialEq rather than Eq. These source
-changes require a minor release. The negative-gain PID anti-windup correction
+changes require a minor release. Modulating actuator factories now take typed
+transfer/tolerance/dwell configuration instead of fixed diagnostic constants. The negative-gain PID anti-windup correction
 changes draining-loop behavior at saturation; review that control change when
 commissioning an existing loop. No checkpoint/journal/history format changes
 are introduced. Same-model restart and compatible peer takeover are proven;
 changed-model state migration is not implemented by this milestone.
 
-The new dynamics schema adds bounded integration and Boolean-gated numeric flow.
+The new dynamics schema adds bounded integration, Boolean-gated numeric flow and conserved inventory/overflow flow.
 Prior release records retain their existing bytes and digest pins. Drift tests
 compare this candidate to current emission instead of rewriting older records.
 The served-registry and deployment schemas are unchanged.
 
 | Candidate artifact | sha256 |
 | --- | --- |
-| `plant-model.schema.json` | `78f165a00a9e77cdaeb0b876cab1649f0209d20d6869be0b3d8d4c802cf72bba` |
+| `plant-model.schema.json` | `3ceb14e825ef914c49c3ab201efc7a980131b00fd4bf2d7804f3cfc3b5d462e2` |
 | `block-interfaces.schema.json` | `ddc00496814a4e8cd0d6ec8a5d9fbb95e83f518dcd927b17a4802f13ac84013a` |
-| `dynamics.schema.json` | `e2e8b903d899148788cf37bc845464898c3226c3b7edb8dd39285b5a74a9b3ff` |
+| `dynamics.schema.json` | `730a3dd6d80bf69f744a22d64e5c356e2d342f9603bbd9226cca5d2b2da0313d` |
 | `deploy-manifest.schema.json` | `980430ca8725af997a7b5063f00d2a9663fe4619ca00a542917bde24f270cfa9` |
 
 ## Publication gates and ownership

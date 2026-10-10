@@ -14,10 +14,53 @@ Add two field simulation declarations: `gated_flow` multiplies a finite Float
 by an engineered gain only while its typed Boolean gate stands;
 `bounded_integrator` clamps a finite Euler step to engineered bounds. Both
 retain the existing hold-last-finite, quality-propagation and field-state
-capture rules. A clamped tank boundary represents external overflow or an
-empty vessel, not conserved storage beyond the boundary; the area documents
-this simplification and alarms before overflow. Existing unbounded integrators
+capture rules. The first candidate clipped tank bounds without conserving
+outflow or exposing spill. Operator-driven emptying demonstrated water creation;
+the follow-up below replaces that area approximation. Existing unbounded integrators
 and historical accelerated station fixtures keep their existing semantics.
+
+Follow-up contract review, 2026-10-10: add a stateless single-output `tank_flow`
+field element with typed physical level, net inlet, nonnegative outlet and output points.
+Outlet mode caps demand by inlet plus available storage divided by step time;
+overflow mode emits excess inlet minus actual outlet and free capacity divided
+by step time. Ordered finite tank bounds and a positive `flow_per_level` declare
+the conversion (3600 times tank area for metres, m3/h and seconds). At zero step
+time, outlet follows demand only while inventory exists, otherwise inlet limits
+it; overflow occurs only at the upper bound. Zero time advances no storage.
+Signed net inlet permits sequential allocation of shared storage; negative
+outlet requests, untrusted or non-finite inputs hold the last finite output with
+degraded quality. Physical storage is separate from reported fault-injection
+measurements. Both vessels must conserve their declared streams at their limits;
+spill streams are drawn and numerically indicated. This changes the pending
+dynamics schema/release, not existing component or historical-fixture semantics.
+
+The original fixed modulator diagnostic raised alarms on healthy lag. Make
+transfer delta, feedback tolerance and discrepancy dwell explicit typed factory
+parameters. The area initially retained 3 percentage-point agreement and engineers a
+12-second dwell around its 5-point/scan transfer, 1-second actuator and 0.2-second
+sensor lag. Verify healthy startup, setpoint and mode changes without fault
+alarms, then stuck-good and bad-quality feedback with bounded detection and
+recovery. Every recorded operational trend must have declared display bounds;
+requested output, applied output and actual position get separate exact readings.
+The inherited recordings below exposed the need to carry the same display type
+on points as well as drawing nodes.
+
+The stronger acceptance found inherited primary/backup level and flow recordings
+without drawing nodes. Do not remove their recording duty or add decorative
+readings just to set a trend range. Extend `IoPoint` with optional numeric
+`display: MeasurementDisplay`, validate finite ordered bounds and normal band,
+and carry it through the derived `PointSignal` index. Generic trends and point
+symbols use these bounds; an explicit node display remains a contextual override.
+The area copies its reading declarations to point metadata and separately
+declares the inherited raw-sensor/net-flow scales, with no customer JavaScript.
+Absent metadata preserves historical bytes. This is a reviewed additive
+presentation contract and Rust source change in the pending release.
+
+Healthy return-to-automatic sustained more than 3 percentage points of lag for
+the 12-second dwell. The training area's agreement band is therefore 8 points,
+with the same dwell; commissioning must engineer these from actual travel,
+measurement accuracy and demand slew. Small errors inside this band are not
+faults. Stuck-good 0% feedback at a 30% request and bad quality remain detected.
 
 Add optional numeric `display` metadata to a drawing node: finite min/max and
 an optional normal band inside them. Only a numeric point-bound measurement

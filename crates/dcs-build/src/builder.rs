@@ -376,6 +376,7 @@ impl PlantBuilder {
             stale_after_ticks: None,
             journaled: false,
             record: None,
+            display: None,
             unit: None,
         });
         InPoint::new(id)
@@ -417,6 +418,7 @@ impl PlantBuilder {
             stale_after_ticks: None,
             journaled: false,
             record: None,
+            display: None,
             unit: None,
         });
         OutPoint::new(id)
@@ -446,6 +448,7 @@ impl PlantBuilder {
             stale_after_ticks: None,
             journaled: false,
             record: None,
+            display: None,
             unit: None,
         });
         InPoint::new(id)
@@ -466,6 +469,7 @@ impl PlantBuilder {
             stale_after_ticks: None,
             journaled: false,
             record: None,
+            display: None,
             unit: None,
         });
         OutPoint::new(id)
@@ -608,6 +612,23 @@ impl PlantBuilder {
             panic!("io_point {} already declares unit {existing:?}", point.0);
         }
         declared.unit = Some(unit.to_string());
+        self
+    }
+
+    /// Declares numeric gauge/trend bounds in the shared point contract.
+    /// Model validation checks value kind, finite bounds and normal band;
+    /// these bounds never constrain commands or configure process alarms.
+    pub fn display(
+        &mut self,
+        point: impl Into<PointId>,
+        display: crate::MeasurementDisplay,
+    ) -> &mut Self {
+        let point = point.into();
+        self.io_points
+            .iter_mut()
+            .find(|p| p.id == point)
+            .unwrap_or_else(|| panic!("display names undeclared io_point {}", point.0))
+            .display = Some(display);
         self
     }
 

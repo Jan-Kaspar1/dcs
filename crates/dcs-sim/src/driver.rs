@@ -272,6 +272,7 @@ impl ElementState {
                 y.is_finite().then_some(y)
             }
             ProcessElement::GatedFlow(_)
+            | ProcessElement::TankFlow(_)
             | ProcessElement::BoolFlow(_)
             | ProcessElement::FlowSum(_)
             | ProcessElement::Threshold(_) => {
@@ -590,6 +591,19 @@ impl SimDriver {
             "step dt must be finite, non-negative, and at most {MAX_STEP_DT}, got {dt}"
         );
         let state = &mut *self.state.lock().unwrap();
+        // Storage-flow budgets use the beginning-of-step inventory, even
+        // when the level-producing element appears earlier in the list.
+        let tank_levels: HashMap<_, _> = state
+            .elements
+            .iter()
+            .filter_map(|element| {
+                if let ProcessElement::TankFlow(flow) = &element.element {
+                    Some((flow.level, state.points[&flow.level].effective_sample()))
+                } else {
+                    None
+                }
+            })
+            .collect();
         state.tick = Tick(state.tick.0 + 1);
         let tick = state.tick;
 
@@ -600,6 +614,63 @@ impl SimDriver {
 
         for element in &mut state.elements {
             match &element.element {
+                ProcessElement::TankFlow(flow) => {
+                    let level = tank_levels[&flow.level];
+                    let incoming = state.points[&flow.inflow].effective_sample();
+                    let outlet = state.points[&flow.outlet].effective_sample();
+                    let mut quality = level.quality.merge(incoming.quality).merge(outlet.quality);
+                    let (Value::Float(h), Value::Float(qin), Value::Float(qout)) =
+                        (level.value, incoming.value, outlet.value)
+                    else {
+                        unreachable!("validated Float tank inputs")
+                    };
+                    let valid = h.is_finite()
+                        && (flow.min..=flow.max).contains(&h)
+                        && qin.is_finite()
+                        && qout.is_finite()
+                        && qout >= 0.0;
+                    let value = match flow.mode {
+                        crate::TankFlowMode::Outlet if dt == 0.0 => {
+                            if h > flow.min {
+                                qout
+                            } else {
+                                qout.min(qin.max(0.0))
+                            }
+                        }
+                        crate::TankFlowMode::Overflow if dt == 0.0 => {
+                            if h >= flow.max {
+                                (qin - qout).max(0.0)
+                            } else {
+                                0.0
+                            }
+                        }
+                        crate::TankFlowMode::Outlet => {
+                            let capacity = (h - flow.min) * flow.flow_per_level / dt;
+                            let budget = qin + capacity;
+                            if capacity.is_finite() && budget.is_finite() {
+                                qout.min(budget.max(0.0))
+                            } else {
+                                f64::NAN
+                            }
+                        }
+                        crate::TankFlowMode::Overflow => {
+                            let capacity = (flow.max - h) * flow.flow_per_level / dt;
+                            let excess = qin - qout - capacity;
+                            if capacity.is_finite() && excess.is_finite() {
+                                excess.max(0.0)
+                            } else {
+                                f64::NAN
+                            }
+                        }
+                    };
+                    if quality.is_good() && valid && value.is_finite() && value >= 0.0 {
+                        element.y = value;
+                    } else if quality.is_good() {
+                        quality = Quality::Bad(QualityReason::OutOfRange);
+                    }
+                    state.points.get_mut(&flow.output).unwrap().sample =
+                        Sample::new(Value::Float(element.y), quality, tick);
+                }
                 ProcessElement::GatedFlow(flow) => {
                     let input = state.points[&flow.input].effective_sample();
                     let gate = state.points[&flow.gate].effective_sample();
@@ -949,6 +1020,7 @@ impl IoDriver for SimDriver {
                     let y = state.require_f64(STATE_ELEMENT, &field)?;
                     if !y.is_finite()
                         || matches!(&element.element, ProcessElement::BoundedIntegrator(bounds) if y < bounds.min || y > bounds.max)
+                        || matches!(&element.element, ProcessElement::TankFlow(_) if y < 0.0)
                     {
                         return Err(invalid(field, Value::Float(y)));
                     }

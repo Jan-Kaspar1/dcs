@@ -445,10 +445,22 @@ pub struct ModulatingValve {
     pub fault: OutPoint<bool>,
 }
 
+/// Engineered transfer and feedback-diagnostic behavior, in percent and scans.
+/// Dwell must cover the connected actuator's healthy travel and sensor lag.
+#[derive(Debug, Clone, Copy)]
+pub struct ModulatingValveConfig {
+    /// Maximum change of selected demand per scan on transfer.
+    pub transfer_delta: f64,
+    /// Maximum absolute position error counted as agreement.
+    pub tolerance: f64,
+    /// Consecutive disagreeing scans before asserting the diagnostic.
+    pub discrepancy_ticks: u64,
+}
+
 /// Composes analog actuation from existing station, protection and valve kinds.
 /// `automatic` and feedback use percent opening. Untrusted demand or permissive
-/// closes the valve through `interlock`. Transfer is bounded by 5 percent per
-/// scan; the field dynamics and fault timing belong to the caller.
+/// closes the valve through `interlock`. The caller engineers transfer and
+/// diagnostic timing against its field dynamics.
 pub fn modulating_valve(
     plant: &mut PlantBuilder,
     c: &EquipmentConfig,
@@ -456,8 +468,20 @@ pub fn modulating_valve(
     feedback: InPoint<f64>,
     applied: OutPoint<f64>,
     permissive: InPoint<bool>,
+    settings: ModulatingValveConfig,
 ) -> Result<ModulatingValve, crate::BuildError> {
     c.validate()?;
+    if !settings.transfer_delta.is_finite()
+        || settings.transfer_delta <= 0.0
+        || !settings.tolerance.is_finite()
+        || settings.tolerance < 0.0
+        || settings.discrepancy_ticks > i64::MAX as u64
+    {
+        return Err(crate::BuildError::InvalidConfiguration {
+            field: "modulating valve transfer/diagnostics".into(),
+            reason: "positive finite transfer, nonnegative finite tolerance and representable dwell required".into(),
+        });
+    }
     let mode = input(
         plant,
         c,
@@ -479,7 +503,7 @@ pub fn modulating_valve(
     );
     let station = plant.add(ManualStationSpec::new(parameters([(
         "transfer_delta",
-        Value::Float(5.0),
+        Value::Float(settings.transfer_delta),
     )])));
     plant.connect(automatic, &station.control);
     plant.connect(mode, &station.mode);
@@ -544,8 +568,11 @@ pub fn modulating_valve(
     plant.connect(&guard.tripped, tripped);
     plant.journaled(tripped);
     let valve = plant.add(ValveSpec::new(parameters([
-        ("tolerance", Value::Float(3.0)),
-        ("discrepancy_ticks", Value::Int(30)),
+        ("tolerance", Value::Float(settings.tolerance)),
+        (
+            "discrepancy_ticks",
+            Value::Int(settings.discrepancy_ticks as i64),
+        ),
     ])));
     let fault = output(
         plant,

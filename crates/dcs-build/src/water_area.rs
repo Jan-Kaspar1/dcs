@@ -2,6 +2,7 @@
 //! All field values, dynamics, equipment and operator geometry are engineered
 //! here. See docs/milestones/connected-water.md for equations and site policy.
 
+use crate::dynamics::{TankFlowConfig, TankFlowMode};
 use crate::equipment::{self, ControlLoop, EquipmentConfig, ModulatingValve, OnOffValve};
 use crate::station::{PumpStationConfig, PumpStationLayout, pumping_station};
 use crate::{
@@ -50,6 +51,14 @@ pub struct WaterArea {
     pub station: PumpStationLayout,
     /// Measured receiving-tank level.
     pub level: InPoint<f64>,
+    /// Physical storage independent of reported level faults.
+    pub physical_balance_level: InPoint<f64>,
+    /// Physical wet-well storage.
+    pub physical_wet_level: InPoint<f64>,
+    /// Conserved spill to the declared wet-well overflow route.
+    pub wet_overflow: InPoint<f64>,
+    /// Conserved spill to the declared balance-vessel overflow route.
+    pub balance_overflow: InPoint<f64>,
     /// Standard balance-level measurement, including warning and delivery.
     pub balance_measurement: equipment::Measurement,
     /// Standard discharge measurement, including warning and delivery.
@@ -290,6 +299,13 @@ pub fn water_area(config: &WaterAreaConfig) -> Result<WaterArea, BuildError> {
         position,
         command,
         isolation_fb,
+        equipment::ModulatingValveConfig {
+            transfer_delta: 5.0,
+            tolerance: 8.0,
+            // Full 100% transfer takes 4 s; 1 s actuator settling, sensor
+            // lag and scan delivery fit within this 12 s diagnostic budget.
+            discrepancy_ticks: (12.0 / config.dt).ceil() as u64,
+        },
     )?;
 
     let flow_measurement = equipment::measurement(
@@ -312,7 +328,7 @@ pub fn water_area(config: &WaterAreaConfig) -> Result<WaterArea, BuildError> {
         outlet.requested.id(),
         outlet.applied.id(),
         position.id(),
-        outlet_flow.id(),
+        flow_measurement.value.id(),
     ] {
         plant.record(point, 5);
     }
@@ -321,6 +337,21 @@ pub fn water_area(config: &WaterAreaConfig) -> Result<WaterArea, BuildError> {
     let actual_outlet = field(&mut plant, sim, 20_016, "physical-outlet-flow", "m3/h");
     let actual_inlet = field(&mut plant, sim, 20_017, "physical-balance-inflow", "m3/h");
     let actual_influent = field(&mut plant, sim, 20_018, "physical-influent", "m3/h");
+    let balance_actual = field(&mut plant, sim, 20_019, "physical-balance-level", "m");
+    let wet_overflow = field(&mut plant, sim, 20_020, "wet-overflow", "m3/h");
+    let balance_overflow = field(&mut plant, sim, 20_021, "balance-overflow", "m3/h");
+    let outlet_capacity = field(&mut plant, sim, 20_022, "outlet-capacity", "m3/h");
+    let wet_spill_draw = field(&mut plant, sim, 20_023, "wet-overflow-draw", "m3/h");
+    let balance_spill_draw = field(&mut plant, sim, 20_024, "balance-overflow-draw", "m3/h");
+    for point in [wet_overflow.id(), balance_overflow.id()] {
+        plant.record(point, 5);
+    }
+    let tank_flow = |mode| TankFlowConfig {
+        mode,
+        bounds: [0.0, 5.0],
+        flow_per_level: 3600.0 * config.tank_area,
+        initial: 0.0,
+    };
     let mut dynamics = DynamicsBuilder::new();
     let inflow = plant.input::<f64>(layout.inflow)?;
     let net_wet = plant.input::<f64>(layout.net_flow)?;
@@ -334,17 +365,71 @@ pub fn water_area(config: &WaterAreaConfig) -> Result<WaterArea, BuildError> {
     );
     dynamics.first_order_lag(actual_influent, inflow, 0.2, config.inflow);
     let mut pump_draws = Vec::new();
-    for pump in &layout.pumps {
+    for (index, pump) in layout.pumps.iter().enumerate() {
         let applied = plant.output::<bool>(pump.cmd)?;
         let flow = plant.input::<f64>(pump.draw)?;
-        dynamics.bool_flow(applied, flow, -config.pump_flow, 0.0, 0.0);
+        let request = field(
+            &mut plant,
+            sim,
+            20_100 + index as u64,
+            &format!("pump-{}-capacity", index + 1),
+            "m3/h",
+        );
+        let actual = field(
+            &mut plant,
+            sim,
+            20_120 + index as u64,
+            &format!("pump-{}-physical-flow", index + 1),
+            "m3/h",
+        );
+        // Sequential allocation conserves the shared pre-step inventory even
+        // if several pumps run or one field step spans the dry-run boundary.
+        let remaining_inlet = if pump_draws.is_empty() {
+            actual_influent
+        } else {
+            let residual = field(
+                &mut plant,
+                sim,
+                20_110 + index as u64,
+                &format!("pump-{}-remaining-supply", index + 1),
+                "m3/h",
+            );
+            dynamics.flow_sum(
+                pump_draws.iter().copied().chain([actual_influent]),
+                residual,
+                0.0,
+                config.inflow,
+            );
+            residual
+        };
+        dynamics
+            .bool_flow(applied, request, config.pump_flow, 0.0, 0.0)
+            .tank_flow(
+                wet_actual,
+                remaining_inlet,
+                request,
+                actual,
+                tank_flow(TankFlowMode::Outlet),
+            )
+            .scaled_flow(actual, flow, -1.0, 0.0);
         pump_draws.push(flow);
     }
     let gain = 1.0 / (3600.0 * config.tank_area);
     dynamics
         .flow_sum(pump_draws.clone(), combined_draw, 0.0, 0.0)
+        .scaled_flow(combined_draw, actual_inlet, -1.0, 0.0)
+        .tank_flow(
+            wet_actual,
+            actual_influent,
+            actual_inlet,
+            wet_overflow,
+            tank_flow(TankFlowMode::Overflow),
+        )
+        .scaled_flow(wet_overflow, wet_spill_draw, -1.0, 0.0)
         .flow_sum(
-            pump_draws.into_iter().chain([actual_influent]),
+            pump_draws
+                .into_iter()
+                .chain([actual_influent, wet_spill_draw]),
             net_wet,
             0.0,
             config.inflow,
@@ -353,16 +438,31 @@ pub fn water_area(config: &WaterAreaConfig) -> Result<WaterArea, BuildError> {
         .bounded_integrator(wet_rate, wet_actual, 2.5, 0.0, 5.0)
         .first_order_lag(wet_actual, primary, 0.2, 2.5)
         .first_order_lag(wet_actual, backup, 0.4, 2.5)
-        .scaled_flow(combined_draw, actual_inlet, -1.0, 0.0)
         .first_order_lag(actual_inlet, inlet, 0.2, 0.0)
         .first_order_lag(command, actual_position, 1.0, 0.0)
         .first_order_lag(actual_position, position, 0.2, 0.0)
-        .gated_flow(actual_position, isolation_cmd, actual_outlet, 1.44, 0.0)
+        .gated_flow(actual_position, isolation_cmd, outlet_capacity, 1.44, 0.0)
+        .tank_flow(
+            balance_actual,
+            actual_inlet,
+            outlet_capacity,
+            actual_outlet,
+            tank_flow(TankFlowMode::Outlet),
+        )
+        .tank_flow(
+            balance_actual,
+            actual_inlet,
+            actual_outlet,
+            balance_overflow,
+            tank_flow(TankFlowMode::Overflow),
+        )
         .first_order_lag(actual_outlet, outlet_flow, 0.2, 0.0)
         .scaled_flow(actual_outlet, draw, -1.0, 0.0)
-        .flow_sum([actual_inlet, draw], net, 0.0, 0.0)
+        .scaled_flow(balance_overflow, balance_spill_draw, -1.0, 0.0)
+        .flow_sum([actual_inlet, draw, balance_spill_draw], net, 0.0, 0.0)
         .scaled_flow(net, level_rate, gain, 0.0)
-        .bounded_integrator(level_rate, level, 2.0, 0.0, 5.0);
+        .bounded_integrator(level_rate, balance_actual, 2.0, 0.0, 5.0)
+        .first_order_lag(balance_actual, level, 0.2, 2.0);
     let mut view = PlantView::new("water-area", "Water station · balance and discharge");
     view.nodes = vec![
         node(
@@ -435,11 +535,72 @@ pub fn water_area(config: &WaterAreaConfig) -> Result<WaterArea, BuildError> {
         reading(
             "setpoint",
             "LIC-201 · Setpoint",
-            600,
-            540,
+            1000,
+            110,
             level_loop.setpoint.id(),
             [0.0, 5.0],
             Some([0.8, 3.8]),
+        ),
+        reading(
+            "requested-opening",
+            "LV-201 · Requested",
+            1000,
+            330,
+            outlet.requested.id(),
+            [0.0, 100.0],
+            None,
+        ),
+        reading(
+            "applied-opening",
+            "LV-201 · Applied",
+            1000,
+            440,
+            outlet.applied.id(),
+            [0.0, 100.0],
+            None,
+        ),
+        reading(
+            "actual-opening",
+            "LV-201 · Feedback",
+            1000,
+            550,
+            position.id(),
+            [0.0, 100.0],
+            None,
+        ),
+        reading(
+            "wet-spill",
+            "TK-101 · Overflow",
+            70,
+            540,
+            wet_overflow.id(),
+            [0.0, config.inflow.max(1.0)],
+            Some([0.0, 0.0]),
+        ),
+        reading(
+            "balance-spill",
+            "TK-201 · Overflow",
+            600,
+            630,
+            balance_overflow.id(),
+            [0.0, config.pump_flow * config.station.pumps as f64],
+            Some([0.0, 0.0]),
+        ),
+        node(
+            "wet-spill-route",
+            PlantViewSymbol::Label,
+            "Wet-well overflow route",
+            20,
+            700,
+            None,
+        ),
+        node(
+            "balance-spill-route",
+            PlantViewSymbol::Label,
+            "Balance overflow route",
+            560,
+            710,
+            None,
         ),
         node(
             "downstream",
@@ -457,6 +618,10 @@ pub fn water_area(config: &WaterAreaConfig) -> Result<WaterArea, BuildError> {
         pipe("isolation", S, "modulating", N),
         pipe("modulating", S, "discharge", N),
         pipe("discharge", S, "downstream", N),
+        pipe("wet-well", S, "wet-spill", N),
+        pipe("wet-spill", S, "wet-spill-route", N),
+        pipe("balance", S, "balance-spill", N),
+        pipe("balance-spill", S, "balance-spill-route", N),
     ];
     for (index, _) in layout.pumps.iter().enumerate() {
         let id = format!("pump-{}", index + 1);
@@ -477,6 +642,38 @@ pub fn water_area(config: &WaterAreaConfig) -> Result<WaterArea, BuildError> {
         view.pipes
             .extend([pipe("wet-well", E, &id, W), pipe(&id, E, "balance", W)]);
     }
+    for node in &view.nodes {
+        if let (Some(PlantViewBinding::Point(point)), Some(display)) = (&node.binding, node.display)
+        {
+            plant.display(*point, display);
+        }
+    }
+    for point in [layout.level_primary, layout.level_backup] {
+        plant.display(
+            point,
+            MeasurementDisplay {
+                min: 0.0,
+                max: 5.0,
+                normal: Some([1.0, 3.0]),
+            },
+        );
+    }
+    plant.display(
+        layout.inflow,
+        MeasurementDisplay {
+            min: 0.0,
+            max: config.inflow.max(1.0),
+            normal: None,
+        },
+    );
+    plant.display(
+        layout.net_flow,
+        MeasurementDisplay {
+            min: -config.pump_flow * config.station.pumps as f64,
+            max: config.inflow.max(1.0),
+            normal: None,
+        },
+    );
     plant.view(view);
     let mut model = plant.build()?;
     for point in [layout.level_primary, layout.level_backup] {
@@ -504,6 +701,10 @@ pub fn water_area(config: &WaterAreaConfig) -> Result<WaterArea, BuildError> {
         dynamics,
         station: layout,
         level,
+        physical_balance_level: balance_actual,
+        physical_wet_level: wet_actual,
+        wet_overflow,
+        balance_overflow,
         balance_measurement: instrument,
         flow_measurement,
         isolation,

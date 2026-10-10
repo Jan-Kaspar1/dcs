@@ -115,6 +115,9 @@
         "second_order_lag": {
           "$ref": "#/$defs/second-order-lag"
         },
+        "tank_flow": {
+          "$ref": "#/$defs/tank-flow"
+        },
         "threshold": {
           "$ref": "#/$defs/threshold"
         }
@@ -318,6 +321,53 @@
       "maximum": 18446744073709551615,
       "minimum": 0,
       "type": "integer"
+    },
+    "tank-flow": {
+      "additionalProperties": false,
+      "properties": {
+        "flow_per_level": {
+          "$ref": "#/$defs/positive"
+        },
+        "inflow": {
+          "$ref": "#/$defs/id"
+        },
+        "initial": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "level": {
+          "$ref": "#/$defs/id"
+        },
+        "max": {
+          "$ref": "#/$defs/number"
+        },
+        "min": {
+          "$ref": "#/$defs/number"
+        },
+        "mode": {
+          "enum": [
+            "outlet",
+            "overflow"
+          ]
+        },
+        "outlet": {
+          "$ref": "#/$defs/id"
+        },
+        "output": {
+          "$ref": "#/$defs/id"
+        }
+      },
+      "required": [
+        "level",
+        "inflow",
+        "outlet",
+        "output",
+        "mode",
+        "min",
+        "max",
+        "flow_per_level",
+        "initial"
+      ],
+      "type": "object"
     },
     "threshold": {
       "additionalProperties": false,

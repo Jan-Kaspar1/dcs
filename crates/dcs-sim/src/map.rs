@@ -123,6 +123,49 @@ pub struct GatedFlow {
     pub initial: f64,
 }
 
+/// The physical rate computed by a [`TankFlow`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TankFlowMode {
+    /// Limit the requested outlet to incoming flow and stored inventory.
+    Outlet,
+    /// Emit inflow exceeding the actual outlet and free storage capacity.
+    Overflow,
+}
+
+/// A nonnegative physical flow constrained by a vessel's inventory.
+///
+/// `level` reads the sample at the beginning of the field step, independently
+/// of element order. `inflow` and `outlet` read the current ordered samples.
+/// With positive `dt`, Outlet caps request by
+/// `inflow + (level-min)*flow_per_level/dt`; Overflow emits
+/// `max(inflow-outlet-(max-level)*flow_per_level/dt, 0)`.
+/// At `dt=0`, no volume evolves: Outlet passes request when inventory exists,
+/// otherwise caps it by inflow; Overflow emits excess inflow only at `max`.
+/// Inputs must be finite and trusted, with bounded level and nonnegative outlet.
+/// Signed net inlet permits sequential allocation of shared storage.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TankFlow {
+    /// Physical level at the beginning of the field step.
+    pub level: PointId,
+    /// Finite signed net incoming flow from other streams.
+    pub inflow: PointId,
+    /// Requested outlet in Outlet mode, actual outlet in Overflow mode.
+    pub outlet: PointId,
+    /// Nonnegative physical flow output, a Float In point.
+    pub output: PointId,
+    /// Which rate this element computes.
+    pub mode: TankFlowMode,
+    /// Finite lower level bound.
+    pub min: f64,
+    /// Finite upper bound, strictly above min.
+    pub max: f64,
+    /// Positive conversion from level per second to flow, e.g. area*3600.
+    pub flow_per_level: f64,
+    /// Finite nonnegative initial rate.
+    pub initial: f64,
+}
+
 /// An integrator process element: `dy/dt = u`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Integrator {
@@ -397,6 +440,8 @@ pub enum ProcessElement {
     BoundedIntegrator(BoundedIntegrator),
     /// A feedback-gated proportional flow.
     GatedFlow(GatedFlow),
+    /// An inventory-constrained vessel outlet or overflow.
+    TankFlow(TankFlow),
     /// A [`DeadTime`].
     DeadTime(DeadTime),
     /// A [`Noise`].
@@ -424,6 +469,7 @@ impl ProcessElement {
             Self::Integrator(element) => Some(element.input),
             Self::BoundedIntegrator(element) => Some(element.input),
             Self::GatedFlow(element) => Some(element.input),
+            Self::TankFlow(_) => None,
             Self::DeadTime(element) => Some(element.input),
             Self::Noise(element) => Some(element.input),
             Self::BoolFlow(element) => Some(element.input),
@@ -442,6 +488,7 @@ impl ProcessElement {
             Self::Integrator(element) => std::slice::from_ref(&element.input),
             Self::BoundedIntegrator(element) => std::slice::from_ref(&element.input),
             Self::GatedFlow(element) => std::slice::from_ref(&element.input),
+            Self::TankFlow(_) => &[],
             Self::DeadTime(element) => std::slice::from_ref(&element.input),
             Self::Noise(element) => std::slice::from_ref(&element.input),
             Self::BoolFlow(element) => std::slice::from_ref(&element.input),
@@ -457,7 +504,15 @@ impl ProcessElement {
             Self::GatedFlow(flow) => Some(flow.gate),
             _ => None,
         };
-        self.inputs().iter().copied().chain(gate)
+        let tank = match self {
+            Self::TankFlow(flow) => Some([flow.level, flow.inflow, flow.outlet]),
+            _ => None,
+        };
+        self.inputs()
+            .iter()
+            .copied()
+            .chain(gate)
+            .chain(tank.into_iter().flatten())
     }
 
     /// The point the element drives.
@@ -468,6 +523,7 @@ impl ProcessElement {
             Self::Integrator(element) => element.output,
             Self::BoundedIntegrator(element) => element.output,
             Self::GatedFlow(element) => element.output,
+            Self::TankFlow(element) => element.output,
             Self::DeadTime(element) => element.output,
             Self::Noise(element) => element.output,
             Self::BoolFlow(element) => element.output,
@@ -487,6 +543,7 @@ impl ProcessElement {
             Self::Integrator(element) => Value::Float(element.initial),
             Self::BoundedIntegrator(element) => Value::Float(element.initial),
             Self::GatedFlow(element) => Value::Float(element.initial),
+            Self::TankFlow(element) => Value::Float(element.initial),
             Self::DeadTime(element) => Value::Float(element.initial),
             Self::Noise(element) => Value::Float(element.initial),
             Self::BoolFlow(element) => Value::Float(element.initial),
@@ -679,6 +736,35 @@ impl ChannelMap {
                     {
                         return Err(ConfigError::InvalidBound {
                             point: tank.output,
+                            bound,
+                            value,
+                        });
+                    }
+                }
+            }
+            if let ProcessElement::TankFlow(flow) = element {
+                for point in [flow.level, flow.inflow, flow.outlet] {
+                    let bound = binding(&points, point)?;
+                    if bound.kind() != ValueKind::Float {
+                        return Err(ConfigError::ElementPointKind {
+                            point,
+                            kind: bound.kind(),
+                        });
+                    }
+                }
+                for (bound, value) in [
+                    ("min", flow.min),
+                    ("max", flow.max),
+                    ("flow_per_level", flow.flow_per_level),
+                    ("initial", flow.initial),
+                ] {
+                    if !value.is_finite()
+                        || flow.min >= flow.max
+                        || flow.flow_per_level <= 0.0
+                        || flow.initial < 0.0
+                    {
+                        return Err(ConfigError::InvalidBound {
+                            point: flow.output,
                             bound,
                             value,
                         });

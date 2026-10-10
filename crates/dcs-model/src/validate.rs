@@ -63,6 +63,11 @@ impl fmt::Display for End {
 /// offending element by id, name, or connection index.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ValidationError {
+    /// A point's numeric presentation contract is incoherent.
+    InvalidPointDisplay {
+        /// Declared point identity.
+        point: PointId,
+    },
     /// A code-engineered process drawing has invalid geometry or references.
     InvalidPlantView {
         /// View identity, or empty for a document-wide bound.
@@ -389,6 +394,9 @@ pub enum ValidationError {
 impl fmt::Display for ValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidPointDisplay { point } => {
+                write!(f, "point {point:?} has invalid numeric display bounds")
+            }
             Self::InvalidPlantView { view, reason } => {
                 write!(f, "plant view {view:?} is invalid: {reason}")
             }
@@ -989,6 +997,23 @@ impl PlantModel {
         }
 
         for point in &self.io_points {
+            if let Some(display) = point.display {
+                let band = display.normal.is_none_or(|[low, high]| {
+                    low.is_finite()
+                        && high.is_finite()
+                        && display.min <= low
+                        && low <= high
+                        && high <= display.max
+                });
+                if !matches!(point.value_type, ValueKind::Float | ValueKind::Int)
+                    || !display.min.is_finite()
+                    || !display.max.is_finite()
+                    || display.min >= display.max
+                    || !band
+                {
+                    errors.push(ValidationError::InvalidPointDisplay { point: point.id });
+                }
+            }
             // `writable` interacts with the direction rule: only `In`
             // points can be command targets, so the flag on an `Out`
             // point — field or internal — is a declaration error.

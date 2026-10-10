@@ -65,14 +65,14 @@ def scenario(model):
         legs.append({'name': name, 'scans': scans,
             'expect': {str(p(k)): v for k, v in expect.items()},
             'commands': list(commands), 'expect_receipts': receipts or ['accepted'] * len(commands), 'plant': list(plant)})
-    leg('normal-pump-transfer', 100, {'balance-inflow': {'min': 60}, 'balance-level': {'min': 1, 'max': 4}})
+    leg('normal-pump-transfer', 100, {'balance-inflow': {'min': 60}, 'balance-level': {'min': 1, 'max': 4}, 'lv201-fault': {'bool': False}, 'lv201-unacknowledged': {'bool': False}})
     leg('setpoint-change', 100, {'lic201-setpoint': {'float': 2.8}, 'lv201-applied': {'min': 0, 'max': 100}}, [write('lic201-setpoint', 'float', 2.8)])
     leg('setpoint-admission-bounds', 0, {'lic201-setpoint': {'float': 2.8}}, [write('lic201-setpoint', 'float', 4.0)], ['point_out_of_range'])
     leg('closed-outlet-blocks-demand', 40, {'xv201-feedback': {'bool': False}, 'lv201-applied': {'float': 0.0}, 'lv201-tripped': {'bool': True}, 'physical-outlet-flow': {'float': 0.0}, 'outlet-flow': {'min': 0, 'max': 0.001}}, [write('xv201-request', 'bool', False)])
     leg('manual-request-remains-protected', 40, {'lv201-manual': {'float': 30.0}, 'lv201-applied': {'float': 0.0}}, [write('lv201-mode', 'bool', True), write('lv201-manual', 'float', 30.0)])
     leg('open-outlet-and-manual-flow', 60, {'lv201-applied': {'float': 30.0}, 'outlet-flow': {'min': 42, 'max': 44}}, [write('xv201-request', 'bool', True)])
     leg('manual-admission-bounds', 0, {'lv201-manual': {'float': 30.0}}, [write('lv201-manual', 'float', 101.0)], ['point_out_of_range'])
-    leg('failed-position-feedback', 60, {'lv201-fault': {'bool': True}, 'lv201-alarm': {'bool': True}, 'lv201-unacknowledged': {'bool': True}, 'outlet-flow': {'min': 42, 'max': 44}}, plant=[fault('lv201-feedback', {'bad': 'device_fault'})])
+    leg('failed-position-feedback', 80, {'lv201-fault': {'bool': True}, 'lv201-alarm': {'bool': True}, 'lv201-unacknowledged': {'bool': True}, 'outlet-flow': {'min': 42, 'max': 44}}, plant=[fault('lv201-feedback', {'bad': 'device_fault'})])
     leg('ack-does-not-reset-fault', 4, {'lv201-fault': {'bool': True}, 'lv201-unacknowledged': {'bool': False}}, [write('lv201-ack', 'bool', True)])
     leg('feedback-recovery', 80, {'lv201-fault': {'bool': False}, 'lv201-alarm': {'bool': False}}, [write('lv201-ack', 'bool', False)], plant=[clear('lv201-feedback')])
     # Bad measurements trip the actuator even when its operator selected manual.
