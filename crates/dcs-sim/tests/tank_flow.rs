@@ -168,7 +168,9 @@ fn degraded_invalid_and_overflowing_inputs_hold_finite_rates_then_recover() {
         );
         sim.write(PointId(point), Value::Float(restored)).unwrap();
     }
-    sim.step(f64::MIN_POSITIVE);
+    // 3 / MIN_POSITIVE is still finite; this smaller positive step
+    // genuinely overflows the inventory-to-rate conversion.
+    sim.step(f64::MIN_POSITIVE / 2.0);
     assert_eq!(number(&sim, 4), 8.0);
     assert_eq!(
         sim.read(PointId(4)).unwrap().quality,
