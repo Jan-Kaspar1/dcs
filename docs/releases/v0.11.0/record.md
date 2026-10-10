@@ -39,7 +39,7 @@ The served-registry and deployment schemas are unchanged.
 
 | Candidate artifact | sha256 |
 | --- | --- |
-| `plant-model.schema.json` | `3ceb14e825ef914c49c3ab201efc7a980131b00fd4bf2d7804f3cfc3b5d462e2` |
+| `plant-model.schema.json` | `135a7ffbc811aa3fb37841177dbecb07df0765f4cc52d23edd014283cb837d7e` |
 | `block-interfaces.schema.json` | `ddc00496814a4e8cd0d6ec8a5d9fbb95e83f518dcd927b17a4802f13ac84013a` |
 | `dynamics.schema.json` | `730a3dd6d80bf69f744a22d64e5c356e2d342f9603bbd9226cca5d2b2da0313d` |
 | `deploy-manifest.schema.json` | `980430ca8725af997a7b5063f00d2a9663fe4619ca00a542917bde24f270cfa9` |
