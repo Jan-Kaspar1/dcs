@@ -208,6 +208,44 @@ including the preview's page bytes. Follow-up process, diagnostic and persistenc
 fixes produce a new immutable candidate rather than modifying that artifact. `target/water-area-evidence/restored-customer.json`
 records that restoration; `verification.json` records the gate results.
 
+The follow-up is committed regularly to local `main`. Its four fast gate phases
+pass: formatting (25 s), 4,527 supervisor tests (735 s), clippy (30 s) and the
+complete workspace Rust suite (376 s). The final exact-artifact proof passes in
+459 s. All five consumer/reference proofs also pass in the full proof phase
+(2,161 s). The gate matrix and source-restoration evidence are preserved in
+`target/water-area-evidence/followup-verification.json`. The original minimum-normal
+timestep did not overflow arithmetic; the inventory regression now uses a
+smaller positive step that actually does. The command-abort transport stub also
+consumes its declared body before replying, avoiding a TCP reset that made
+answered receipt/refusal cases flaky. Forty repeated answered cases pass.
+
+The final candidate is `ef53140dc4ad2b4256761f324df4dc55c6e3e095`, with customer
+`0dcdae7e0fe12fd6881b6e0f7a3bd26484ba0bce`. Its model SHA-256 is
+`fbd3e4fe805ff611843c693ee2a3a087560e1bca9834a1aca471b08656726503`; every consumer
+schedule, restart at tick 664 and compatible takeover retain authoritative digest
+`6b96c7e1c9a3555e4718552668fafbcec8ee8e97e29459c4d2f0885a2308db7c`.
+All 16 admitted commands settle applied and the scenario retains its named
+rejections. The delivery archive has 590 files and SHA-256
+`9e8b7437a1977720685ce6b3cbcbbe86ee7a3b463f1fac0e58bca349ecfc6b3f`.
+A fresh restoration at `/tmp/dcs-water-reviewed-ef53140dc4ad` has all 153 production
+source files byte-matching the candidate and both release schemas matching its
+bundled CLI emission. The frozen offline rebuild preserves the original lock
+and reproduces two- and three-pump emissions. Later evidence documentation is
+not a claim that the candidate is a published source tag.
+
+The preview's emitted model is semantically identical to that candidate (its
+launcher reserializes JSON). Its page bytes match current source. Isolated
+execution of the production command functions preserves admitted-but-unattested
+receipts, distinguishes unanswered outcomes from answered refusals, and performs
+no automatic retry. A known admission reconciles by its receipt origin/sequence;
+an older identical request, another boot or an unidentified receipt cannot
+settle it. These checks remain supplemental to actual browser review.
+
+Origin publishing was attempted as a dry run and refused because Git HTTPS
+credentials are unavailable. All commits remain local on `main`; no remote CI
+or release publication is claimed. Configure Git credentials before publishing
+and collecting reviewed CI results.
+
 An earlier historical test hung after a 256-scan batch overflowed the released
 64-entry state sink and poisoned its handler mutex. The history harness now
 uses 32-scan durability-attested batches and bounded HTTP; timeout outcomes are
@@ -244,8 +282,10 @@ initial verified connected-area implementation is `f7068e50`; exact offline
 artifact packaging is `a4c4cfdd`. Follow-up commits are `88246e8a` for terminal
 persistence recovery, `24abeb77` for conserved inventory, engineered feedback
 diagnostics and point display bounds, `7c056e6a` for the gated offline rebuild,
-and `9fd5b8a1` for the CLI-emitted candidate schema version guards. The acceptance
-writer-lifetime fix is `299e00f7`. Each cut records its applicable verification.
+and `9fd5b8a1` for the CLI-emitted candidate schema version guards. `7550819b`
+retains known command receipt identity during reconciliation. Acceptance fixes
+are `299e00f7` (writer lifetime), `91932bca` (complete transport request body)
+and `ebc24dfa` (genuinely overflowing positive timestep). Each cut records its applicable verification.
 Remote CI and public publication are distinct from local commits and local
 repository gates. No automatic backlog generation or unrelated Git work is
 performed. The unrelated mode-only change to `ci/simulate.py` is preserved.
