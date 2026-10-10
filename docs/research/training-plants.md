@@ -3,7 +3,7 @@
 - **Checked:** 2026-10-09.
 - **Question:** Which vendor, university, and utility references can supply a documented process and repeatable exercises for standard DCS control elements and their operator UI?
 - **Affected requirements:** `WW-FND-001`, `WW-FND-003`, `WW-FND-004`, `WW-ENG-003`, `WW-OPS-001`–`WW-OPS-003`, `WW-CTL-001`, `WW-CTL-002`, `WW-LCM-001`; deployment discussion also touches candidate `WW-LCM-002`.
-- **Status:** research and a proposed implementation sequence, requested by Kaspar. No new plant, widget, deployment command, or customer acceptance is claimed as implemented.
+- **Status:** research followed by Kaspar's assigned connected-area implementation after PR #1526. [Implementation inventory and simulation provenance](../milestones/connected-water.md) record the evidence; public release and actual browser review remain open. No deployment command or site acceptance is claimed.
 - **Related evidence:** [operator HMI](operator-hmi.md), [APL behavior prompts](apl-reusable-library.md), [station policies](pumping-station.md), and [deployment lifecycle](deployment-commissioning.md). Existing architecture decisions 79–84 define the independent plant repository, released engineering API, shared block interface, and controller authority.
 
 ## Product goal recorded from the discussion
@@ -67,3 +67,15 @@ Engineering defaults, persisted operator settings, runtime state, and infrastruc
 - What fidelity is sufficient for the first area? Use original, documented water dynamics; revisit S4 only for a demonstrated interaction-model gap and S5 only for a biological-control requirement.
 - Does the next deployment need a platform orchestrator, infrastructure automation, or only the existing manifest/rig procedure? Revisit when a pilot deployment plan names topology, activation, backup, and rollback obligations that current seams cannot express.
 - Are external project code or datasets actually needed? Inspect their particular terms and reproducibility before adopting them. Public descriptions are sufficient for this research; external accounts and hardware access are not prerequisites for the first slice.
+
+
+## Connected-area implementation follow-up — 2026-10-10
+
+The assigned slice uses the recommended S7 station behavior and S3 connected training approach. Its balance vessel/PI discharge topology and all numeric parameters are original simulation engineering, explicitly distinguished from source behavior in the [area record](../milestones/connected-water.md). Existing executor equipment and managed alarm semantics were reused. New evidence includes negative-gain anti-windup, authoritative numeric command bounds, shared display context, physical-versus-sensor separation and the independent candidate-artifact consumer.
+Stronger operator acceptance exposed water creation at empty storage and healthy
+actuator lag being mistaken for failed feedback. The follow-up engineers
+inventory-limited flows, explicit overflow and a typed agreement band/dwell;
+these are training assumptions, requiring site-specific commissioning. Inherited
+recordings also require point-level display bounds rather than inferred trend
+scales. Exact binary/SDK delivery with locked offline sources makes the customer
+boundary reproducible after its temporary release origin is gone. The existing harness checks normal/fault operations, six consumer schedules, durable restart and paired takeover on the same area. See that record for reproducible commands and remaining release/browser gates. This adds evidence to the water baseline, not a new market or automatic planning authorization.

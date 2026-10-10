@@ -1257,7 +1257,15 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
         )?);
     }
 
-    let model = plant.build()?;
+    let mut model = plant.build()?;
+    // This historical emitter retains its canonical artifact/fingerprint.
+    // New area composers may opt into optional operator role metadata; the
+    // standalone pump factory already declares it for new equipment.
+    for equipment in &mut model.equipment {
+        for control in &mut equipment.controls {
+            control.role = None;
+        }
+    }
     Ok(PumpStation {
         model,
         layout: PumpStationLayout {

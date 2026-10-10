@@ -348,6 +348,9 @@ fn fold_components(path: PathBuf) -> PathBuf {
 /// Records bounded per-point history and the transition journal, one scan
 /// at a time. See the module docs for the recording point and ordering.
 pub(super) struct Recorder {
+    /// The first refused durable record. A refusal stops the host at its
+    /// next boundary; it must never unwind through the executor mutex.
+    failure: Option<String>,
     /// The publication store the recorded streams live in — shared with
     /// the monitor, which publishes each completed scan's read model
     /// there and serves every read from it.
@@ -586,6 +589,7 @@ impl Recorder {
             BTreeMap::new()
         };
         let mut recorder = Self {
+            failure: None,
             store,
             next_seq: replay.next_seq,
             qualities: HashMap::new(),
@@ -637,6 +641,9 @@ impl Recorder {
                 },
                 tick,
             );
+        }
+        if let Some(error) = recorder.failure() {
+            return Err(io::Error::other(error));
         }
         Ok(recorder)
     }
@@ -1388,6 +1395,9 @@ impl Recorder {
     /// the file's axis — never reused, so served-window eviction
     /// reads as a numbering gap.
     fn push_durable(&mut self, event: DurableEvent, tick: Tick) {
+        if self.failure.is_some() {
+            return;
+        }
         let entry = DurableEntry {
             seq: self.history_next_seq,
             tick,
@@ -1400,7 +1410,8 @@ impl Recorder {
                 HistoryRecord::Entry(entry) => entry.seq,
                 HistoryRecord::RunBoundary { .. } => self.history_next_seq,
             };
-            panic!("{error} — refused durable history seq {seq}");
+            self.failure = Some(format!("{error} — refused durable history seq {seq}"));
+            return;
         }
         self.history_next_seq += 1;
         self.store.push_durable(entry);
@@ -1489,6 +1500,9 @@ impl Recorder {
     /// clock holds ahead of the stream — lands at the standing mark;
     /// the event payload still carries its own domain's truth.
     pub(super) fn push(&mut self, tick: Tick, event: JournalEvent) {
+        if self.failure.is_some() {
+            return;
+        }
         let tick = match self.last_pushed {
             Some(last) => tick.max(last),
             None => tick,
@@ -1510,11 +1524,26 @@ impl Recorder {
                     JournalRecord::Entry(entry) => entry.seq,
                     JournalRecord::RunBoundary { .. } => self.next_seq,
                 };
-                panic!("{error} — refused journal seq {seq}");
+                self.failure = Some(format!("{error} — refused journal seq {seq}"));
+                return;
             }
         }
         self.next_seq += 1;
         self.store.push_journal(entry);
+    }
+
+    /// The recorded durability failure, including asynchronous writer errors.
+    pub(super) fn failure(&self) -> Option<String> {
+        self.failure.clone().or_else(|| {
+            self.sink
+                .as_ref()
+                .and_then(|sink| sink.shared().failed())
+                .or_else(|| {
+                    self.history_sink
+                        .as_ref()
+                        .and_then(|sink| sink.shared().failed())
+                })
+        })
     }
 }
 

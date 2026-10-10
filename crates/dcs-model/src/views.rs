@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 /// A named process area drawn on a fixed 1200 by 760 coordinate plane.
 /// Geometry changes presentation only; bindings retain normal control authority.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlantView {
     /// Unique view identity used for area navigation.
@@ -36,8 +36,21 @@ impl PlantView {
     }
 }
 
+/// Explicit measurement display context, independent of control and alarm limits.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MeasurementDisplay {
+    /// Finite lower display bound.
+    pub min: f64,
+    /// Finite upper display bound, strictly greater than min.
+    pub max: f64,
+    /// Optional finite normal band contained within the display range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normal: Option<[f64; 2]>,
+}
+
 /// One library symbol with an optional live model binding.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlantViewNode {
     /// Unique symbol identity within its view.
@@ -53,6 +66,9 @@ pub struct PlantViewNode {
     /// Existing model entity supplying live state and controls, or drawing only.
     #[serde(default)]
     pub binding: Option<PlantViewBinding>,
+    /// Optional declared gauge context for a numeric point-bound measurement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<MeasurementDisplay>,
 }
 
 impl PlantViewNode {
@@ -71,6 +87,7 @@ impl PlantViewNode {
             x,
             y,
             binding: None,
+            display: None,
         }
     }
 }
@@ -244,6 +261,28 @@ pub(crate) fn validate(model: &PlantModel, errors: &mut Vec<ValidationError>) {
                 (_, Some(PlantViewBinding::Component(id))) => components.contains(id),
                 (_, Some(PlantViewBinding::Point(_))) => false,
             };
+            if let Some(display) = node.display {
+                let numeric = node.symbol == PlantViewSymbol::Measurement
+                    && matches!(node.binding, Some(PlantViewBinding::Point(_)));
+                let band = display.normal.is_none_or(|[low, high]| {
+                    low.is_finite()
+                        && high.is_finite()
+                        && display.min <= low
+                        && low <= high
+                        && high <= display.max
+                });
+                if !numeric
+                    || !display.min.is_finite()
+                    || !display.max.is_finite()
+                    || display.min >= display.max
+                    || !band
+                {
+                    reject(format!(
+                        "symbol {:?} has invalid measurement display bounds or binding",
+                        node.id
+                    ));
+                }
+            }
             if !valid {
                 reject(format!(
                     "symbol {:?} has a missing or incompatible model binding",

@@ -324,5 +324,6 @@ fn symbol(
         x,
         y,
         binding,
+        display: None,
     }
 }

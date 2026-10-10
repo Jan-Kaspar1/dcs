@@ -1881,7 +1881,7 @@ function pointAffordance(meta, sample, forced) {
   const parts = [];
   if (meta.writable && meta.direction === "in") {
     parts.push("<span class=\"command\"><input class=\"command-value\"" +
-      " data-point=\"" + meta.point + "\" size=\"9\"" +
+      " data-point=\"" + meta.point + "\" size=\"9\"" + limitsHint(meta.point) +
       (sample ? " placeholder=\"" + esc(formatValue(sample.value)) + "\"" : "") +
       "><button type=\"button\" class=\"force\" data-point=\"" + meta.point +
       "\">force</button></span>");
@@ -1948,6 +1948,13 @@ function portMeta(port) {
 // affordance shares that surface, narrowed to `In` points — the force
 // contract's only legal target — and a forced bound point carries the
 // release, even where the metadata gate hides the write.
+function pointLimits(point) {
+  return (index?.equipment || []).flatMap(item => item.controls || []).find(control => control.point === point && control.limits)?.limits;
+}
+function limitsHint(point) {
+  const range = pointLimits(point);
+  return range ? " title=\"Declared command limits " + esc(formatValue(range.min) + " … " + formatValue(range.max)) + "\"" : "";
+}
 function commandAffordance(port, sample, forced) {
   const meta = portMeta(port);
   const release = forced.has(port.point)
@@ -1958,7 +1965,7 @@ function commandAffordance(port, sample, forced) {
     return release === "" ? "" : "<span class=\"command\">" + release + "</span>";
   }
   return "<span class=\"command\"><input class=\"command-value\"" +
-    " data-point=\"" + port.point + "\" size=\"9\"" +
+    " data-point=\"" + port.point + "\" size=\"9\"" + limitsHint(port.point) +
     (sample ? " placeholder=\"" + esc(formatValue(sample.value)) + "\"" : "") +
     "><button type=\"button\" class=\"write\" data-point=\"" + port.point +
     "\">write</button>" +
@@ -2208,26 +2215,31 @@ function faceplateMarkup(descriptor, diag, telemetry, forced, parameters) {
 // choice, recorded so a poll never collapses an opened section. Shared
 // by the faceplates section and the equipment pane's duplicated
 // faceplate.
+function scopedEditKey(control, key) {
+  const member = control.closest("details.equipment-member");
+  return member ? JSON.stringify(["equipment-member", member.dataset.member, key]) : key;
+}
 function captureEdits(container) {
   const pending = new Map();
   let focused = null;
   for (const input of document.querySelectorAll(container + " input.command-value")) {
-    pending.set(input.dataset.point, input.value);
-    if (input === document.activeElement) focused = input.dataset.point;
+    const key = scopedEditKey(input, input.dataset.point);
+    pending.set(key, input.value);
+    if (input === document.activeElement) focused = key;
   }
   for (const input of document.querySelectorAll(container + " input.equipment-reason")) {
-    const key = "equipment-reason:" + input.dataset.point;
+    const key = scopedEditKey(input, "equipment-reason:" + input.dataset.point);
     pending.set(key, input.value);
     if (input === document.activeElement) focused = key;
   }
   for (const control of document.querySelectorAll(container + " .param-value")) {
-    const key = paramKey(control.dataset.component, control.dataset.param);
+    const key = scopedEditKey(control, paramKey(control.dataset.component, control.dataset.param));
     pending.set(key, control.value);
     if (control === document.activeElement) focused = key;
   }
   for (const input of document.querySelectorAll(container + " .command-arg")) {
-    const key = commandKey(input.dataset.component,
-      input.dataset.command + "\n" + input.dataset.arg);
+    const key = scopedEditKey(input, commandKey(input.dataset.component,
+      input.dataset.command + "\n" + input.dataset.arg));
     pending.set(key, input.value);
     if (input === document.activeElement) focused = key;
   }
@@ -2248,22 +2260,23 @@ function restoreEdits(container, captured) {
   const internals = document.querySelector(container + " details.equipment-internals");
   if (internals) internals.open = captured.internalsOpen;
   for (const input of document.querySelectorAll(container + " input.command-value")) {
-    if (pending.has(input.dataset.point)) input.value = pending.get(input.dataset.point);
-    if (input.dataset.point === focused) input.focus();
+    const key = scopedEditKey(input, input.dataset.point);
+    if (pending.has(key)) input.value = pending.get(key);
+    if (key === focused) input.focus();
   }
   for (const input of document.querySelectorAll(container + " input.equipment-reason")) {
-    const key = "equipment-reason:" + input.dataset.point;
+    const key = scopedEditKey(input, "equipment-reason:" + input.dataset.point);
     if (pending.has(key)) input.value = pending.get(key);
     if (key === focused) input.focus();
   }
   for (const control of document.querySelectorAll(container + " .param-value")) {
-    const key = paramKey(control.dataset.component, control.dataset.param);
+    const key = scopedEditKey(control, paramKey(control.dataset.component, control.dataset.param));
     if (pending.has(key)) control.value = pending.get(key);
     if (key === focused) control.focus();
   }
   for (const input of document.querySelectorAll(container + " .command-arg")) {
-    const key = commandKey(input.dataset.component,
-      input.dataset.command + "\n" + input.dataset.arg);
+    const key = scopedEditKey(input, commandKey(input.dataset.component,
+      input.dataset.command + "\n" + input.dataset.arg));
     if (pending.has(key)) {
       input.value = pending.get(key);
     } else if (input.dataset.initial != null) {
@@ -3348,7 +3361,9 @@ function alarmCommandMessage(text) {
     if ("accepted" in outcome) return "Request accepted; awaiting controller settlement.";
     if ("applied" in outcome) return "Request applied by the controller.";
     if ("rejected" in outcome) return "Request refused: " + JSON.stringify(outcome.rejected);
-    if ("indeterminate" in outcome) return "Outcome unknown; awaiting confirmation. Check live feedback.";
+    if ("indeterminate" in outcome) return outcome.indeterminate.admitted_receipt
+      ? "Request admitted; persistence unconfirmed. Controller stood down. Do not retry automatically."
+      : "Outcome unknown; awaiting confirmation. Check live feedback.";
   } catch (_) { /* Text notices include missing reasons and connection errors. */ }
   return text;
 }
@@ -3688,7 +3703,7 @@ function equipmentControls(equipment, telemetry, forced, members) {
     const reason = meta.requires_reason ? "<input class=\"equipment-reason\" data-point=\"" +
       control.point + "\" placeholder=\"reason\" title=\"Required command reason\"> " : "";
     if (meta.value_type !== "bool") {
-      return caption + reason + commandAffordance({ point: control.point }, sample, forced) + "</div>";
+      return caption + reason + (control.limits ? "<small>" + esc(formatValue(control.limits.min) + " … " + formatValue(control.limits.max)) + " " + esc(meta.unit || "") + "</small> " : "") + commandAffordance({ point: control.point }, sample, forced) + "</div>";
     }
     const buttons = [false, true].map(level => {
       const label = level ? (control.true_label || "Set true") : (control.false_label || "Set false");
@@ -3719,13 +3734,31 @@ function equipmentControls(equipment, telemetry, forced, members) {
     (alarms.length ? "<h3>Alarms</h3>" + alarmRows : "") + "</section>";
 }
 
+// Protection explanations use the declared interlock ports and bound points.
+// A stored request remains admissible while protection holds the safe output.
+function equipmentProtectionReasons(members, telemetry) {
+  const reasons = [];
+  for (const member of members.filter(item => item.kind === "interlock")) {
+    if (!isAsserted(flagSample(member, telemetry, "tripped"))) continue;
+    for (const port of member.ports.filter(item => item.direction === "in")) {
+      const sample = portSample(port, telemetry);
+      const meta = metaByPoint.get(port.point);
+      const label = meta?.description || meta?.name || port.name;
+      if (!sample || !isGood(sample.quality)) reasons.push(label + ": " + (sample ? formatQuality(sample.quality) : "no sample"));
+      else if (port.name === "permissive" && sample.value.bool === false) reasons.push(label + ": permissive absent");
+      else if (port.name.startsWith("trip_") && sample.value.bool === true) reasons.push(label + ": trip asserted");
+    }
+  }
+  return reasons.length ? "<section class=\"equipment-protection\"><h3>Output blocked</h3><p>" + [...new Set(reasons)].map(esc).join(" · ") + "</p></section>" : "";
+}
+
 // Ordered, model-declared feedback stays separate from command requests.
 function equipmentFeedback(equipment, telemetry, members) {
   const commandPoints = new Set(equipment.controls.map(control => control.point));
   const alarmPoints = new Set(members.filter(member => member.ports.some(port =>
     port.name === "alarm" && port.direction === "out" && port.kind === "bool"))
     .flatMap(member => member.ports.map(port => port.point)));
-  const points = equipment.points.filter(point => !commandPoints.has(point) && !alarmPoints.has(point)).slice(0, 6);
+  const points = equipment.points.filter(point => !commandPoints.has(point) && !alarmPoints.has(point));
   return "<section class=\"equipment-feedback\"><h3>Feedback</h3><dl>" + points.map(point => {
     const meta = metaByPoint.get(point);
     const sample = (telemetry.get(point) || {}).sample;
@@ -3735,7 +3768,8 @@ function equipmentFeedback(equipment, telemetry, members) {
       sample.value.bool ? "Yes" : "No" : formatValue(sample.value) : "—";
     return "<div><dt title=\"" + esc(meta ? meta.name + " · " + (meta.description || "") : "") + "\">" + esc(label) + "</dt><dd class=\"" +
       (trusted ? "" : "uncertain") + "\">" + esc(value) +
-      (trusted ? "" : " · " + esc(feed.stale !== null ? "last known / stale" : sample ? formatQuality(sample.quality) : "no sample")) + "</dd></div>";
+      (meta && meta.unit ? " <small>" + esc(meta.unit) + "</small>" : "") +
+      (trusted ? " · Good" : " · " + esc(feed.stale !== null ? "last known / stale" : sample ? formatQuality(sample.quality) : "no sample")) + "</dd></div>";
   }).join("") + "</dl></section>";
 }
 
@@ -3787,24 +3821,37 @@ function renderEquipment(snapshot, telemetry, forced) {
   const parameters = new Map(
     (snapshot.parameters || []).map(p => [p.name, p.values]));
   const surface = document.getElementById("equipment-faceplate");
-  const markup = equipment ? equipmentControls(equipment, telemetry, forced, members) +
-    equipmentFeedback(equipment, telemetry, members) :
+  const markup = equipment ? equipmentProtectionReasons(members, telemetry) + equipmentControls(equipment, telemetry, forced, members) +
+    equipmentFeedback(equipment, telemetry, members) +
+    "<p class=\"equipment-demand-note\">Applied receipts confirm a stored request. Protection, operating mode and physical feedback determine the equipment output.</p>" +
+    members.map(member => "<details class=\"equipment-member\" data-member=\"" + esc(member.name) + "\"><summary>" + esc(member.label + " · " + member.kind) + "</summary>" +
+      faceplateMarkup(member, diagnostics.get(member.name), telemetry, forced, parameters) + "</details>").join("") :
     faceplateMarkup(descriptor, diagnostics.get(descriptor.name), telemetry, forced, parameters);
   // Keep operator buttons in place between actual state changes. A poll must
   // not replace a button under a pointer or repeatedly discard keyboard focus.
   if (surface.renderedMarkup !== markup) {
     const focused = surface.contains(document.activeElement) ? document.activeElement : null;
-    const focusPoint = focused && focused.dataset.point;
-    const focusLevel = focused && focused.dataset.level;
+    const focusKey = focused && { tag: focused.tagName, className: focused.className,
+      id: focused.id, data: JSON.stringify(focused.dataset),
+      member: focused.closest("details.equipment-member")?.dataset.member,
+      selection: focused.tagName === "INPUT" && focused.selectionStart != null
+        ? [focused.selectionStart, focused.selectionEnd] : null };
+    const opened = new Set(Array.from(surface.querySelectorAll("details.equipment-member[open]")).map(element => element.dataset.member));
     surface.innerHTML = markup;
+    surface.querySelectorAll("details.equipment-member").forEach(element => { element.open = opened.has(element.dataset.member); });
     surface.renderedMarkup = markup;
-    if (focusPoint != null && focused.tagName === "BUTTON") {
-      const replacement = Array.from(surface.querySelectorAll("button[data-point]"))
-        .find(button => button.dataset.point === focusPoint && button.dataset.level === focusLevel);
-      if (replacement) replacement.focus({ preventScroll: true });
+    restoreEdits("#equipment-faceplate", captured);
+    if (focusKey) {
+      const replacement = Array.from(surface.querySelectorAll("button,input,select,summary,a"))
+        .find(element => element.tagName === focusKey.tag && element.className === focusKey.className &&
+          element.id === focusKey.id && JSON.stringify(element.dataset) === focusKey.data &&
+          element.closest("details.equipment-member")?.dataset.member === focusKey.member);
+      if (replacement && !replacement.disabled) {
+        replacement.focus({ preventScroll: true });
+        if (focusKey.selection) replacement.setSelectionRange(...focusKey.selection);
+      }
     }
-  }
-  restoreEdits("#equipment-faceplate", captured);
+  } else restoreEdits("#equipment-faceplate", captured);
   document.getElementById("equipment-rationalization").innerHTML =
     equipment ? members.map(member => rationalizationMarkup(member.name)).join("") :
       rationalizationMarkup(descriptor.name);
@@ -3998,15 +4045,16 @@ function trendBody(point) {
   if (coords.length === 0) return "";
   const min = Math.min(...coords.map(c => c.v));
   const max = Math.max(...coords.map(c => c.v));
-  let lo = min, hi = max;
+  const display = metaByPoint.get(point)?.display || (index?.views || []).flatMap(view => view.nodes || []).find(node => node.binding?.point === point && node.display)?.display;
+  let lo = display ? display.min : min, hi = display ? display.max : max;
   if (lo === hi) { lo -= 1; hi += 1; }
   const W = 320, H = 90, padX = 8, padY = 14;
   const n = state.samples.length;
   const px = i => padX + (W - 2 * padX) * (n > 1 ? i / (n - 1) : 0.5);
-  const py = v => H - padY - (H - 2 * padY) * (v - lo) / (hi - lo);
+  const py = v => H - padY - (H - 2 * padY) * Math.max(0, Math.min(1, (v - lo) / (hi - lo)));
   let body =
-    "<text class=\"limit\" x=\"" + padX + "\" y=\"10\">" + esc(max) + "</text>" +
-    "<text class=\"limit\" x=\"" + padX + "\" y=\"" + (H - 4) + "\">" + esc(min) + "</text>" +
+    "<text class=\"limit\" x=\"" + padX + "\" y=\"10\">" + esc(hi) + "</text>" +
+    "<text class=\"limit\" x=\"" + padX + "\" y=\"" + (H - 4) + "\">" + esc(lo) + "</text>" +
     "<polyline points=\"" +
     coords.map(c => px(c.i).toFixed(1) + "," + py(c.v).toFixed(1)).join(" ") +
     "\"/>";
@@ -4390,6 +4438,10 @@ function describeOutcome(outcome) {
     return "rejected: " + describeReason(outcome.rejected.reason);
   }
   if ("indeterminate" in outcome) {
+    if (outcome.indeterminate.admitted_receipt) {
+      return "admitted; persistence unconfirmed — controller stood down; " +
+        "reconcile receipts and live feedback before issuing another request";
+    }
     return "outcome unknown — the submission went unanswered and may " +
       "still apply; the journaled settled receipt is the verdict";
   }
@@ -4459,6 +4511,10 @@ function describeReason(reason) {
     const rejection = reason.parameter_type_mismatch;
     return "parameter " + rejection.component + "." + rejection.parameter +
       " expects " + pascal(rejection.expected) + ", found " + formatValue(rejection.found);
+  }
+  if ("point_out_of_range" in reason) {
+    const rejection = reason.point_out_of_range;
+    return "Point " + rejection.point + " value " + formatValue(rejection.value) + " outside declared limits [" + formatValue(rejection.range.min) + ", " + formatValue(rejection.range.max) + "]";
   }
   if ("out_of_range" in reason) {
     const rejection = reason.out_of_range;
@@ -4566,6 +4622,9 @@ function sameCommand(a, b) {
 // declared actor and reason the receipt echoes agree, so another
 // console's identical command cannot claim the pending entry.
 function sameSubmission(receipt, pending) {
+  if (pending.submission && (!receipt.submission ||
+      receipt.submission.origin !== pending.submission.origin ||
+      receipt.submission.seq !== pending.submission.seq)) return false;
   return sameCommand(receipt.command, pending.command) &&
     (receipt.actor || null) === pending.actor &&
     (receipt.reason || null) === pending.reason;
@@ -4583,9 +4642,17 @@ function abandonedSubmission(command, reason, error) {
     command: command,
     outcome: { indeterminate: { detail: String(error) } },
   };
+  if (error.admittedReceipt) {
+    answer.outcome.indeterminate.admitted_receipt = error.admittedReceipt;
+    answer.outcome.indeterminate.durability = error.durability;
+  }
   if (operator !== null) answer.actor = operator;
   if (reason) answer.reason = reason;
-  const notice = "command outcome unknown — no receipt answered the " +
+  const notice = error.admittedReceipt
+    ? "Request admitted; persistence unconfirmed. Controller stood down. " +
+      "Do not retry automatically; reconcile receipts and live feedback. " +
+      JSON.stringify(error.admittedReceipt)
+    : "command outcome unknown — no receipt answered the " +
     "submission (" + String(error) + ") and it may still apply: " +
     describeCommand(command) + ". The journaled settled receipt is " +
     "the verdict — resubmitting now risks applying the command twice.";
@@ -4593,6 +4660,7 @@ function abandonedSubmission(command, reason, error) {
     command: command,
     actor: operator,
     reason: reason || null,
+    submission: error.admittedReceipt?.submission || null,
     notice: notice,
   });
   if (pendingCommands.length > PENDING_LIMIT) pendingCommands.shift();
@@ -4636,7 +4704,13 @@ async function postCommand(base, command, reason) {
       throw answeredRefusal(response.status,
         await response.text().catch(() => ""));
     }
-    throw new Error("the monitor answered HTTP " + response.status);
+    const failure = await response.json().catch(() => null);
+    const error = new Error(failure?.error || "the monitor answered HTTP " + response.status);
+    if (failure?.receipt) {
+      error.admittedReceipt = failure.receipt;
+      error.durability = failure.durability;
+    }
+    throw error;
   }
   return response.json();
 }

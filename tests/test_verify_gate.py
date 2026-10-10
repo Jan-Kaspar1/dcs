@@ -78,7 +78,7 @@ class PhaseTimingTests(unittest.TestCase):
     def test_heavy_phase_entry_points_hold_the_shared_build_slot(self):
         # A new artifact build must not silently skip the clone-wide budget.
         # The existing lock tests own exclusion; this checks CLI routing.
-        for phase in ("rust-clippy", "rust-tests", "rust-proofs", "rust-demo"):
+        for phase in ("rust-clippy", "rust-tests", "rust-proofs", "rust-demo", "water-area-proof"):
             with self.subTest(phase=phase):
                 held = False
 

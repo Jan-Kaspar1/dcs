@@ -115,12 +115,12 @@ fn an_unsupported_model_version_is_refused_with_the_named_diagnostic() {
     build(&scratch).unwrap_or_else(|diagnostic| panic!("{diagnostic}"));
     let emitted = scratch.emit();
 
-    // Doctor the emitted document one version past MODEL_VERSION.
+    // Doctor the document beyond both legacy and bounded-control versions.
     let mut document: serde_json::Value = serde_json::from_slice(&emitted).unwrap();
     let supported = document["version"]
         .as_u64()
         .expect("the emitted document declares a version");
-    let found = supported + 1;
+    let found = u64::from(dcs_model::CONTROL_LIMITS_MODEL_VERSION) + 1;
     document["version"] = found.into();
     let doctored = scratch.dir.join("model-doctored.json");
     std::fs::write(&doctored, serde_json::to_vec_pretty(&document).unwrap()).unwrap();

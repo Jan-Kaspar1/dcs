@@ -17,6 +17,8 @@ fn equipment_model() -> PlantModel {
         components: vec![ComponentId(1)],
         points: vec![PointId(11), PointId(10)],
         controls: vec![EquipmentControl {
+            role: None,
+            limits: None,
             point: PointId(10),
             label: "Demand".to_string(),
             false_label: None,
@@ -215,4 +217,26 @@ fn metadata_only_equipment_revisions_are_visible() {
     revised.equipment.clear();
     assert_eq!(old.diff(&revised).equipment[0].change, ChangeKind::Removed);
     assert_eq!(revised.diff(&old).equipment[0].change, ChangeKind::Added);
+}
+
+#[test]
+fn authoritative_limits_require_the_new_version_in_both_load_and_schema() {
+    use dcs_core::{ParameterRange, Value};
+    let mut model = equipment_model();
+    let point = model
+        .io_points
+        .iter()
+        .find(|p| p.id == PointId(10))
+        .unwrap();
+    assert_eq!(point.value_type, dcs_core::ValueKind::Float);
+    model.equipment[0].controls[0].limits = Some(ParameterRange {
+        min: Value::Float(-100.0),
+        max: Value::Float(100.0),
+    });
+    let validator = jsonschema::validator_for(&PlantModel::json_schema()).unwrap();
+    assert!(PlantModel::load(&serde_json::to_string(&model).unwrap()).is_err());
+    assert!(!validator.is_valid(&serde_json::to_value(&model).unwrap()));
+    model.version = dcs_model::CONTROL_LIMITS_MODEL_VERSION;
+    assert!(PlantModel::load(&serde_json::to_string(&model).unwrap()).is_ok());
+    assert!(validator.is_valid(&serde_json::to_value(&model).unwrap()));
 }

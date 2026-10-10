@@ -136,7 +136,7 @@ def run(args):
 
     signal.signal(signal.SIGTERM, interrupted)
     directory = Path(args.artifacts).resolve()
-    generator = executable(directory, "pump", example=True)
+    generator = executable(directory, "water_area" if args.area == "water" else "pump", example=True)
     controller = executable(directory, "dcs-controller")
     server = executable(directory, "dcs-plant-server")
     run_dir = Path(args.run_dir).resolve() / time.strftime("%Y%m%d-%H%M%S")
@@ -145,7 +145,7 @@ def run(args):
     options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
     generated = subprocess.run([str(generator)], check=True, capture_output=True, **options)
     model = json.loads(generated.stdout)
-    if len(model.get("equipment", [])) != 2:
+    if not model.get("equipment") or args.area == "pumps" and len(model["equipment"]) != 2:
         raise RuntimeError("the pump generator must declare two equipment instances; rebuild from this source")
     model_path = run_dir / "model.json"
     model_path.write_text(json.dumps(model, indent=2) + "\n", encoding="utf-8")
@@ -162,21 +162,33 @@ def run(args):
             return process
 
         plant_address = connect_address(args.plant_listen)
-        server_process = launch("plant", [str(server), str(model_path), "--listen", args.plant_listen])
+        plant_command = [str(server), str(model_path), "--listen", args.plant_listen]
+        if args.area == "water":
+            dynamics_path = run_dir / "dynamics.json"
+            dynamics_path.write_bytes(subprocess.run([str(generator), "--dynamics"], check=True, capture_output=True, **options).stdout)
+            plant_command.extend(["--dynamics", str(dynamics_path)])
+        server_process = launch("plant", plant_command)
         wait_ready(server_process, lambda: plant_request(plant_address, {"op": "list_points"}), "Plant server")
         monitor = "http://" + connect_address(args.listen)
         controller_process = launch("controller", [
             str(controller), str(model_path), "--remote", plant_address,
             "--listen", args.listen, "--scan-ms", "200", "--dt", "0.2",
             "--journal-file", str(run_dir / "journal.jsonl"),
+            "--state-file", str(run_dir / "controller.state"),
+            "--history-file", str(run_dir / "history.jsonl"),
         ])
         wait_ready(controller_process, lambda: http(monitor, "/health"), "Controller")
         # Fail early if an old controller silently omitted the new contract.
-        if len(http(monitor, "/signals").get("equipment", [])) != 2:
+        if len(http(monitor, "/signals").get("equipment", [])) != len(model["equipment"]):
             raise RuntimeError("the controller does not serve the new equipment contract; rebuild from this source")
         print(f"Open {monitor}/", flush=True)
-        print("Click Pump 1 or Pump 2 in the schematic. Choose Manual and Run request.", flush=True)
-        print("Ctrl+C stops both simulated processes. See docs/pump-demo.md for fault and recovery actions.", flush=True)
+        if args.area == "water":
+            print("Select LIC-201 to change the setpoint; XV-201 to close/open discharge; LV-201 for protected manual/automatic operation.", flush=True)
+            print("See docs/milestones/connected-water.md for process assumptions and reproducible fault exercises.", flush=True)
+        else:
+            print("Click Pump 1 or Pump 2 in the schematic. Choose Manual and Run request.", flush=True)
+            print("See docs/pump-demo.md for fault and recovery actions.", flush=True)
+        print("Ctrl+C stops both simulated processes.", flush=True)
         if not args.no_browser:
             webbrowser.open(monitor + "/")
         while all(process.poll() is None for process in processes):
@@ -203,6 +215,7 @@ def main(argv=None):
     parser.add_argument("--plant", default=DEFAULT_PLANT, help="simulated plant address for fault actions")
     actions = parser.add_subparsers(dest="action", required=True)
     launcher = actions.add_parser("run", help="generate the public example and start the simulation")
+    launcher.add_argument("--area", choices=("pumps", "water"), default="pumps")
     launcher.add_argument("--artifacts", default=str(ROOT / "target" / "debug"))
     launcher.add_argument("--run-dir", default=str(ROOT / "target" / "pump-demo"))
     launcher.add_argument("--listen", default="127.0.0.1:9080")

@@ -38,12 +38,13 @@ pub use diff::{ChangeKind, ElementChange, FieldChange, ModelDiff};
 pub use index::{ComponentRecord, PointSignal, SignalIndex};
 pub use lint::{LintFinding, LintRule};
 pub use model::{
-    Channel, ChannelRef, ComponentId, ComponentInstance, Connection, Device, DeviceId, Direction,
-    Endpoint, Equipment, EquipmentControl, IoPoint, LoadError, MODEL_VERSION, PlantModel, Port,
-    PortRef, Rationalization, RecordingDuty, Signal,
+    CONTROL_LIMITS_MODEL_VERSION, Channel, ChannelRef, ComponentId, ComponentInstance, Connection,
+    Device, DeviceId, Direction, Endpoint, Equipment, EquipmentControl, EquipmentControlRole,
+    IoPoint, LoadError, MODEL_VERSION, PlantModel, Port, PortRef, Rationalization, RecordingDuty,
+    Signal,
 };
 pub use validate::{End, IdCollection, ValidationError};
 pub use views::{
-    PlantView, PlantViewBinding, PlantViewNode, PlantViewPipe, PlantViewPipeEnd, PlantViewPort,
-    PlantViewSymbol,
+    MeasurementDisplay, PlantView, PlantViewBinding, PlantViewNode, PlantViewPipe,
+    PlantViewPipeEnd, PlantViewPort, PlantViewSymbol,
 };

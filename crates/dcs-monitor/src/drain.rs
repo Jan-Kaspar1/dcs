@@ -139,7 +139,7 @@ impl DrainShared {
             accepted,
             drained: self.drained.load(Ordering::SeqCst),
             lost: self.lost.load(Ordering::SeqCst),
-            depth: accepted - taken,
+            depth: accepted.saturating_sub(taken),
             high_water: self.high_water.load(Ordering::SeqCst),
             capacity: self.capacity,
         }
@@ -305,8 +305,11 @@ impl<T: Send + 'static> Drain<T> {
         let ordinal = self.shared.accepted.fetch_add(1, Ordering::SeqCst) + 1;
         match self.queue.as_ref().unwrap().try_send(record) {
             Ok(()) => {
-                let depth = self.shared.accepted.load(Ordering::SeqCst)
-                    - self.shared.taken.load(Ordering::SeqCst);
+                let depth = self
+                    .shared
+                    .accepted
+                    .load(Ordering::SeqCst)
+                    .saturating_sub(self.shared.taken.load(Ordering::SeqCst));
                 self.shared.high_water.fetch_max(depth, Ordering::SeqCst);
                 Ok(ordinal)
             }

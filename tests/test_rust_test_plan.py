@@ -29,6 +29,11 @@ class RustTestPlanTests(unittest.TestCase):
                     "reference_plant",
                     "the_upgrade_stage_proves_the_repin_and_the_named_crossings",
                 ),
+                (
+                    "connected-water-consumer",
+                    "water_area",
+                    "clean_connected_area_consumer_uses_immutable_release_artifacts",
+                ),
             ),
         )
 

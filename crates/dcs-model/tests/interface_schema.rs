@@ -131,6 +131,10 @@ fn recorded_release_interface_schema_matches_the_emitted_output() {
             "docs/releases/v0.10.0/block-interfaces.schema.json",
             Some("ddc00496814a4e8cd0d6ec8a5d9fbb95e83f518dcd927b17a4802f13ac84013a"),
         ),
+        (
+            "docs/releases/v0.11.0/block-interfaces.schema.json",
+            Some("ddc00496814a4e8cd0d6ec8a5d9fbb95e83f518dcd927b17a4802f13ac84013a"),
+        ),
     ] {
         let recorded = std::fs::read(workspace_root().join(path)).unwrap_or_else(|error| {
             panic!("the release record's interface-schema file {path} must exist: {error}")

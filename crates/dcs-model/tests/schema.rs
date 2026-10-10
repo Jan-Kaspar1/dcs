@@ -239,26 +239,9 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 #[test]
 fn recorded_release_schema_matches_the_emitted_output() {
-    // Each release record (docs/release-contract.md's release
-    // procedure) carries `dcs-model schema`'s output at its recorded
-    // commit; a checked-in file must stay byte-identical to what the
-    // subcommand emits now or the published schema silently diverges
-    // from the code before the tag is cut. Regenerate a record file
-    // with `dcs-model schema > docs/releases/<tag>/plant-model.schema.json`
-    // whenever the emitted schema legitimately changes — and update
-    // the record's published sha256 with it while the tag is pending.
-    //
-    // `Some(digest)` asserts the file's sha256 equals the digest its
-    // record publishes, keeping the checked-in artifact and the record
-    // from drifting apart. `v0.1.0` and `v0.2.0` carry `None`: their
-    // recorded sha256 pins the tagged emission, which the tracked file
-    // has legitimately moved past since the cut — `v0.2.0`'s with the
-    // `requires_reason` io_point field (#908). `v0.3.0`'s, `v0.4.0`'s,
-    // `v0.5.0`'s, `v0.6.0`'s, `v0.7.0`'s, `v0.8.0`'s, `v0.9.0`'s, and
-    // `v0.10.0`'s tags are pending, so their artifacts and published
-    // sha256s track the current emission — identical across the eight
-    // records, now including the additive equipment declaration beside
-    // #907's `record` io_point field and #548's declared-unit metadata.
+    // Freeze the PR #1526 checkout's historical bytes; only v0.11 matches this
+    // build's emission. The pre-existing v0.1/v0.2 record digest mismatch is a
+    // separate release audit gap, documented in connected-water-contract.md.
     let output = run_schema_subcommand();
     assert!(
         output.status.success(),
@@ -268,9 +251,12 @@ fn recorded_release_schema_matches_the_emitted_output() {
     for (path, recorded_sha256) in [
         (
             "docs/releases/v0.1.0/plant-model.schema.json",
-            None::<&'static str>,
+            Some("91f175fa58b2f45bd44c1ce2a4c138ba9c583706f4bc4ccbcd5cc171540b2f7c"),
         ),
-        ("docs/releases/v0.2.0/plant-model.schema.json", None),
+        (
+            "docs/releases/v0.2.0/plant-model.schema.json",
+            Some("91f175fa58b2f45bd44c1ce2a4c138ba9c583706f4bc4ccbcd5cc171540b2f7c"),
+        ),
         (
             "docs/releases/v0.3.0/plant-model.schema.json",
             Some("91f175fa58b2f45bd44c1ce2a4c138ba9c583706f4bc4ccbcd5cc171540b2f7c"),
@@ -307,20 +293,27 @@ fn recorded_release_schema_matches_the_emitted_output() {
         let recorded = std::fs::read(workspace_root().join(path)).unwrap_or_else(|error| {
             panic!("the release record's schema file {path} must exist: {error}")
         });
-        assert_eq!(
-            recorded, output.stdout,
-            "{path} drifted from `dcs-model schema`'s emitted output — \
-             regenerate the record file"
-        );
         if let Some(expected) = recorded_sha256 {
             assert_eq!(
                 sha256_hex(&recorded),
                 expected,
-                "{path}'s sha256 drifted from the digest its record publishes — \
-                 regenerate the record file and update record.md"
+                "{path}'s sha256 drifted from the PR #1526 baseline; \
+                 historical files must not acquire the candidate schema"
             );
         }
     }
+    let candidate =
+        std::fs::read(workspace_root().join("docs/releases/v0.11.0/plant-model.schema.json"))
+            .unwrap();
+    assert_eq!(
+        sha256_hex(&candidate),
+        "135a7ffbc811aa3fb37841177dbecb07df0765f4cc52d23edd014283cb837d7e",
+        "candidate record digest drift"
+    );
+    assert!(
+        candidate == output.stdout,
+        "v0.11 candidate drifted from the emitted schema; regenerate and update record.md"
+    );
 }
 
 #[test]
@@ -334,7 +327,7 @@ fn schema_rejects_documents_with_structural_violations() {
         serde_json::json!({"version": "one", "devices": [], "io_points": [],
             "signals": [], "components": [], "connections": []}),
         // Unsupported version.
-        serde_json::json!({"version": 2, "devices": [], "io_points": [],
+        serde_json::json!({"version": 99, "devices": [], "io_points": [],
             "signals": [], "components": [], "connections": []}),
         // Unknown top-level key.
         serde_json::json!({"version": 1, "devices": [], "io_points": [],
