@@ -71,4 +71,11 @@ Engineering defaults, persisted operator settings, runtime state, and infrastruc
 
 ## Connected-area implementation follow-up — 2026-10-10
 
-The assigned slice uses the recommended S7 station behavior and S3 connected training approach. Its balance vessel/PI discharge topology and all numeric parameters are original simulation engineering, explicitly distinguished from source behavior in the [area record](../milestones/connected-water.md). Existing executor equipment and managed alarm semantics were reused. New evidence includes negative-gain anti-windup, authoritative numeric command bounds, shared display context, physical-versus-sensor separation and the independent candidate-artifact consumer. The existing harness checks normal/fault operations, six consumer schedules, durable restart and paired takeover on the same area. See that record for reproducible commands and remaining release/browser gates. This adds evidence to the water baseline, not a new market or automatic planning authorization.
+The assigned slice uses the recommended S7 station behavior and S3 connected training approach. Its balance vessel/PI discharge topology and all numeric parameters are original simulation engineering, explicitly distinguished from source behavior in the [area record](../milestones/connected-water.md). Existing executor equipment and managed alarm semantics were reused. New evidence includes negative-gain anti-windup, authoritative numeric command bounds, shared display context, physical-versus-sensor separation and the independent candidate-artifact consumer.
+Stronger operator acceptance exposed water creation at empty storage and healthy
+actuator lag being mistaken for failed feedback. The follow-up engineers
+inventory-limited flows, explicit overflow and a typed agreement band/dwell;
+these are training assumptions, requiring site-specific commissioning. Inherited
+recordings also require point-level display bounds rather than inferred trend
+scales. Exact binary/SDK delivery with locked offline sources makes the customer
+boundary reproducible after its temporary release origin is gone. The existing harness checks normal/fault operations, six consumer schedules, durable restart and paired takeover on the same area. See that record for reproducible commands and remaining release/browser gates. This adds evidence to the water baseline, not a new market or automatic planning authorization.

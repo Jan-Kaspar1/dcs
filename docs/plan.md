@@ -16,7 +16,14 @@ steering; they do not authorize new goal-driven tickets during cleanup.
 
 ## Assigned connected station control/UI milestone — 2026-10-09
 
-Kaspar assigned implementation after PR #1526, superseding the earlier documentation-only request. The [connected-area record](milestones/connected-water.md) inventories existing capability, code topology, assumptions, evidence and open gates. The [contract review](milestones/connected-water-contract.md) precedes shared-contract implementation; architecture decision 115 records the chosen semantics. Use four reviewable, CI-gated cuts: contracts/runtime/simulation; equipment/area; derived operator presentation; independent consumer/proof/docs. The supervisor owns commits, PRs and publishing.
+Kaspar assigned implementation after PR #1526, superseding the earlier documentation-only request. The [connected-area record](milestones/connected-water.md) inventories existing capability, code topology, assumptions, evidence and open gates. The [contract review](milestones/connected-water-contract.md) precedes shared-contract implementation; architecture decision 115 records the chosen semantics. Use four reviewable, CI-gated cuts: contracts/runtime/simulation; equipment/area; derived operator presentation; independent consumer/proof/docs. Kaspar requested regular commits to `main` on 2026-10-10; the root agent owns
+those local Git operations. Remote CI and public publication remain separate gates.
+
+Follow-up acceptance requires conserved inventory with explicit spill, healthy
+actuator travel without nuisance faults, display bounds for inherited recordings,
+named terminal persistence failure with bounded teardown, and an offline customer
+rebuild from exact delivered artifacts. Architecture decision 116 records these
+seams and their limits. The browser and published-release gates remain open.
 
 The area extends the existing duty/standby station with a balance vessel, isolation, measured level and draining closed-loop discharge. Existing equipment, blocks and alarm lifecycle remain the implementation substrate. The customer binary consumes supported Rust APIs and obtains another pump's standard behavior without JavaScript. Candidate-release evidence must not be described as published-artifact evidence; actual desktop/phone keyboard/reduced-motion browser review is also still required. The [activation proposal](milestones/connected-water-activation.md) records deployment gaps without claiming plan/apply implementation or upgrading candidate WW-LCM-002.
 

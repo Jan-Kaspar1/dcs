@@ -38,6 +38,15 @@ and refuse stale plans, a changed field owner, lost convergence, failed persiste
 or operator-setting conflicts. An approval/audit record belongs to the customer
 role policy; this slice does not invent that role hierarchy.
 
+The storage-saturation proof also establishes a recovery boundary: a failed
+request may contain an admitted receipt while its persistence is unattested.
+The controller closes its field-write gate and exits within a bounded drain
+budget; it does not claim a physical safe-state write. A plan must reconcile
+receipts, field feedback and the last attested checkpoint or compatible peer
+before activation. A stale durable tail cannot undo outputs already applied.
+Automatic retry of an uncertain command is unsafe; changing an image cannot
+resolve that uncertainty. This proof does not choose a site fail-safe policy.
+
 ## Operator-setting ownership
 
 Keep three explicit layers: engineered policy/limits and defaults; live operator

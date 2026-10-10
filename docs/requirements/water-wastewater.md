@@ -9,6 +9,13 @@ Station operating-policy evidence and open assumptions are recorded in `docs/res
 
 The [connected water milestone](../milestones/connected-water.md) adds scoped evidence for WW-FND-001/003/004, WW-ENG-003, WW-OPS-001–003, WW-CTL-001/002 and WW-LCM-001: code-authored process topology, reused equipment families, authoritative numeric command limits, explicit display bounds, protected manual/automatic operation, process warning/feedback alarm workflow, consumer isolation and compatible restart/takeover. The [shared-contract review](../milestones/connected-water-contract.md) and architecture decision 115 define the changes. The independent build currently uses an immutable candidate artifact; a public release repin and actual browser review remain required. Existing per-requirement statuses and customer-policy caveats remain authoritative, and simulation does not validate a pilot. The [activation proposal](../milestones/connected-water-activation.md) develops candidate WW-LCM-002 without claiming implementation or changing its status.
 
+The 2026-10-10 acceptance follow-up adds explicit conserved inventory and spill
+paths, healthy-travel versus stuck-feedback checks, bounds on inherited history
+points, and named persistence stand-down without poisoned locks or indefinite
+teardown. Offline delivery preserves exact customer pins and supports a frozen
+SDK rebuild after the original release origin disappears. Decision 116 and the
+linked milestone record retain the simulation, publication and browser limits.
+
 ## Accepted foundation requirements
 
 The [training-plant research](../research/training-plants.md), checked 2026-10-09, links vendor curricula, university process benchmarks, a physical water-treatment testbed, and owner operating guidance to the code-configured equipment/control/UI goal. Its proposed next slice deepens the existing station's `WW-OPS-001`–`003` presentation and demonstrates `WW-FND-001`, `WW-FND-003`–`004`, and `WW-ENG-003` through reusable elements and repeatable simulated scenarios. It adds evidence and planning input without changing requirement statuses, closing customer assumptions, or promoting candidate `WW-LCM-002` through its deployment-workflow proposal.

@@ -34,9 +34,11 @@ through the delivery channel used for that customer.
 ## Restore on an independent machine
 
 The prebuilt executables require Linux x86_64 with the system ELF loader, libc,
-libm and libgcc_s. Python 3.11 or newer and Git restore/check the archive. Rust
-1.98.1 and Cargo are required to compile customer Rust; the toolchain itself is
-not included. Install the toolchain before going offline.
+libm and libgcc_s. Python 3.11 or newer and Git restore the archive. Rust
+1.98.1 and Cargo are required for `check` (which resolves frozen SDK metadata)
+and for customer compilation; the toolchain itself is not included. Install it
+before going offline. Running the prebuilt controller and field service does
+not require Cargo.
 
 Copy the archive and this small delivery helper to the engineering machine.
 Compare the archive SHA-256 with the recorded delivery identity. Restore into a
