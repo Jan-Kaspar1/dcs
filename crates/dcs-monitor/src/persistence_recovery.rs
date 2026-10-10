@@ -298,3 +298,68 @@ fn a_failed_command_admission_reports_its_receipt_and_cannot_apply_after_fencing
     drop(monitor);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// An asynchronous write can fail after its offer succeeded. No later
+/// control entry point may mistake an unset monitor latch for healthy
+/// persistence and execute another scan or attempt field promotion.
+#[test]
+fn asynchronous_writer_failure_is_checked_before_scans_or_promotions() {
+    for entry in ["paced_scan", "self_promote", "http_promote"] {
+        let (mut monitor, field_gate, released, dir) = fixture(entry);
+        let drain = Drain::new("state file asynchronous".to_string(), 2, |_checkpoint| {
+            Err(std::io::Error::other(
+                "injected asynchronous state write failure",
+            ))
+        });
+        monitor.with_state_sink(
+            StateSink::for_test(
+                "state file asynchronous".to_string(),
+                &dir.join("state.json"),
+                drain,
+            )
+            .unwrap(),
+        );
+        monitor.persist_state().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while monitor.state_sink_health().unwrap().state != dcs_core::StateSinkState::Failed {
+            assert!(Instant::now() < deadline, "writer failure did not surface");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            monitor.failure().is_none(),
+            "the offer succeeded before the asynchronous error"
+        );
+        assert!(field_gate.is_open());
+        match entry {
+            "paced_scan" => assert_eq!(monitor.paced_scan(), Tick::ZERO),
+            "self_promote" => assert!(matches!(
+                monitor.self_promote(),
+                Err(dcs_core::SwitchError::NotActive)
+            )),
+            "http_promote" => std::thread::scope(|scope| {
+                scope.spawn(|| monitor.serve());
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let client =
+                        MonitorClient::with_timeout(monitor.local_addr(), Duration::from_secs(2));
+                    let (status, body) = client.request("POST", "/promote", None).unwrap();
+                    assert_eq!(status, 503, "{body}");
+                    assert!(body.contains("injected asynchronous state write failure"));
+                }));
+                monitor.shutdown();
+                result.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            }),
+            _ => unreachable!(),
+        }
+        assert_eq!(monitor.tick(), Tick::ZERO);
+        assert!(!field_gate.is_open());
+        assert!(released.load(Ordering::SeqCst));
+        assert!(
+            monitor
+                .failure()
+                .unwrap()
+                .contains("injected asynchronous state write failure")
+        );
+        drop(monitor);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}

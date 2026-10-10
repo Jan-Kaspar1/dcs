@@ -2162,6 +2162,7 @@ impl<'d> Monitor<'d> {
     /// and its journal entry follows the scan's own events.
     pub fn paced_scan(&self) -> Tick {
         let mut shared = self.shared.lock().unwrap();
+        self.check_recording(&mut shared);
         if self.failure().is_some() {
             return shared.peer.tick();
         }
@@ -2852,6 +2853,7 @@ impl<'d> Monitor<'d> {
     /// /role` already serves; the scan cycle continues.
     pub fn self_promote(&self) -> Result<RoleReport, dcs_core::SwitchError> {
         let mut shared = self.shared.lock().unwrap();
+        self.check_recording(&mut shared);
         if self.failure().is_some() {
             return Err(SwitchError::NotActive);
         }
@@ -3479,6 +3481,7 @@ impl<'d> Monitor<'d> {
             }
         };
         let mut shared = self.shared.lock().unwrap();
+        self.check_recording(&mut shared);
         if let Some(error) = self.failure() {
             return json(503, &error);
         }
