@@ -951,14 +951,14 @@ mod tests {
         // The next recorded entry meets the full queue: the push is
         // refused and fatal at the recording point, naming the file
         // and the refused seq — the scan never waits.
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            scan(&mut recorder, &mut executor);
-        }));
+        scan(&mut recorder, &mut executor);
         assert!(
             pushed.elapsed() < Duration::from_secs(1),
             "the pushes waited on the sink: the scan would stretch with it"
         );
-        let message = panic_message(panic.expect_err("a full drain queue must refuse the push"));
+        let message = recorder
+            .failure()
+            .expect("a full drain queue must latch its refusal");
         assert!(message.contains("history file"), "{message}");
         assert!(message.contains(path.to_str().unwrap()), "{message}");
         assert!(
@@ -1042,15 +1042,14 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         let pushed = Instant::now();
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            scan(&mut recorder, &mut executor);
-        }));
+        scan(&mut recorder, &mut executor);
         assert!(
             pushed.elapsed() < Duration::from_secs(1),
             "the push waited on the failed sink"
         );
-        let message =
-            panic_message(panic.expect_err("a failed sink must refuse the next recorded append"));
+        let message = recorder
+            .failure()
+            .expect("a failed sink must latch its refusal");
         assert!(message.contains(path.to_str().unwrap()), "{message}");
         assert!(
             message.contains("refused durable history seq 3"),
@@ -1072,15 +1071,5 @@ mod tests {
             "the file ends at the last durably appended record"
         );
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Extracts the message a panicked push carried — the fatal
-    /// refusal's text the assertions name.
-    fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
-        payload
-            .downcast::<String>()
-            .map(|message| *message)
-            .or_else(|payload| payload.downcast::<&'static str>().map(|s| s.to_string()))
-            .unwrap_or_default()
     }
 }

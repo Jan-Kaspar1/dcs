@@ -566,6 +566,8 @@ mod drain;
 mod history_file;
 mod journal_file;
 mod pair;
+#[cfg(test)]
+mod persistence_recovery;
 mod recorder;
 mod serve;
 mod state_file;
@@ -677,9 +679,9 @@ pub struct SwitchRequest {
 /// took: the growing `last_scan_age_ms` is the wedge's report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthReport {
-    /// The process liveness declaration: `true` by construction — an
-    /// answer at all is the proof, and the field is the contract a
-    /// probe decodes rather than a port a connect alone attests.
+    /// Whether the controller remains usable. A terminal persistence
+    /// refusal answers `false` with HTTP 503 during bounded failure
+    /// teardown; a listening socket must not impersonate a healthy owner.
     pub live: bool,
     /// The instance's reported redundancy role — the same verdict
     /// `GET /role` serves: `active`, `standby`, or a transition state.
@@ -1078,6 +1080,10 @@ impl std::fmt::Display for TrackTarget {
 /// copies out without touching it.
 pub struct Monitor<'d> {
     shared: Mutex<Shared<'d>>,
+    /// A terminal durability refusal, readable without the executor lock.
+    /// The field gate closes at the failing boundary. Hosts must exit
+    /// nonzero; diagnostics can still answer until their bounded teardown.
+    failure: Mutex<Option<String>>,
     /// The read side: the bounded publication store the read endpoints
     /// serve, owned outside the executor lock. A fetch clones an `Arc`
     /// or an owned copy and releases the store's own small lock before
@@ -1557,6 +1563,7 @@ impl<'d> Monitor<'d> {
             .expect("monitor listens on TCP");
         Ok(Self {
             shared: Mutex::new(Shared { peer, recorder }),
+            failure: Mutex::new(None),
             store,
             signals,
             server: Mutex::new(Some(Arc::new(server))),
@@ -2155,7 +2162,12 @@ impl<'d> Monitor<'d> {
     /// and its journal entry follows the scan's own events.
     pub fn paced_scan(&self) -> Tick {
         let mut shared = self.shared.lock().unwrap();
-        scan_and_record(&mut shared, &self.store)
+        if self.failure().is_some() {
+            return shared.peer.tick();
+        }
+        let tick = scan_and_record(&mut shared, &self.store);
+        self.check_recording(&mut shared);
+        tick
     }
 
     /// Records one scan cycle that overran its wall-clock period — the
@@ -2295,11 +2307,9 @@ impl<'d> Monitor<'d> {
     /// overwrite is impossible — and a no-op `Ok` when no state file
     /// is configured.
     pub fn persist_state(&self) -> Result<(), String> {
-        let Some(sink) = &self.state_sink else {
-            return Ok(());
-        };
-        let shared = self.shared.lock().unwrap();
-        sink.offer(shared.peer.checkpoint()).map(|_| ())
+        let mut shared = self.shared.lock().unwrap();
+        self.check_recording(&mut shared);
+        self.push_state_checkpoint(&mut shared).map(|_| ())
     }
 
     /// Captures `peer`'s checkpoint and hands it to the state-file
@@ -2310,13 +2320,57 @@ impl<'d> Monitor<'d> {
     /// durability-attesting answer waits through — or `None` when no
     /// state file is configured. A refusal — the queue full past its
     /// declared bound, or a recorded write failure — is the run's
-    /// fatal point and panics naming the sink, the same rule the
-    /// journal's pushes apply.
-    fn push_state_checkpoint(&self, peer: &Peer<'_>) -> Option<u64> {
-        self.state_sink.as_ref().map(|sink| {
-            sink.offer(peer.checkpoint())
-                .unwrap_or_else(|error| panic!("{error}"))
-        })
+    /// terminal point, latching the named failure and fencing the peer
+    /// without unwinding through its mutex. Recovery starts a new process.
+    fn push_state_checkpoint(&self, shared: &mut Shared<'_>) -> Result<Option<u64>, String> {
+        if let Some(error) = self.failure() {
+            return Err(error);
+        }
+        match self
+            .state_sink
+            .as_ref()
+            .map(|sink| sink.offer(shared.peer.checkpoint()))
+        {
+            Some(Ok(ordinal)) => Ok(Some(ordinal)),
+            Some(Err(error)) => {
+                self.fail_recording(shared, error.clone());
+                Err(error)
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// The first terminal recording failure. This small, separate lock lets
+    /// a host's failure watchdog observe it even if a request or field I/O
+    /// subsequently stalls. It is not resettable: recovery uses an attested
+    /// checkpoint or compatible peer in a new process.
+    pub fn failure(&self) -> Option<String> {
+        self.failure.lock().unwrap().clone()
+    }
+
+    fn check_recording(&self, shared: &mut Shared<'_>) {
+        if let Some(error) = shared.recorder.failure().or_else(|| {
+            self.state_sink
+                .as_ref()
+                .and_then(|sink| sink.shared().failed())
+        }) {
+            self.fail_recording(shared, error);
+        }
+    }
+
+    fn fail_recording(&self, shared: &mut Shared<'_>, error: String) {
+        let mut failure = self.failure.lock().unwrap();
+        if failure.is_some() {
+            return;
+        }
+        *failure = Some(error);
+        drop(failure);
+        // The existing demotion closes the write gate, releases the field
+        // claim and suspends pending requests; it never pretends that an
+        // admitted command was rejected or physically applied.
+        let _ = shared.peer.demote();
+        self.store.sync_liveness(shared.peer.report());
+        self.store.sync_receipts(shared.peer.receipts());
     }
 
     /// Test seam: swap in a constructed state sink — the stalled- and
@@ -2642,6 +2696,9 @@ impl<'d> Monitor<'d> {
     /// produced checkpoint resets the run — the endpoint answered, so
     /// the pin stands.
     pub fn track_cycle(&self, pull: impl FnOnce() -> Result<Checkpoint, String>) -> TrackReport {
+        if let Some(detail) = self.failure() {
+            return TrackReport::Missed { detail };
+        }
         if self.shared.lock().unwrap().peer.owns_field() {
             return TrackReport::OwnsField;
         }
@@ -2795,6 +2852,9 @@ impl<'d> Monitor<'d> {
     /// /role` already serves; the scan cycle continues.
     pub fn self_promote(&self) -> Result<RoleReport, dcs_core::SwitchError> {
         let mut shared = self.shared.lock().unwrap();
+        if self.failure().is_some() {
+            return Err(SwitchError::NotActive);
+        }
         let Shared { peer, recorder, .. } = &mut *shared;
         peer.self_promote()?;
         // One drain, one match: the failover walk's reported transition,
@@ -2844,6 +2904,7 @@ impl<'d> Monitor<'d> {
         // bound answers degraded — its pushes are already fatal.
         let attests_durable =
             method == Method::Post || (method == Method::Get && path == "/journal");
+        let mutates = method == Method::Post;
         // The history file's drain is the same kind of off-lock sink:
         // a durable-history read that attests "the durable record
         // caught up through the last recorded scan" waits the standing
@@ -2857,6 +2918,8 @@ impl<'d> Monitor<'d> {
         // scan re-queues the carried receipt rather than losing the
         // command unaudited. The wait runs below, off the lock.
         let mut admission = None;
+        let mut admission_failure = None;
+        let mut admitted_receipt = None;
         // The deferred startup refusal's pairless disposition: a
         // `POST /scan` whose scan settled the pending born-active's
         // refused conditional grant on a run that declared no pair.
@@ -2865,7 +2928,7 @@ impl<'d> Monitor<'d> {
         // the run's shell settles the latched verdict as the exit the
         // activation-time answer would already have taken.
         let mut terminal = false;
-        let response = match (method, path) {
+        let mut response = match (method, path) {
             (Method::Get, "/") | (Method::Get, "/index.html") => html(PAGE),
             (Method::Get, "/plant-view.js") => static_asset(
                 include_str!("plant-view.js"),
@@ -2964,9 +3027,9 @@ impl<'d> Monitor<'d> {
             // the wedged scan it reports holds that lock.
             (Method::Get, "/health") => match self.store.liveness() {
                 Some(liveness) => json(
-                    200,
+                    if self.failure().is_some() { 503 } else { 200 },
                     &HealthReport {
-                        live: true,
+                        live: self.failure().is_none(),
                         role: liveness.report.role,
                         tick: liveness.report.tick,
                         last_scan_age_ms: liveness
@@ -3045,6 +3108,7 @@ impl<'d> Monitor<'d> {
                     reason,
                 }) => {
                     let mut shared = self.shared.lock().unwrap();
+                    self.check_recording(&mut shared);
                     let Shared { peer, recorder, .. } = &mut *shared;
                     // Only the settled-active peer accepts commands: on a
                     // standby or mid-transition instance the write gate
@@ -3053,7 +3117,7 @@ impl<'d> Monitor<'d> {
                     // Either way the declared actor and reason are
                     // stamped onto the receipt — the settled entry the
                     // journal echoes.
-                    let receipt = if peer.accepts_commands() {
+                    let receipt = if self.failure().is_none() && peer.accepts_commands() {
                         let receipt = peer.submit_command_attributed(command, actor, reason);
                         // The journal diff keys on the receipt's
                         // absolute submission index — the bounded log's
@@ -3077,9 +3141,6 @@ impl<'d> Monitor<'d> {
                         // attests the file caught up through this
                         // ordinal before its `200` answers — the wait
                         // below, off the lock.
-                        if matches!(receipt.outcome, CommandOutcome::Accepted { .. }) {
-                            admission = self.push_state_checkpoint(peer);
-                        }
                         // Refresh the store's mirror so `GET /receipts`
                         // answers the just-submitted receipt before its
                         // scan boundary settles it.
@@ -3101,6 +3162,14 @@ impl<'d> Monitor<'d> {
                         recorder.note_settled(None, receipt.clone(), peer.tick());
                         receipt
                     };
+                    self.check_recording(&mut shared);
+                    if matches!(receipt.outcome, CommandOutcome::Accepted { .. }) {
+                        admitted_receipt = Some(receipt.clone());
+                        match self.push_state_checkpoint(&mut shared) {
+                            Ok(ordinal) => admission = ordinal,
+                            Err(error) => admission_failure = Some(error),
+                        }
+                    }
                     json(200, &receipt)
                 }
                 Err(response) => response,
@@ -3127,7 +3196,8 @@ impl<'d> Monitor<'d> {
                     ),
                 ),
                 Ok(body) => {
-                    let mut failure = None;
+                    let mut failure = self.failure();
+                    let mut completed = 0_u64;
                     // The last state-file checkpoint the batch pushed —
                     // the `200` attests the durable file caught up
                     // through it, so a restart after this answer
@@ -3164,6 +3234,11 @@ impl<'d> Monitor<'d> {
                         // between scans instead of waiting the batch
                         // out.
                         let mut shared = self.shared.lock().unwrap();
+                        self.check_recording(&mut shared);
+                        if let Some(error) = self.failure() {
+                            failure = Some(error);
+                            break;
+                        }
                         scan_and_record(&mut shared, &self.store);
                         // A deferred startup grant's refusal settling
                         // inside this scan is the born-active
@@ -3194,12 +3269,20 @@ impl<'d> Monitor<'d> {
                             failure = Some(error);
                             break;
                         }
+                        completed += 1;
+                        self.check_recording(&mut shared);
                         // The scan cycle's end-of-cycle boundary —
                         // after the plant step, the same point the
                         // paced loop persists at: the checkpoint queues
                         // to the state sink under this lock hold, the
                         // write itself draining on the sink's writer.
-                        attested = self.push_state_checkpoint(&shared.peer);
+                        match self.push_state_checkpoint(&mut shared) {
+                            Ok(ordinal) => attested = ordinal,
+                            Err(error) => {
+                                failure = Some(error);
+                                break;
+                            }
+                        }
                     }
                     // The batch's `200` attests the file caught up
                     // through its last pushed checkpoint — FIFO makes
@@ -3216,10 +3299,20 @@ impl<'d> Monitor<'d> {
                             .unwrap()
                             .attest(ordinal, STATE_DRAIN_WAIT)
                     {
+                        self.fail_recording(&mut self.shared.lock().unwrap(), error.clone());
                         failure = Some(error);
                     }
                     match failure {
-                        Some(error) => json(500, &error),
+                        Some(error) => json(
+                            500,
+                            &serde_json::json!({
+                                "error": error,
+                                "tick": self.tick(),
+                                "scans_completed": completed,
+                                "durability": "unattested",
+                                "retry": false,
+                            }),
+                        ),
                         // The last scan already published its read model —
                         // answer with that immutable copy, released from
                         // the executor lock before serialization.
@@ -3241,18 +3334,73 @@ impl<'d> Monitor<'d> {
         // run's fatal point: it dies naming the file rather than
         // answering a receipt it cannot recover, the same rule the
         // admission's synchronous write applied.
-        if let Some(ordinal) = admission {
-            self.state_sink
+        if mutates {
+            self.check_recording(&mut self.shared.lock().unwrap());
+            if let Some(error) = self.failure()
+                && response.status_code().0 < 400
+                && (path != "/command" || admitted_receipt.is_some())
+            {
+                response = json(
+                    500,
+                    &serde_json::json!({
+                        "error": error, "receipt": admitted_receipt,
+                        "tick": self.tick(), "durability": "unattested", "retry": false,
+                    }),
+                );
+            }
+        }
+        if let Some(ordinal) = admission
+            && let Err(error) = self
+                .state_sink
                 .as_ref()
                 .unwrap()
                 .attest(ordinal, STATE_DRAIN_WAIT)
-                .unwrap_or_else(|error| panic!("{error}"));
+        {
+            self.fail_recording(&mut self.shared.lock().unwrap(), error.clone());
+            admission_failure = Some(error);
         }
-        if attests_durable {
-            self.store.wait_journal_drained(JOURNAL_DRAIN_WAIT);
+        if let Some(error) = admission_failure {
+            response = json(
+                500,
+                &serde_json::json!({
+                    "error": error,
+                    "receipt": admitted_receipt,
+                    "durability": "unattested",
+                    "retry": false,
+                }),
+            );
         }
-        if attests_history {
-            self.store.wait_history_drained(JOURNAL_DRAIN_WAIT);
+        if attests_durable
+            && self.failure().is_none()
+            && let Some(health) = self.store.wait_journal_drained(JOURNAL_DRAIN_WAIT)
+            && (health.lost > 0 || health.drained < health.accepted)
+        {
+            let error = "journal sink did not durably reach the request within its bounded wait"
+                .to_string();
+            self.fail_recording(&mut self.shared.lock().unwrap(), error.clone());
+            response = json(
+                500,
+                &serde_json::json!({
+                    "error": error, "receipt": admitted_receipt,
+                    "tick": self.tick(), "durability": "unattested", "retry": false,
+                }),
+            );
+        }
+        if attests_history
+            && self.failure().is_none()
+            && let Some(health) = self.store.wait_history_drained(JOURNAL_DRAIN_WAIT)
+            && (health.lost > 0 || health.drained < health.accepted)
+        {
+            let error = "history sink did not durably reach the request within its bounded wait"
+                .to_string();
+            self.fail_recording(&mut self.shared.lock().unwrap(), error.clone());
+            response = json(
+                500,
+                &serde_json::json!({
+                    "error": error, "tick": self.tick(),
+                    "durability": "unattested", "retry": false,
+                }),
+            );
         }
         // A dropped client connection makes respond fail; the request is
         // already handled, so the error is ignored.
@@ -3295,6 +3443,9 @@ impl<'d> Monitor<'d> {
     /// `NoTrackingSource`. The verified adoption journals naming the
     /// source, ahead of the role change it enables.
     fn switchover(&self, promote: bool, actor: Option<String>) -> Response<Cursor<Vec<u8>>> {
+        if let Some(error) = self.failure() {
+            return json(503, &error);
+        }
         // The final-sync fetch runs outside the shared lock under the
         // dedicated pull bound — like the tracking pull it can wait on
         // an unreachable peer, and that wait must stall only this
@@ -3328,6 +3479,9 @@ impl<'d> Monitor<'d> {
             }
         };
         let mut shared = self.shared.lock().unwrap();
+        if let Some(error) = self.failure() {
+            return json(503, &error);
+        }
         let Shared { peer, recorder, .. } = &mut *shared;
         let result = if promote {
             if let Some(pulled) = pulled {

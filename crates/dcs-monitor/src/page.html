@@ -3361,7 +3361,9 @@ function alarmCommandMessage(text) {
     if ("accepted" in outcome) return "Request accepted; awaiting controller settlement.";
     if ("applied" in outcome) return "Request applied by the controller.";
     if ("rejected" in outcome) return "Request refused: " + JSON.stringify(outcome.rejected);
-    if ("indeterminate" in outcome) return "Outcome unknown; awaiting confirmation. Check live feedback.";
+    if ("indeterminate" in outcome) return outcome.indeterminate.admitted_receipt
+      ? "Request admitted; persistence unconfirmed. Controller stood down. Do not retry automatically."
+      : "Outcome unknown; awaiting confirmation. Check live feedback.";
   } catch (_) { /* Text notices include missing reasons and connection errors. */ }
   return text;
 }
@@ -4043,7 +4045,7 @@ function trendBody(point) {
   if (coords.length === 0) return "";
   const min = Math.min(...coords.map(c => c.v));
   const max = Math.max(...coords.map(c => c.v));
-  const display = (index?.views || []).flatMap(view => view.nodes || []).find(node => node.binding?.point === point && node.display)?.display;
+  const display = metaByPoint.get(point)?.display || (index?.views || []).flatMap(view => view.nodes || []).find(node => node.binding?.point === point && node.display)?.display;
   let lo = display ? display.min : min, hi = display ? display.max : max;
   if (lo === hi) { lo -= 1; hi += 1; }
   const W = 320, H = 90, padX = 8, padY = 14;
@@ -4436,6 +4438,10 @@ function describeOutcome(outcome) {
     return "rejected: " + describeReason(outcome.rejected.reason);
   }
   if ("indeterminate" in outcome) {
+    if (outcome.indeterminate.admitted_receipt) {
+      return "admitted; persistence unconfirmed — controller stood down; " +
+        "reconcile receipts and live feedback before issuing another request";
+    }
     return "outcome unknown — the submission went unanswered and may " +
       "still apply; the journaled settled receipt is the verdict";
   }
@@ -4633,9 +4639,17 @@ function abandonedSubmission(command, reason, error) {
     command: command,
     outcome: { indeterminate: { detail: String(error) } },
   };
+  if (error.admittedReceipt) {
+    answer.outcome.indeterminate.admitted_receipt = error.admittedReceipt;
+    answer.outcome.indeterminate.durability = error.durability;
+  }
   if (operator !== null) answer.actor = operator;
   if (reason) answer.reason = reason;
-  const notice = "command outcome unknown — no receipt answered the " +
+  const notice = error.admittedReceipt
+    ? "Request admitted; persistence unconfirmed. Controller stood down. " +
+      "Do not retry automatically; reconcile receipts and live feedback. " +
+      JSON.stringify(error.admittedReceipt)
+    : "command outcome unknown — no receipt answered the " +
     "submission (" + String(error) + ") and it may still apply: " +
     describeCommand(command) + ". The journaled settled receipt is " +
     "the verdict — resubmitting now risks applying the command twice.";
@@ -4686,7 +4700,13 @@ async function postCommand(base, command, reason) {
       throw answeredRefusal(response.status,
         await response.text().catch(() => ""));
     }
-    throw new Error("the monitor answered HTTP " + response.status);
+    const failure = await response.json().catch(() => null);
+    const error = new Error(failure?.error || "the monitor answered HTTP " + response.status);
+    if (failure?.receipt) {
+      error.admittedReceipt = failure.receipt;
+      error.durability = failure.durability;
+    }
+    throw error;
   }
   return response.json();
 }
