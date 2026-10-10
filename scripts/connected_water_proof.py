@@ -136,6 +136,18 @@ def main():
             'operator': json.loads((customer / 'ci/operator-evidence.json').read_text()),
             'tools': {name: hashlib.sha256((tools / name).read_bytes()).hexdigest() for name in ['dcs-model', 'dcs-controller', 'dcs-plant-server']}}
         destination.write_text(json.dumps(output, indent=2) + '\n')
+        # Deliver the exact tested tools and locked SDK, then prove an engineer
+        # can rebuild in an independent checkout without the release origin or
+        # platform workspace. This remains inside verify.py's heavy-build gate.
+        import water_artifact_bundle as delivery
+        archive = destination.parent / f'connected-water-{TAG}-{commit}-linux-x86_64.tar.gz'
+        packaged = delivery.export_bundle(destination, tools, binary, archive, args.cargo)
+        origin.rename(scratch / 'release-unavailable')
+        offline = scratch / 'offline-customer'
+        delivery.restore_bundle(archive, offline)
+        restored = delivery.check_bundle(offline, args.cargo, rebuild=True)
+        delivery_evidence = dict(packaged, restored=restored)
+        (destination.parent / 'offline-delivery.json').write_text(json.dumps(delivery_evidence, indent=2) + '\n')
         print(json.dumps(output, indent=2))
 
 if __name__ == '__main__':

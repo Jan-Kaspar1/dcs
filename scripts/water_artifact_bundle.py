@@ -285,6 +285,8 @@ def restore_bundle(archive_path, destination):
 
 
 def check_bundle(destination, cargo="cargo", rebuild=False):
+    if rebuild and not os.environ.get("DCS_BUILD_SLOT_FD"):
+        raise ValueError("rebuild must run through scripts/verify.py's shared build gate")
     destination = Path(destination).resolve()
     manifest = json.loads((destination / "manifest.json").read_text())
     for name, record in manifest["files"].items():
@@ -299,16 +301,18 @@ def check_bundle(destination, cargo="cargo", rebuild=False):
             exact_file(plant / "vendor" / name.removeprefix("offline/vendor/"), record["sha256"])
     empty_cache = plant / ".delivery-cargo-home"
     empty_cache.mkdir(exist_ok=True)
-    # CLI --config takes precedence even where Cargo is a container shim whose
-    # environment owns CARGO_HOME. --frozen precludes fetching or lock changes.
-    metadata = json.loads(run([cargo, "--config", f'build.target-dir={json.dumps(str(plant / ".delivery-target"))}', "metadata", "--frozen", "--format-version", "1", "--features", "connected-water"], plant, capture=True, env=dict(os.environ, CARGO_HOME=str(empty_cache))))
+    target = plant / ".delivery-target"
+    delivery_env = dict(os.environ, CARGO_HOME=str(empty_cache), CARGO_TARGET_DIR=str(target))
+    # CARGO_TARGET_DIR outranks Cargo config. Override the inherited platform
+    # target explicitly; --frozen precludes fetching or changing the lock.
+    metadata = json.loads(run([cargo, "metadata", "--frozen", "--format-version", "1", "--features", "connected-water"], plant, capture=True, env=delivery_env))
+    if Path(metadata["target_directory"]).resolve() != target:
+        raise ValueError("offline customer target escaped its independent checkout")
     validate_metadata(metadata, plant, evidence)
     binary = destination / "bin/connected-water"
     if rebuild:
-        if not os.environ.get("DCS_BUILD_SLOT_FD"):
-            raise ValueError("rebuild must run through scripts/verify.py's shared build gate")
-        run([cargo, "--config", f'build.target-dir={json.dumps(str(plant / ".delivery-target"))}', "build", "--frozen", "--features", "connected-water", "--bin", "connected-water"], plant)
-        binary = plant / ".delivery-target/debug/connected-water"
+        run([cargo, "build", "--target-dir", target, "--frozen", "--features", "connected-water", "--bin", "connected-water"], plant, env=delivery_env)
+        binary = target / "debug/connected-water"
     emitted = {}
     for name, arguments in (("model", []), ("dynamics", ["--dynamics"]), ("three_pump_model", ["--add-pump"]), ("three_pump_dynamics", ["--add-pump", "--dynamics"])):
         data = run([binary, *arguments], plant, capture=True)
