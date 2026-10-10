@@ -79,3 +79,13 @@ these are training assumptions, requiring site-specific commissioning. Inherited
 recordings also require point-level display bounds rather than inferred trend
 scales. Exact binary/SDK delivery with locked offline sources makes the customer
 boundary reproducible after its temporary release origin is gone. The existing harness checks normal/fault operations, six consumer schedules, durable restart and paired takeover on the same area. See that record for reproducible commands and remaining release/browser gates. This adds evidence to the water baseline, not a new market or automatic planning authorization.
+
+The subsequent receipt-boundary audit found a JavaScript numeric-identity
+collision and unsafe reconciliation by identical payload without an admitted
+identity. Decision 117 retains the existing u64 controller contract and adds
+exact decoding/comparison at the generic consumer boundary. An unknown request
+remains unknown; journal candidates and live feedback support manual recovery.
+Actual-source JavaScript tests strengthen workflow evidence but do not establish
+desktop/phone usability or a site policy. Asynchronous recording errors are
+checked before further scans or promotion. These findings deepen this assigned
+area's acceptance rather than expand the equipment catalogue or market.

@@ -47,6 +47,13 @@ before activation. A stale durable tail cannot undo outputs already applied.
 Automatic retry of an uncertain command is unsafe; changing an image cannot
 resolve that uncertainty. This proof does not choose a site fail-safe policy.
 
+Preserve submission identities losslessly through every consumer or activation
+adapter. Numeric u64 wire identities may round in JavaScript; the operator UI
+now retains exact decimal strings. Without an admitted receipt identity,
+matching command/actor/reason payloads do not prove which request settled.
+Recovery must keep that outcome unknown until independent reconciliation;
+client-generated correlation and durable request lookup are not implemented.
+
 ## Operator-setting ownership
 
 Keep three explicit layers: engineered policy/limits and defaults; live operator
@@ -105,8 +112,12 @@ The legacy acceptance rerun also exposed persistence overload: a driven
 panicked the handler and left an unbounded client waiting. The history harness
 now uses 32-scan requests, each durability-attested before continuing, and
 bounded HTTP with no retry for an unknown timeout outcome. This preserves the
-history assertions; it does not fix the runtime's panic/poison recovery or
-prove that a saturated persistence sink has an acceptable production outcome.
+history assertions; that harness change is not a runtime recovery fix. The
+separate current-runtime follow-up fences terminal recording failure, preserves
+named unattested outcomes and exits within a bounded drain budget. Injected
+async-writer errors are checked before another scan or promotion. Those proofs
+still do not establish acceptable production storage throughput or field-time
+behavior.
 A deployment plan needs recording throughput, scan budget, overload disposition
 and recovery evidence for its real storage and field-time behavior.
 

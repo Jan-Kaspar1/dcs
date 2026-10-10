@@ -87,6 +87,40 @@ one compact bar and the existing bounded history plot; preserve the established
 trend and keyboard paths. This is simulated process training, not a validated
 hydraulic design, independent protection system, or new active market.
 
+Command identity review, 2026-10-10: `SubmissionId.origin` and `seq` are unsigned
+64-bit integers in the established Rust/JSON contract. Native JavaScript JSON
+decoding rounds distinct valid origins to the same Number. Actual production
+comparison code accepted origins `17307262437741370921` and
+`17307262437741370922` as identical. Preserve the numeric wire/checkpoint
+contract and decode receipt identities to exact decimal strings at the browser
+boundary. Vendor the MIT-licensed `lossless-json` 4.3.1 browser bundle with its
+registry integrity and file digest, serve it from the monitor, and use one
+adapter for page JSON reads. Convert ordinary numeric fields back to Number;
+do not change process arithmetic or command payloads. Safe legacy Number
+identities may compare after canonicalization; rounded or invalid identities
+must never establish a match. Native reviver source support has no declared
+browser floor here, and a regular-expression JSON rewrite is not a parser.
+This dependency therefore closes a correctness gap without customer JavaScript,
+a CDN, a bundler or a shared-contract format change.
+
+Parser review found that upstream object assignment drops the valid JSON
+`__proto__` own key and changes that object's prototype. Parameter/event maps
+permit arbitrary keys, so retain the parser with one documented insertion patch
+using own data properties. Record original and patched digests and test native
+object behavior. Identify receipts by their command/outcome variants, not
+merely map keys named `command`, `outcome` and `submission`. Those are valid
+parameter names too. Conflicting duplicate keys and invalid receipt identities
+fail the disposable consumer read.
+
+An unanswered request without an admitted receipt has no submission identity.
+An older receipt, or another console's identical command/actor/reason, cannot
+prove its outcome. Keep that request unknown rather than automatically settling
+it by payload equality. The journal and live feedback remain available for
+operator reconciliation; there is no automatic retry or newly implemented
+client-generated correlation protocol. Known admitted requests settle only by
+their exact original identity. Node contract execution and actual HTTP tests
+prove this boundary; they do not replace the pending browser gate.
+
 Review amendment from implementation inspection: numeric writable demands had
 no admission-time bounds. Add optional typed `limits: ParameterRange` to an
 equipment control. Model validation requires finite, ordered bounds of the

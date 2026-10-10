@@ -25,6 +25,13 @@ named terminal persistence failure with bounded teardown, and an offline custome
 rebuild from exact delivered artifacts. Architecture decision 116 records these
 seams and their limits. The browser and published-release gates remain open.
 
+Receipt-boundary acceptance additionally preserves exact u64 admission identity
+in the generic UI and prevents payload-only reconciliation of an unanswered
+request. Decision 117 records this assigned correctness fix and its required
+production-JavaScript CI gate; Node execution does not satisfy browser review.
+Asynchronous recorder failure is checked before another scan or promotion.
+These are bounded milestone repairs, not automatic backlog generation.
+
 The area extends the existing duty/standby station with a balance vessel, isolation, measured level and draining closed-loop discharge. Existing equipment, blocks and alarm lifecycle remain the implementation substrate. The customer binary consumes supported Rust APIs and obtains another pump's standard behavior without JavaScript. Candidate-release evidence must not be described as published-artifact evidence; actual desktop/phone keyboard/reduced-motion browser review is also still required. The [activation proposal](milestones/connected-water-activation.md) records deployment gaps without claiming plan/apply implementation or upgrading candidate WW-LCM-002.
 
 Automatic backlog generation stays disabled and water/wastewater remains active. This assigned slice does not reopen batch, vendor catalogue growth or a second reference application. Customer protection, alarm and commissioning policy questions remain open.

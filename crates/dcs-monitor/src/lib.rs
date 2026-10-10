@@ -352,7 +352,7 @@
 //! report is computed data, not contract.
 //!
 //! The page is the monitoring and control UI consuming the unified
-//! contract: a static, dependency-free HTML+JavaScript asset ([`PAGE`],
+//! contract: a static HTML+JavaScript asset ([`PAGE`],
 //! no build toolchain) that fetches `/signals` once for point labels,
 //! units, display groups, and the model-declared `writable` marks — the
 //! point listing organizes itself under the model-declared groups, with
@@ -2932,6 +2932,14 @@ impl<'d> Monitor<'d> {
         let mut terminal = false;
         let mut response = match (method, path) {
             (Method::Get, "/") | (Method::Get, "/index.html") => html(PAGE),
+            (Method::Get, "/lossless-json.js") => static_asset(
+                include_str!("vendor/lossless-json.js"),
+                "text/javascript; charset=utf-8",
+            ),
+            (Method::Get, "/wire-json.js") => static_asset(
+                include_str!("wire-json.js"),
+                "text/javascript; charset=utf-8",
+            ),
             (Method::Get, "/plant-view.js") => static_asset(
                 include_str!("plant-view.js"),
                 "text/javascript; charset=utf-8",

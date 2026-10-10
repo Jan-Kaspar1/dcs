@@ -16,6 +16,13 @@ teardown. Offline delivery preserves exact customer pins and supports a frozen
 SDK rebuild after the original release origin disappears. Decision 116 and the
 linked milestone record retain the simulation, publication and browser limits.
 
+Receipt-boundary follow-up for `WW-FND-003/004` and `WW-OPS-001/002` preserves
+exact u64 submission identity in the UI, keeps unidentified unanswered requests
+unknown and checks asynchronous recording failure before further authoritative
+work. Decision 117 and actual-source JavaScript/HTTP tests cover these scoped
+contracts. Full-u64 UI point IDs and actual browser review remain unproven;
+the connected area's IDs are small. No customer policy is closed by this repair.
+
 ## Accepted foundation requirements
 
 The [training-plant research](../research/training-plants.md), checked 2026-10-09, links vendor curricula, university process benchmarks, a physical water-treatment testbed, and owner operating guidance to the code-configured equipment/control/UI goal. Its proposed next slice deepens the existing station's `WW-OPS-001`–`003` presentation and demonstrates `WW-FND-001`, `WW-FND-003`–`004`, and `WW-ENG-003` through reusable elements and repeatable simulated scenarios. It adds evidence and planning input without changing requirement statuses, closing customer assumptions, or promoting candidate `WW-LCM-002` through its deployment-workflow proposal.

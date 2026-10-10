@@ -219,7 +219,8 @@ smaller positive step that actually does. The command-abort transport stub also
 consumes its declared body before replying, avoiding a TCP reset that made
 answered receipt/refusal cases flaky. Forty repeated answered cases pass.
 
-The final candidate is `ef53140dc4ad2b4256761f324df4dc55c6e3e095`, with customer
+The candidate verified before the receipt-identity follow-up below is
+`ef53140dc4ad2b4256761f324df4dc55c6e3e095`, with customer
 `0dcdae7e0fe12fd6881b6e0f7a3bd26484ba0bce`. Its model SHA-256 is
 `fbd3e4fe805ff611843c693ee2a3a087560e1bca9834a1aca471b08656726503`; every consumer
 schedule, restart at tick 664 and compatible takeover retain authoritative digest
@@ -241,10 +242,24 @@ no automatic retry. A known admission reconciles by its receipt origin/sequence;
 an older identical request, another boot or an unidentified receipt cannot
 settle it. These checks remain supplemental to actual browser review.
 
-Origin publishing was attempted as a dry run and refused because Git HTTPS
+Native origin publishing was attempted as a dry run and refused because Git HTTPS
 credentials are unavailable. All commits remain local on `main`; no remote CI
 or release publication is claimed. Configure Git credentials before publishing
 and collecting reviewed CI results.
+
+The connected GitHub app subsequently authenticated as `Jan-Kaspar1` with
+repository write access. [Draft PR #1529](https://github.com/Jan-Kaspar1/dcs/pull/1529)
+publishes the 12 original cuts from identical file trees. Every returned blob
+and tree hash was checked against its original Git identity. The API-generated
+commits have different metadata and IDs; local `main` history is preserved.
+The [publication mapping](connected-water-publication.json) retains the paired
+commit and file-tree identities; the initial tool record is also retained at
+`/tmp/dcs-water-github-commit-mapping.json`.
+Its initial head is `cb279d7e27f48f09d72e22da1726e3d26f23a1b5` on
+`codex/connected-water-milestone-20261011`. Remote CI is now a running gate;
+the earlier local evidence does not claim its result. The current receipt
+follow-up will be added after its applicable local checks. This is source
+review publication, not a public release tag, image or candidate binary upload.
 
 An earlier historical test hung after a 256-scan batch overflowed the released
 64-entry state sink and poisoned its handler mutex. The history harness now
@@ -276,6 +291,31 @@ simulated preview, not an installed production deployment. HTTP and source-state
 checks are recorded separately from the still-blocked actual browser gate.
 
 ## Reviewable delivery sequence
+
+The receipt-identity follow-up reproduces two additional consumer defects:
+JavaScript rounds distinct u64 origins to the same Number, and a request with
+no admitted identity could match an older identical command. The monitor now
+embeds a pinned lossless parser and one generic adapter, with an included MIT
+notice and documented own-property insertion patch. Only receipt origin/sequence
+become exact decimal strings; process arithmetic remains native numeric.
+Equipment and alarm panels retain a known unattested admission's identity and
+resolve only its actual settlement. An unidentified unanswered request remains
+unknown. No command is retried automatically. Full-u64 point IDs, ticks and
+integer process values remain unproven; the area uses small IDs and values.
+
+The required `ui-tests` phase executes the actual shipped adapter and page
+functions using Node 22, including adjacent large identities, false matches,
+malformed identities, arbitrary parameter/event map names and `__proto__` own
+keys. HTTP acceptance serves the exact same-origin scripts and preserves large
+identities through admission, carried receipt and journal settlement. These
+are source/transport contract checks, not browser review. Full repository gates
+and a fresh external candidate are being collected for this change.
+
+An asynchronous writer can fail after a successful queue offer while the
+monitor failure latch still appears unset. Scans and promotion now inspect
+sink health before further authoritative work. Injected failures exercise
+paced scan, self-promotion and HTTP promotion, requiring unchanged tick,
+closed field gate and released claim.
 
 Kaspar explicitly requested regular commits to `main` on 2026-10-10. The
 initial verified connected-area implementation is `f7068e50`; exact offline

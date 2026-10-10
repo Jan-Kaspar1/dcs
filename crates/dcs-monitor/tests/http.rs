@@ -370,6 +370,228 @@ fn point_value(snapshot: &dcs_core::TelemetrySnapshot, point: u64) -> Option<Val
         .map(|sample| sample.value)
 }
 
+/// Read headers as well as bytes so bundled script loading is tested against
+/// the actual HTTP endpoint, including its same-origin content/CORS policy.
+fn asset_response(
+    addr: std::net::SocketAddr,
+    path: &str,
+) -> (u16, HashMap<String, String>, Vec<u8>) {
+    use std::io::Read;
+    let mut stream = TcpStream::connect(addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut bytes = Vec::new();
+    stream.read_to_end(&mut bytes).unwrap();
+    let split = bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .unwrap();
+    let head = std::str::from_utf8(&bytes[..split]).unwrap();
+    let mut lines = head.split("\r\n");
+    let status = lines
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let headers: HashMap<String, String> = lines
+        .filter_map(|line| line.split_once(':'))
+        .map(|(key, value)| (key.trim().to_ascii_lowercase(), value.trim().to_string()))
+        .collect();
+    let body = if let Some(length) = headers.get("content-length") {
+        let body = bytes[split + 4..].to_vec();
+        assert_eq!(length.parse::<usize>().unwrap(), body.len());
+        body
+    } else {
+        assert_eq!(headers["transfer-encoding"], "chunked");
+        // Large static assets use chunk framing. Reuse the shipped client's
+        // decoder on another immutable-asset read rather than mirroring it.
+        let (decoded_status, decoded) =
+            MonitorClient::new(addr).request("GET", path, None).unwrap();
+        assert_eq!(decoded_status, status);
+        decoded.into_bytes()
+    };
+    (status, headers, body)
+}
+
+#[test]
+fn the_operator_page_serves_its_exact_same_origin_integer_safe_scripts() {
+    let driver = StubDriver::new(&[(PointId(10), Value::Float(0.0))]);
+    let map = PointMap::new().with_writable_point(PointId(10), Direction::In, ValueKind::Float);
+    let executor = Executor::new(&driver, map, Vec::new()).unwrap();
+    let monitor = Monitor::bind(
+        "127.0.0.1:0",
+        executor,
+        SignalIndex {
+            points: Vec::new(),
+            components: Vec::new(),
+            equipment: Vec::new(),
+            views: Vec::new(),
+        },
+    )
+    .unwrap();
+    let addr = monitor.local_addr();
+    let result = thread::scope(|scope| {
+        scope.spawn(|| monitor.serve());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (status, headers, body) = asset_response(addr, "/");
+            assert_eq!(status, 200);
+            assert_eq!(headers["content-type"], "text/html; charset=utf-8");
+            assert!(!headers.contains_key("access-control-allow-origin"));
+            assert_eq!(body, include_bytes!("../src/page.html"));
+            let page = std::str::from_utf8(&body).unwrap();
+            let positions = ["/lossless-json.js", "/wire-json.js", "/plant-view.js"].map(|src| {
+                page.find(&format!("src=\"{src}\""))
+                    .expect("required script missing from page")
+            });
+            assert!(positions[0] < positions[1] && positions[1] < positions[2]);
+            for (path, expected) in [
+                (
+                    "/lossless-json.js",
+                    include_bytes!("../src/vendor/lossless-json.js").as_slice(),
+                ),
+                (
+                    "/wire-json.js",
+                    include_bytes!("../src/wire-json.js").as_slice(),
+                ),
+                (
+                    "/plant-view.js",
+                    include_bytes!("../src/plant-view.js").as_slice(),
+                ),
+            ] {
+                let (status, headers, body) = asset_response(addr, path);
+                assert_eq!(status, 200, "{path}");
+                assert_eq!(
+                    headers["content-type"], "text/javascript; charset=utf-8",
+                    "{path}"
+                );
+                assert!(
+                    !headers.contains_key("access-control-allow-origin"),
+                    "{path}"
+                );
+                assert_eq!(
+                    body, expected,
+                    "asset bytes must match the bundled release: {path}"
+                );
+            }
+            // Telemetry retains the existing cross-origin pair-read convention.
+            let (status, headers, _) = asset_response(addr, "/snapshot");
+            assert_eq!(status, 200);
+            assert_eq!(headers["content-type"], "application/json");
+            assert_eq!(headers["access-control-allow-origin"], "*");
+        }));
+        monitor.shutdown();
+        result
+    });
+    result.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+}
+
+#[test]
+fn posted_and_journaled_receipts_keep_neighboring_large_origins_and_maximum_sequences_exact() {
+    let mut observed = Vec::new();
+    let origins = [
+        1_u64 << 53,
+        (1_u64 << 53) + 1,
+        17_307_262_437_741_370_921,
+        17_307_262_437_741_370_922,
+        u64::MAX,
+    ];
+    for origin in origins {
+        let driver = StubDriver::new(&[(PointId(10), Value::Float(0.0))]);
+        let map = PointMap::new().with_writable_point(PointId(10), Direction::In, ValueKind::Float);
+        let mut executor = Executor::new(&driver, map, Vec::new())
+            .unwrap()
+            .with_submission_origin(origin);
+        let seed = Command::WriteValue {
+            point: PointId(10),
+            kind: ValueKind::Float,
+            value: Value::Float(1.0),
+        };
+        executor.submit_command(seed.clone());
+        // A transferred receipt can carry any u64 sequence. It is not the
+        // current process's mint counter, so exercise that carrier separately.
+        let mut checkpoint = executor.checkpoint();
+        checkpoint.receipts[0].submission.as_mut().unwrap().seq = u64::MAX;
+        executor.apply(&checkpoint).unwrap();
+        let monitor = Monitor::bind(
+            "127.0.0.1:0",
+            executor,
+            SignalIndex {
+                points: Vec::new(),
+                components: Vec::new(),
+                equipment: Vec::new(),
+                views: Vec::new(),
+            },
+        )
+        .unwrap();
+        let client = MonitorClient::with_timeout(monitor.local_addr(), Duration::from_secs(2));
+        let result = thread::scope(|scope| {
+            scope.spawn(|| monitor.serve());
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let command = Command::WriteValue {
+                    point: PointId(10),
+                    kind: ValueKind::Float,
+                    value: Value::Float(2.0),
+                };
+                let (status, body) = client
+                    .request(
+                        "POST",
+                        "/command",
+                        Some(&serde_json::to_string(&command).unwrap()),
+                    )
+                    .unwrap();
+                assert_eq!(status, 200, "{body}");
+                assert!(body.contains(&format!("\"origin\":{origin}")), "{body}");
+                let admitted: CommandReceipt = serde_json::from_str(&body).unwrap();
+                let id = admitted.submission.unwrap();
+                assert_eq!(id.origin, origin);
+                assert!(matches!(admitted.outcome, CommandOutcome::Accepted { .. }));
+                client.advance(1).unwrap();
+                let (status, body) = client.request("GET", "/journal", None).unwrap();
+                assert_eq!(status, 200, "{body}");
+                assert!(body.contains(&format!("\"origin\":{origin}")), "{body}");
+                assert!(body.contains("\"seq\":18446744073709551615"), "{body}");
+                let entries: Vec<dcs_core::JournalEntry> = serde_json::from_str(&body).unwrap();
+                let settled: Vec<_> = entries
+                    .iter()
+                    .filter_map(|entry| match &entry.event {
+                        JournalEvent::CommandSettled { receipt } => Some(receipt),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(settled.iter().any(|receipt| receipt.command == command
+                    && receipt.submission == Some(id)
+                    && matches!(receipt.outcome, CommandOutcome::Applied { tick: Tick(1) })));
+                assert!(settled.iter().any(|receipt| receipt.command == seed
+                    && receipt.submission
+                        == Some(dcs_core::SubmissionId {
+                            origin,
+                            seq: u64::MAX
+                        })
+                    && matches!(receipt.outcome, CommandOutcome::Applied { tick: Tick(1) })));
+                observed.push(id.origin);
+            }));
+            monitor.shutdown();
+            result
+        });
+        result.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    }
+    assert_eq!(observed, origins);
+    assert_ne!(observed[0], observed[1]);
+    assert_ne!(observed[2], observed[3]);
+}
+
 #[test]
 fn snapshot_roundtrips_over_http() {
     with_monitor(|driver, client| {

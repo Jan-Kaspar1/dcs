@@ -16,8 +16,8 @@ else:
 
 
 BUILD_SLOTS = 4
-PHASES = ("rust-format", "supervisor-tests", "rust-clippy", "rust-tests", "rust-proofs")
-# Artifact/reproduction phases are optional; required CI gates stay unchanged.
+PHASES = ("rust-format", "supervisor-tests", "ui-tests", "rust-clippy", "rust-tests", "rust-proofs")
+# Artifact/reproduction phases are optional; they do not replace required CI gates.
 OPTIONAL_PHASES = ("rust-demo", "water-area-proof")
 RUST_PHASES = frozenset(("rust-clippy", "rust-tests", "rust-proofs", "rust-demo", "water-area-proof"))
 
@@ -99,6 +99,7 @@ def phase_command(name):
     commands = {
         "rust-format": ["cargo", "fmt", "--all", "--", "--check"],
         "supervisor-tests": [sys.executable, "scripts/run_tests.py", "--workers", "4"],
+        "ui-tests": [sys.executable, "scripts/run_ui_tests.py"],
         "rust-clippy": ["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"],
         "rust-tests": [sys.executable, "scripts/run_rust_tests.py", "--scope", "workspace"],
         "rust-proofs": [sys.executable, "scripts/run_rust_tests.py", "--scope", "proofs"],
@@ -127,7 +128,7 @@ def main(argv=None):
     env = dict(os.environ, CARGO_BUILD_JOBS="4", CARGO_TARGET_DIR=str(root / "target"))
     started = time.monotonic()
     if options.phase is None:
-        for name in ("rust-format", "supervisor-tests"):
+        for name in ("rust-format", "supervisor-tests", "ui-tests"):
             run_phase(name, phase_command(name), root, env)
         with build_slot() as slot:
             held = time.monotonic()
