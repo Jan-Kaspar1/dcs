@@ -10,7 +10,7 @@
 //!
 //! Rules the schema expresses beyond the serde shape:
 //!
-//! - `version` is the constant [`MODEL_VERSION`];
+//! - `version` supports legacy models and bounded-control version 2;
 //! - unknown keys are rejected (`additionalProperties: false`) where serde
 //!   would silently ignore them, so a misspelled field fails instead of
 //!   evaporating;
@@ -85,10 +85,10 @@
 //!   contract emits.
 
 use crate::PlantModel;
-use crate::model::MODEL_VERSION;
+use crate::model::{CONTROL_LIMITS_MODEL_VERSION, MODEL_VERSION};
 
-/// The schema document's source. `version`'s `const` is stamped at parse
-/// time from [`MODEL_VERSION`], so the two cannot drift.
+/// The schema source; supported versions and the numeric-limit version guard
+/// are stamped from the Rust contract when parsed.
 const SCHEMA_SOURCE: &str = r##"{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "DCS plant model",
@@ -157,6 +157,10 @@ const SCHEMA_SOURCE: &str = r##"{
         { "type": "null" }
       ]
     },
+    "measurement-display": {
+      "type": "object", "additionalProperties": false, "required": ["min", "max"],
+      "properties": { "min": { "type": "number" }, "max": { "type": "number" }, "normal": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "number" } } }
+    },
     "view-node": {
       "type": "object", "additionalProperties": false,
       "required": ["id", "symbol", "label", "x", "y"],
@@ -165,6 +169,7 @@ const SCHEMA_SOURCE: &str = r##"{
         "symbol": { "enum": ["pump", "motor", "valve", "tank", "measurement", "label"] },
         "x": { "type": "integer", "minimum": 0, "maximum": 1200 },
         "y": { "type": "integer", "minimum": 0, "maximum": 760 },
+        "display": { "$ref": "#/$defs/measurement-display" },
         "binding": { "anyOf": [{ "$ref": "#/$defs/view-entity-binding" }, { "$ref": "#/$defs/view-point-binding" }] }
       },
       "allOf": [
@@ -196,11 +201,17 @@ const SCHEMA_SOURCE: &str = r##"{
         "controls": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/equipment-control" } }
       }
     },
+    "parameter-range": {
+      "type": "object", "additionalProperties": false, "required": ["min", "max"],
+      "properties": { "min": { "$ref": "#/$defs/value" }, "max": { "$ref": "#/$defs/value" } }
+    },
     "equipment-control": {
       "type": "object",
       "additionalProperties": false,
       "required": ["point", "label"],
       "properties": {
+        "role": {"enum": ["mode", "request", "setpoint", "manual_output", "out_of_service", "acknowledge", "shelve"]},
+                "limits": { "$ref": "#/$defs/parameter-range" },
         "point": { "$ref": "#/$defs/id" },
         "label": { "type": "string", "pattern": "\\S" },
         "false_label": { "type": ["string", "null"], "pattern": "\\S" },
@@ -808,7 +819,14 @@ impl PlantModel {
     pub fn json_schema() -> serde_json::Value {
         let mut schema: serde_json::Value = serde_json::from_str(SCHEMA_SOURCE)
             .expect("the embedded schema source is fixed JSON and parses");
-        schema["properties"]["version"]["const"] = MODEL_VERSION.into();
+        schema["properties"]["version"] =
+            serde_json::json!({"enum": [MODEL_VERSION, CONTROL_LIMITS_MODEL_VERSION]});
+        schema["allOf"] = serde_json::json!([{
+            "if": {"required": ["equipment"], "properties": {"equipment": {"contains": {
+                "required": ["controls"], "properties": {"controls": {"contains": {"required": ["limits"]}}}
+            }}}},
+            "then": {"properties": {"version": {"const": CONTROL_LIMITS_MODEL_VERSION}}}
+        }]);
         schema
     }
 }

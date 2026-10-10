@@ -292,6 +292,15 @@ pub enum CommandError {
     },
     /// The supplied value falls outside the parameter's declared
     /// [`ParameterRange`].
+    PointOutOfRange {
+        /// Commanded logical point.
+        point: PointId,
+        /// Rejected value.
+        value: Value,
+        /// Model-declared inclusive command bounds.
+        range: ParameterRange,
+    },
+    /// Parameter value outside its declared range.
     OutOfRange {
         /// The offending component name.
         component: String,
@@ -421,6 +430,7 @@ impl CommandError {
             | CommandError::ReasonRequired { point }
             | CommandError::TypeMismatch { point, .. }
             | CommandError::DriverRejected { point, .. }
+            | CommandError::PointOutOfRange { point, .. }
             | CommandError::PointForced { point } => Some(*point),
             CommandError::NotActive { point, .. }
             | CommandError::QueueFull { point, .. }
@@ -504,6 +514,14 @@ impl fmt::Display for CommandError {
             } => write!(
                 f,
                 "parameter {component:?}.{parameter:?} expects {expected:?}, found {found:?}"
+            ),
+            CommandError::PointOutOfRange {
+                point,
+                value,
+                range,
+            } => write!(
+                f,
+                "point {point:?} value {value:?} outside declared range {range:?}"
             ),
             CommandError::OutOfRange {
                 component,

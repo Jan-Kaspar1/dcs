@@ -96,6 +96,20 @@ fn emitted_schema_is_deterministic_across_calls() {
 /// schema must accept, serialized the way a document writes it.
 fn one_element_per_kind() -> Vec<ProcessElement> {
     vec![
+        ProcessElement::BoundedIntegrator(dcs_sim::BoundedIntegrator {
+            input: PointId(1),
+            output: PointId(2),
+            initial: 2.0,
+            min: 0.0,
+            max: 5.0,
+        }),
+        ProcessElement::GatedFlow(dcs_sim::GatedFlow {
+            input: PointId(1),
+            gate: PointId(3),
+            output: PointId(2),
+            gain: 1.44,
+            initial: 0.0,
+        }),
         ProcessElement::FirstOrderLag(FirstOrderLag {
             input: PointId(1),
             output: PointId(2),
@@ -320,6 +334,9 @@ fn schema_rejects_documents_with_structural_violations() {
         }]),
         // An empty element entry.
         serde_json::json!([{}]),
+        // New declarations must carry their gate and storage limits.
+        serde_json::json!([{"gated_flow": {"input": 1, "output": 2, "gain": 1.44, "initial": 0.0}}]),
+        serde_json::json!([{"bounded_integrator": {"input": 1, "output": 2, "initial": 0.0, "min": 0.0}}]),
         // A missing required field.
         serde_json::json!([{"integrator": {"input": 1, "output": 2}}]),
         // An unknown field serde would silently ignore.

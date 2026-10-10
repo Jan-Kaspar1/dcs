@@ -105,6 +105,7 @@ pub struct PointSpec {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PointMap {
     points: BTreeMap<PointId, PointSpec>,
+    write_limits: BTreeMap<PointId, dcs_core::ParameterRange>,
     /// Internal `Out` → `In` routes through the scan image: at each
     /// scan's input phase the `Out` point's sample is copied onto the
     /// `In` point — the image-carried carrier for port-to-port and
@@ -116,6 +117,12 @@ impl PointMap {
     /// An empty map.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Carries model-validated inclusive operator write/force limits.
+    pub fn with_write_limits(mut self, point: PointId, range: dcs_core::ParameterRange) -> Self {
+        self.write_limits.insert(point, range);
+        self
     }
 
     /// Adds `point` as a driver-served field point with the given
@@ -3167,6 +3174,15 @@ impl<'d> Executor<'d> {
                         point: *point,
                         expected: *kind,
                         found: *value,
+                    });
+                }
+                if let Some(range) = self.map.write_limits.get(point)
+                    && !range.contains(*value)
+                {
+                    return Err(CommandError::PointOutOfRange {
+                        point: *point,
+                        value: *value,
+                        range: *range,
                     });
                 }
                 // A write to a forced *internal* point cannot land: the

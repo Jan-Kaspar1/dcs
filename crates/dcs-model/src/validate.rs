@@ -9,7 +9,7 @@
 use crate::model::{
     ComponentId, ComponentInstance, DeviceId, Direction, Endpoint, IoPoint, PlantModel,
 };
-use dcs_core::{PointId, SignalId, ValueKind};
+use dcs_core::{PointId, SignalId, Value, ValueKind};
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
@@ -71,6 +71,15 @@ pub enum ValidationError {
         reason: String,
     },
     /// An equipment declaration omits a meaningful identity or member set.
+    InvalidEquipmentControl {
+        /// Owning equipment identity.
+        equipment: String,
+        /// Command target.
+        point: PointId,
+        /// Invalid bound or conflicting declaration.
+        reason: String,
+    },
+    /// An equipment field is empty.
     EmptyEquipmentField {
         /// The declared equipment id, possibly empty.
         equipment: String,
@@ -382,6 +391,13 @@ impl fmt::Display for ValidationError {
         match self {
             Self::InvalidPlantView { view, reason } => {
                 write!(f, "plant view {view:?} is invalid: {reason}")
+            }
+            Self::InvalidEquipmentControl {
+                equipment,
+                point,
+                reason,
+            } => {
+                write!(f, "equipment {equipment:?} control {point:?}: {reason}")
             }
             Self::EmptyEquipmentField { equipment, field } => {
                 write!(f, "equipment {equipment:?} has empty {field}")
@@ -790,6 +806,7 @@ impl PlantModel {
             &mut errors,
         );
 
+        let mut control_limits = HashMap::new();
         let mut equipment_ids = HashSet::new();
         let mut owners: HashMap<ComponentId, &str> = HashMap::new();
         for equipment in &self.equipment {
@@ -863,6 +880,57 @@ impl PlantModel {
             let mut controls = HashSet::new();
             for control in &equipment.controls {
                 let id = &control.point;
+                if let Some(role) = control.role {
+                    let valid = points.get(&id.0).is_some_and(|point| {
+                        let numeric = matches!(point.value_type, ValueKind::Int | ValueKind::Float);
+                        match role {
+                            crate::EquipmentControlRole::Mode
+                            | crate::EquipmentControlRole::OutOfService
+                            | crate::EquipmentControlRole::Acknowledge
+                            | crate::EquipmentControlRole::Shelve => {
+                                point.value_type == ValueKind::Bool
+                            }
+                            crate::EquipmentControlRole::Setpoint
+                            | crate::EquipmentControlRole::ManualOutput => numeric,
+                            crate::EquipmentControlRole::Request => true,
+                        }
+                    });
+                    if !valid {
+                        errors.push(ValidationError::InvalidEquipmentControl {
+                            equipment: equipment.id.clone(),
+                            point: *id,
+                            reason: "role must match its declared Boolean or numeric point kind"
+                                .into(),
+                        });
+                    }
+                }
+                if let Some(limits) = control.limits {
+                    if self.version != crate::CONTROL_LIMITS_MODEL_VERSION {
+                        errors.push(ValidationError::InvalidEquipmentControl {
+                            equipment: equipment.id.clone(),
+                            point: *id,
+                            reason: "authoritative numeric limits require model version 2".into(),
+                        });
+                    }
+                    let ordered = match (limits.min, limits.max) {
+                        (Value::Float(low), Value::Float(high)) => {
+                            low.is_finite() && high.is_finite() && low <= high
+                        }
+                        (Value::Int(low), Value::Int(high)) => low <= high,
+                        _ => false,
+                    };
+                    let valid = ordered
+                        && points.get(&id.0).is_some_and(|p| {
+                            p.value_type == limits.min.kind()
+                                && p.initial.is_none_or(|v| limits.contains(v))
+                        });
+                    let consistent = control_limits
+                        .insert(*id, limits)
+                        .is_none_or(|old| old == limits);
+                    if !valid || !consistent {
+                        errors.push(ValidationError::InvalidEquipmentControl { equipment: equipment.id.clone(), point: *id, reason: "limits must be finite, ordered, match the point kind and initial value, and agree across declarations".into() });
+                    }
+                }
                 for (field, label) in [
                     ("control.label", Some(control.label.as_str())),
                     ("control.false_label", control.false_label.as_deref()),

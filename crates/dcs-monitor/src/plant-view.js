@@ -119,6 +119,14 @@
     } else if (node.symbol === "tank") {
       group.append(svg("path", { d: "M 18 20 L 18 110 Q " + x + " 130 " + (width - 18) + " 110 L " + (width - 18) + " 20 M 18 20 Q " + x + " 0 " + (width - 18) + " 20 M 18 20 Q " + x + " 40 " + (width - 18) + " 20", class: "plant-symbol-body plant-tank" }));
     } else if (node.symbol === "measurement") group.append(svg("path", { d: "M 30 66 H " + (width - 30), class: "plant-measurement-body" }));
+    if (node.display && node.symbol === "measurement") {
+      const gauge = svg("g", { class: "plant-gauge", "aria-hidden": "true" });
+      gauge.append(svg("rect", { x: 20, y: 62, width: width - 40, height: 5, rx: 2, class: "plant-gauge-track" }));
+      const scale = v => 20 + (width - 40) * (v - node.display.min) / (node.display.max - node.display.min);
+      if (node.display.normal) gauge.append(svg("rect", { x: scale(node.display.normal[0]), y: 61, width: scale(node.display.normal[1]) - scale(node.display.normal[0]), height: 7, class: "plant-gauge-normal" }));
+      gauge.append(svg("path", { d: "M 0 56 L -4 51 L 4 51 Z", class: "plant-gauge-marker" }));
+      group.append(gauge);
+    }
     const labelY = node.symbol === "label" ? 26 : node.symbol === "tank" ? 143 : node.symbol === "measurement" ? 20 : 91;
     group.append(svg("text", { x, y: labelY, "text-anchor": "middle", class: "plant-label" }, node.label));
     if (node.symbol !== "label") {
@@ -207,7 +215,7 @@
     });
     nodes.forEach(node => {
       const [width, height] = SIZES[node.symbol];
-      const interactive = Boolean(node.binding && (node.binding.equipment != null || node.binding.component != null));
+      const interactive = Boolean(node.binding && (node.binding.equipment != null || node.binding.component != null || node.binding.point != null && Array.from(state.model.equipment.values()).some(item => item.points.includes(node.binding.point))));
       const group = svg("g", { transform: "translate(" + node.x + " " + node.y + ")",
         class: "plant-node" + (interactive ? " plant-equipment" : "") + " symbol-" + node.symbol,
         "data-node": node.id, role: interactive ? "button" : "img", "aria-label": node.label });
@@ -241,7 +249,8 @@
     const binding = node.binding;
     if (!binding) return;
     const component = binding.component != null ? state.model.components.get(binding.component) : null;
-    const selection = binding.equipment != null ? "equipment:" + binding.equipment : component ? component.name : null;
+    const owner = binding.point != null && Array.from(state.model.equipment.values()).find(item => item.points.includes(binding.point));
+    const selection = owner ? "equipment:" + owner.id : binding.equipment != null ? "equipment:" + binding.equipment : component ? component.name : null;
     if (!selection) { note("The selected equipment is unavailable in the current model."); return; }
     state.selected = node.id;
     state.elements.forEach((element, id) => element.classList.toggle("is-selected", id === node.id));
@@ -279,7 +288,12 @@
       const text = typeof current === "number" && Number.isFinite(current)
         ? current.toLocaleString(undefined, { maximumFractionDigits: 3 }) : "—";
       const unit = text !== "—" && meta ? meta.unit || "" : "";
-      return { text, unit, tag: good(reading) ? "" : quality(reading), running: false, fault: false, degraded: !good(reading) };
+      return { text, unit, tag: good(reading) ? "Good" : quality(reading), running: false, fault: false, degraded: !good(reading) };
+    }
+    const equipment = binding.equipment != null && model.equipment.get(binding.equipment);
+    if (equipment && ["analog-measurement", "control-loop", "pumping-station"].includes(equipment.kind)) {
+      const result = liveState({ binding: { point: equipment.points[0] } }, model, context);
+      return { ...result, description: equipment.kind === "control-loop" ? "Measured process value" : "Measured value" };
     }
     const descriptors = descriptorsFor(node, model), important = [];
     const actuators = descriptors.filter(descriptor => descriptor.kind === "motor" || /valve/.test(descriptor.kind));
@@ -307,21 +321,27 @@
     let tag = degraded && (fault || tripped) ? "Data uncertain" : "";
     if (binding.equipment != null) {
       const equipment = model.equipment.get(binding.equipment);
-      const mode = equipment && (equipment.controls || []).find(control => /mode/i.test(control.label || ""));
+      const mode = equipment && (equipment.controls || []).find(control => control.role === "mode");
       if (mode) {
         const reading = sample(mode.point);
         if (good(reading) && typeof value(reading) === "boolean") tag += (tag ? " · " : "") + (value(reading) ? mode.true_label || "On" : mode.false_label || "Off");
       }
+    }
+    if (binding.equipment != null && (model.equipment.get(binding.equipment) || {}).kind === "on-off-valve") {
+      text = tripped ? "Opening blocked" : fault ? "Feedback fault" : degraded ? "Data uncertain" : running === true ? "Open" : running === false ? "Closed / not open" : "Unknown position";
+      if (!fault && !degraded && command !== running) text = command ? "Opening requested" : "Closing requested";
     }
     const description = tripped ? "Protection tripped" : fault ? "Actuator feedback fault" : text;
     return { text, tag, description, running: running === true && !degraded, fault: fault || tripped, degraded };
   }
   function alarmSummary(node) {
     const binding = node.binding;
-    if (!binding || (binding.equipment == null && binding.component == null)) return null;
+    if (!binding) return null;
+    const pointOwner = binding.point != null && Array.from(state.model.equipment.values()).find(item => item.points.includes(binding.point));
+    if (binding.equipment == null && binding.component == null && !pointOwner) return null;
     const ids = new Set();
-    if (binding.equipment != null) {
-      ((state.model.equipment.get(binding.equipment) || {}).components || []).forEach(id => ids.add(id));
+    if (binding.equipment != null || pointOwner) {
+      ((pointOwner || state.model.equipment.get(binding.equipment) || {}).components || []).forEach(id => ids.add(id));
     } else {
       ids.add(binding.component);
       // A primitive glyph can be part of declared higher-level equipment.
@@ -419,11 +439,26 @@
         if (live.unit) status.append(svg("tspan", { class: "plant-unit", dx: 5 }, live.unit));
       }
       if (tag) tag.textContent = live.tag;
+      if (node.display && node.binding?.point != null) {
+        const reading = (state.model.telemetry.get(node.binding.point) || {}).sample;
+        const current = value(reading), marker = element.querySelector(".plant-gauge-marker");
+        const trusted = !state.context.stale && good(reading) && typeof current === "number" && Number.isFinite(current);
+        if (marker) {
+          marker.toggleAttribute("hidden", !trusted);
+          const fraction = Math.max(0, Math.min(1, (current - node.display.min) / (node.display.max - node.display.min)));
+          marker.setAttribute("transform", "translate(" + (20 + 150 * fraction) + " 10)");
+          marker.classList.toggle("is-offscale", trusted && (current < node.display.min || current > node.display.max));
+          if (trusted && (current < node.display.min || current > node.display.max) && tag) tag.textContent += " · Off scale";
+        }
+        const context = "Display " + node.display.min + "–" + node.display.max + (live.unit ? " " + live.unit : "") + (node.display.normal ? "; normal " + node.display.normal.join("–") : "");
+        element.querySelector(".plant-gauge").setAttribute("data-context", context);
+        element.querySelector("title").textContent = context;
+      }
       const alarmDescription = updateAlarmIndicator(node, element);
       const description = node.label + (live.description || live.text ? " · " + (live.description || live.text) : "") + (live.unit ? " " + live.unit : "") + (live.tag ? " · " + live.tag : "")
         + (alarmDescription ? " · " + alarmDescription : "");
       element.setAttribute("aria-label", description);
-      element.querySelector("title").textContent = description;
+      element.querySelector("title").textContent = description + (node.display ? "; display " + node.display.min + "–" + node.display.max + (node.display.normal ? "; normal " + node.display.normal.join("–") : "") : "");
     });
   }
   function update(context) {

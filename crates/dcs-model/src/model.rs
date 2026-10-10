@@ -2,8 +2,8 @@
 //!
 //! The schema implements the recorded serialization decision: JSON with an
 //! explicit top-level `version` field. [`PlantModel::load`] accepts only
-//! [`MODEL_VERSION`]; a future schema bump inserts a migration step between
-//! parsing and validation.
+//! [`MODEL_VERSION`] and [`CONTROL_LIMITS_MODEL_VERSION`]. Version 2 requires
+//! authoritative command-limit support; version 1 retains legacy artifact bytes.
 
 use crate::validate::ValidationError;
 use dcs_core::{ModelFingerprint, PointId, SignalId, Value, ValueKind};
@@ -11,8 +11,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 
-/// The document version this implementation reads and writes.
+/// Legacy document version retained for models without authoritative control limits.
 pub const MODEL_VERSION: u32 = 1;
+/// Required document version for authoritative equipment command limits.
+/// Older runtimes must reject it instead of ignoring an unknown limit field.
+pub const CONTROL_LIMITS_MODEL_VERSION: u32 = 2;
 
 /// Identifies a field or simulated I/O device in the plant model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -459,7 +462,7 @@ pub struct Connection {
 /// values, command admission, alarms, and state remain owned by those
 /// declarations. `points` preserves the engineered summary order and
 /// `controls` selects the writable inputs an operator may use there.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Equipment {
     /// Stable equipment identity, unique within the plant.
     pub id: String,
@@ -475,9 +478,35 @@ pub struct Equipment {
     pub controls: Vec<EquipmentControl>,
 }
 
+/// Machine-readable meaning of an equipment operator control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EquipmentControlRole {
+    /// Automatic/manual selection; Boolean false is automatic.
+    Mode,
+    /// Stored actuator request.
+    Request,
+    /// Process target.
+    Setpoint,
+    /// Output requested while manual is selected.
+    ManualOutput,
+    /// Maintenance inhibit.
+    OutOfService,
+    /// Managed alarm acknowledgment.
+    Acknowledge,
+    /// Managed alarm shelving request.
+    Shelve,
+}
+
 /// A labeled operator action on an equipment's existing writable point.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EquipmentControl {
+    /// Explicit control meaning; never inferred from its label or tag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<EquipmentControlRole>,
+    /// Inclusive authoritative numeric write/force bounds, separate from display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<dcs_core::ParameterRange>,
     /// The command target, also present in the equipment summary.
     pub point: PointId,
     /// Human-facing control name.
@@ -495,7 +524,7 @@ pub struct EquipmentControl {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlantModel {
     /// Document schema version. [`PlantModel::load`] accepts only
-    /// [`MODEL_VERSION`].
+    /// [`MODEL_VERSION`] or [`CONTROL_LIMITS_MODEL_VERSION`].
     pub version: u32,
     /// Declared field/simulated devices.
     pub devices: Vec<Device>,
@@ -521,11 +550,11 @@ pub struct PlantModel {
 pub enum LoadError {
     /// The document is not well-formed JSON or does not match the schema.
     Malformed(serde_json::Error),
-    /// The document's `version` is not [`MODEL_VERSION`].
+    /// The document version is outside this build's supported versions.
     UnsupportedVersion {
         /// The version the document declares.
         found: u32,
-        /// The version this implementation accepts.
+        /// The supported legacy version; bounded controls use version 2.
         supported: u32,
     },
     /// The document parsed but failed validation; carries every error found.
@@ -538,7 +567,7 @@ impl fmt::Display for LoadError {
             Self::Malformed(error) => write!(f, "malformed model document: {error}"),
             Self::UnsupportedVersion { found, supported } => write!(
                 f,
-                "unsupported model version {found} (this build accepts {supported})"
+                "unsupported model version {found} (this build accepts {supported} and bounded-controls version {CONTROL_LIMITS_MODEL_VERSION})"
             ),
             Self::Invalid(errors) => {
                 write!(f, "invalid plant model ({} error(s)):", errors.len())?;
@@ -565,11 +594,11 @@ impl PlantModel {
     ///
     /// Returns [`LoadError::Malformed`] for documents that are not well-formed
     /// JSON or do not match the schema, [`LoadError::UnsupportedVersion`] for
-    /// a `version` other than [`MODEL_VERSION`], and
+    /// a version outside [`MODEL_VERSION`] / [`CONTROL_LIMITS_MODEL_VERSION`], and
     /// [`LoadError::Invalid`] carrying every validation error found.
     pub fn load(source: &str) -> Result<Self, LoadError> {
         let model: Self = serde_json::from_str(source).map_err(LoadError::Malformed)?;
-        if model.version != MODEL_VERSION {
+        if ![MODEL_VERSION, CONTROL_LIMITS_MODEL_VERSION].contains(&model.version) {
             return Err(LoadError::UnsupportedVersion {
                 found: model.version,
                 supported: MODEL_VERSION,
@@ -934,10 +963,10 @@ mod tests {
 
     #[test]
     fn unsupported_version_is_rejected() {
-        let document = MINIMAL.replace("\"version\": 1", "\"version\": 2");
+        let document = MINIMAL.replace("\"version\": 1", "\"version\": 99");
         match PlantModel::load(&document) {
             Err(LoadError::UnsupportedVersion { found, supported }) => {
-                assert_eq!(found, 2);
+                assert_eq!(found, 99);
                 assert_eq!(supported, MODEL_VERSION);
             }
             other => panic!("expected unsupported version, got {other:?}"),

@@ -123,6 +123,38 @@ impl From<OutPoint<bool>> for BoolPoint {
     }
 }
 
+/// A level/storage integrator clamped to explicit physical boundaries.
+/// Clipping represents overflow or unavailable negative storage; it is not an
+/// additional conserved stream. Input rates must already use the level/time unit.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct BoundedIntegrator {
+    /// Float rate input.
+    pub input: PointId,
+    /// Float storage/level output.
+    pub output: PointId,
+    /// Initial storage, within the declared bounds.
+    pub initial: f64,
+    /// Finite lower boundary.
+    pub min: f64,
+    /// Finite upper boundary, strictly above min.
+    pub max: f64,
+}
+
+/// A physical-feedback-gated proportional flow.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct GatedFlow {
+    /// Float input, typically actual valve position.
+    pub input: PointId,
+    /// Boolean physical feedback permitting flow.
+    pub gate: PointId,
+    /// Float flow output.
+    pub output: PointId,
+    /// Finite multiplier; a negative gain represents drawdown.
+    pub gain: f64,
+    /// Initial flow before the first good sample.
+    pub initial: f64,
+}
+
 /// A first-order lag process element: `dy/dt = (u - y) / time_constant`.
 ///
 /// The data mirror of `dcs_sim::FirstOrderLag` — the emitted
@@ -322,6 +354,10 @@ pub enum DynamicsElement {
     SecondOrderLag(SecondOrderLag),
     /// An [`Integrator`].
     Integrator(Integrator),
+    /// A bounded storage integrator.
+    BoundedIntegrator(BoundedIntegrator),
+    /// A feedback-gated proportional flow.
+    GatedFlow(GatedFlow),
     /// A [`DeadTime`].
     DeadTime(DeadTime),
     /// A [`Noise`].
@@ -343,6 +379,8 @@ impl DynamicsElement {
             Self::FirstOrderLag(element) => element.output,
             Self::SecondOrderLag(element) => element.output,
             Self::Integrator(element) => element.output,
+            Self::BoundedIntegrator(element) => element.output,
+            Self::GatedFlow(element) => element.output,
             Self::DeadTime(element) => element.output,
             Self::Noise(element) => element.output,
             Self::BoolFlow(element) => element.output,
@@ -363,6 +401,8 @@ impl DynamicsElement {
             Self::FirstOrderLag(e) => vec![float(e.input), float(e.output)],
             Self::SecondOrderLag(e) => vec![float(e.input), float(e.output)],
             Self::Integrator(e) => vec![float(e.input), float(e.output)],
+            Self::BoundedIntegrator(e) => vec![float(e.input), float(e.output)],
+            Self::GatedFlow(e) => vec![float(e.input), boolean(e.gate), float(e.output)],
             Self::DeadTime(e) => vec![float(e.input), float(e.output)],
             Self::Noise(e) => vec![float(e.input), float(e.output)],
             Self::BoolFlow(e) => vec![boolean(e.input), float(e.output)],
@@ -460,6 +500,19 @@ impl DynamicsElement {
                     });
                 }
             }
+            Self::GatedFlow(e) => {
+                if !e.gain.is_finite() {
+                    return Err(invalid("gain", "finite", e.gain));
+                }
+            }
+            Self::BoundedIntegrator(e) => {
+                if !e.min.is_finite() || !e.max.is_finite() || e.min >= e.max {
+                    return Err(invalid("bounds", "finite with min < max", e.max));
+                }
+                if !e.initial.is_finite() || e.initial < e.min || e.initial > e.max {
+                    return Err(invalid("initial", "inside storage bounds", e.initial));
+                }
+            }
             Self::Integrator(_) => {}
         }
         if let Self::Threshold(_) = self {
@@ -469,6 +522,8 @@ impl DynamicsElement {
                 Self::FirstOrderLag(e) => e.initial,
                 Self::SecondOrderLag(e) => e.initial,
                 Self::Integrator(e) => e.initial,
+                Self::BoundedIntegrator(e) => e.initial,
+                Self::GatedFlow(e) => e.initial,
                 Self::DeadTime(e) => e.initial,
                 Self::Noise(e) => e.initial,
                 Self::BoolFlow(e) => e.initial,
@@ -688,6 +743,45 @@ impl DynamicsBuilder {
         self.elements.push(DynamicsElement::Integrator(Integrator {
             input: input.into().id,
             output: output.into().id,
+            initial,
+        }));
+        self
+    }
+
+    /// Declares bounded Euler storage in level/time units.
+    pub fn bounded_integrator(
+        &mut self,
+        input: impl Into<FloatPoint>,
+        output: impl Into<FloatPoint>,
+        initial: f64,
+        min: f64,
+        max: f64,
+    ) -> &mut Self {
+        self.elements
+            .push(DynamicsElement::BoundedIntegrator(BoundedIntegrator {
+                input: input.into().id,
+                output: output.into().id,
+                initial,
+                min,
+                max,
+            }));
+        self
+    }
+
+    /// Declares proportional flow gated by physical Boolean feedback.
+    pub fn gated_flow(
+        &mut self,
+        input: impl Into<FloatPoint>,
+        gate: impl Into<BoolPoint>,
+        output: impl Into<FloatPoint>,
+        gain: f64,
+        initial: f64,
+    ) -> &mut Self {
+        self.elements.push(DynamicsElement::GatedFlow(GatedFlow {
+            input: input.into().id,
+            gate: gate.into().id,
+            output: output.into().id,
+            gain,
             initial,
         }));
         self

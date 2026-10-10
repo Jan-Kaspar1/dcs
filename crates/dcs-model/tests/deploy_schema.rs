@@ -144,6 +144,10 @@ fn recorded_release_deploy_schema_matches_the_emitted_output() {
             "docs/releases/v0.10.0/deploy-manifest.schema.json",
             Some("980430ca8725af997a7b5063f00d2a9663fe4619ca00a542917bde24f270cfa9"),
         ),
+        (
+            "docs/releases/v0.11.0/deploy-manifest.schema.json",
+            Some("980430ca8725af997a7b5063f00d2a9663fe4619ca00a542917bde24f270cfa9"),
+        ),
     ] {
         let recorded = std::fs::read(workspace_root().join(path)).unwrap_or_else(|error| {
             panic!("the release record's deploy-manifest schema file {path} must exist: {error}")

@@ -456,6 +456,17 @@ fn shift_element(frame: IdFrame, element: DynamicsElement) -> DynamicsElement {
             e.output = frame.point(e.output);
             SecondOrderLag(e)
         }
+        BoundedIntegrator(mut e) => {
+            e.input = frame.point(e.input);
+            e.output = frame.point(e.output);
+            BoundedIntegrator(e)
+        }
+        GatedFlow(mut e) => {
+            e.input = frame.point(e.input);
+            e.gate = frame.point(e.gate);
+            e.output = frame.point(e.output);
+            GatedFlow(e)
+        }
         Integrator(mut e) => {
             e.input = frame.point(e.input);
             e.output = frame.point(e.output);

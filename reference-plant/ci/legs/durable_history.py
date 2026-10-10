@@ -93,6 +93,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.request
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
@@ -158,7 +159,13 @@ SERVED_BOUND = 1024
 # `POST /scan`'s per-request bound and the paced epilogue's real-time
 # bounds — the wait for the paced lifetime's marks and samples, and
 # its scan period.
-SCAN_BATCH = 256
+# Each successful request attests its state file before the next batch.
+# Stay below the released state sink's 64-record queue even when the
+# file writer gets no CPU during a driven batch. Retention still rolls
+# past exactly the same served bound using real recorded scans; the
+# separate scan_batch_bound leg proves the endpoint's 256-scan limit.
+SCAN_BATCH = 32
+HTTP_TIMEOUT = 30.0
 PACED_SCAN_MS = 10
 PACED_DEADLINE = 10.0
 
@@ -425,15 +432,42 @@ def spawn_or_abort(name, binary, args, rig, files, standby=None):
     )
 
 
+def bounded_http(url, body=None):
+    """Fail a stalled fixture request instead of leaving CI hung.
+
+    A timeout is ambiguous for a scan and must never be resubmitted.
+    Only the existing dropped-request signatures permit retry.
+    """
+    request = url if body is None else urllib.request.Request(
+        url,
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:
+            return json.load(response)
+    except (TimeoutError, urllib.error.URLError) as error:
+        if isinstance(error, TimeoutError) or isinstance(
+            getattr(error, "reason", None), TimeoutError
+        ):
+            # simulate.dropped_request classifies OSError broadly; do
+            # not let a timed-out, possibly executed scan enter it.
+            raise RuntimeError(
+                f"{url} timed out after {HTTP_TIMEOUT}s; request outcome "
+                "unknown, not resubmitted"
+            ) from error
+        raise
+
+
 def resilient_http(url, body=None):
-    """`simulate.http` resubmitted across a dropped request — the
+    """`bounded_http` resubmitted across a dropped request — the
     empty-body `500` a shed or dispatcher-teardown drop answers with,
     or the refused/reset connection of the listener's rebind window.
     Both signatures mean the request never ran, so the resubmit
     replays nothing; a handler-answered failure re-raises at once."""
     for attempt in range(pair.SCAN_DROP_ATTEMPTS):
         try:
-            return simulate.http(url, body)
+            return bounded_http(url, body)
         except Exception as error:
             if (
                 simulate.dropped_request(error)
@@ -528,7 +562,7 @@ def scan_n(url, scans, failures):
     failure carries its named body and fails the leg on it."""
     for attempt in range(pair.SCAN_DROP_ATTEMPTS):
         try:
-            return simulate.http(f"{url}/scan", {"scans": scans})
+            return bounded_http(f"{url}/scan", {"scans": scans})
         except urllib.error.HTTPError as error:
             detail = error.read().decode(errors="replace").strip()
             if (
