@@ -3,7 +3,9 @@
 Assigned after PR #1526, based on `f53400ed`. This extends the existing station;
 it does not create a second executor, alarm engine, UI application, or market.
 Water/wastewater remains active and automatic backlog generation remains disabled.
-The implementation is review work, not a published release or pilot acceptance.
+The implementation is review work in [PR #1529](https://github.com/Jan-Kaspar1/dcs/pull/1529).
+Completion remains open: actual browser review and reviewed CI are required,
+and the versioned delivery is a local candidate rather than a public release.
 
 ## Inventory and actual gaps
 
@@ -122,6 +124,80 @@ The API currently supports two or three pumps in this particular area drawing;
 the general `pump` composition remains separately usable.
 
 ## Reproducible evidence and remaining gates
+
+### Current receipt and persistence cut
+
+The implementation head on local `main` is `85434aaf`, following `e3d61e8c`.
+Their source trees are published as `381aced75b2f76a72eb5afd482fb56a19a28543c`
+in PR #1529. All 14 implementation/acceptance cuts have verified matching Git
+file-tree identities; evidence-only commits may follow without modifying those
+cuts. The [mapping](connected-water-publication.json) records the paired IDs.
+
+Current local validation is retained in `/tmp/dcs-water-identity-*.log`:
+
+| Required phase/evidence | Result at this evidence cut |
+| --- | --- |
+| Formatting | Passed, 3.124 s |
+| Supervisor tests | Passed, 4,533 tests, 729.329 s |
+| Production JavaScript contracts | Passed, 17 tests; no skipped cases |
+| Clippy | Passed, 1.374 s |
+| Workspace Rust tests | Passed, 303.184 s |
+| Clean release consumer | Passed, 28.870 s |
+| Upgrade consumer | Passed, 35.295 s |
+| Connected-water consumer and frozen offline rebuild | Passed, 408.284 s |
+| Historical reference template/upgrade proofs | Still running when this evidence cut was prepared |
+| Remote CI | Running on PR #1529; check the PR for final job results |
+| Actual browser review | Pending: no computer-use browser is available |
+
+The full default verification command was run. Its new served-asset test first
+failed because the test helper assumed Content-Length for a chunked page.
+The helper now uses the established HTTP decoder for that immutable response;
+formatting, clippy and the whole workspace were rerun and passed. The
+production behavior did not change during that test correction. Source/VM,
+HTTP and browser evidence remain distinct.
+
+The current immutable delivery candidate is `v0.11.0-rc.1` at
+`22efd5d39c9f6b8d4b27b05e31481e287bcf6074`; its independent customer is
+`3941d393194a8817c59f4b8f218d36529a12628c`, with preserved lock SHA-256
+`0fb04843d4e61388b94296c4a6058ff719f3b18f948e414b000f1d07217541f9`.
+The 590-file Linux x86_64 delivery archive is in `target/water-area-evidence/`
+and has SHA-256
+`0e43e65608144dde6e7b7914fcf4d8a767db9ae5e5e51dc526273c231d0712b3`.
+The model retains SHA-256
+`fbd3e4fe805ff611843c693ee2a3a087560e1bca9834a1aca471b08656726503`.
+All six consumer schedules, restart at tick 664 and compatible takeover retain
+behavior digest
+`6b96c7e1c9a3555e4718552668fafbcec8ee8e97e29459c4d2f0885a2308db7c`;
+all 16 admitted requests settle applied, alongside the named rejection checks.
+The added third pump also executes the scenario through the public Rust API.
+
+An independent restoration at `/tmp/dcs-water-reviewed-22efd5d39c9f`
+byte-matches all 157 production source files and preserves customer Git/lock
+identity. `identity-source-restoration.json`, `customer.json` and
+`offline-delivery.json` retain the evidence under `target/water-area-evidence/`.
+The network preview was rebuilt through `verify.py --phase rust-demo` and
+restarted as a fresh training run. Its model is semantically identical to this
+candidate; its served parser and adapter exactly match current source, ticks
+advance and simulated I/O health reports no failures. This does not replace
+actual desktop/phone or abnormal-state browser review.
+
+A second network preview at `http://192.168.178.107:9082/` runs entirely from
+that independently restored delivery, under `dcs-water-customer-preview.service`.
+The stdlib launcher is `/tmp/dcs-water-reviewed-22efd5d39c9f/launch-preview.py`;
+it emits the model/dynamics with the delivered customer executable and launches
+the hash-checked generic artifact binaries from the customer checkout. It waits
+for the simulated field listener before starting control. The customer commit
+and lock remain unchanged; the platform checkout is not a runtime dependency.
+`identity-customer-preview.json` retains binary identities, advancing ticks,
+zero I/O failures and semantic model correspondence. `systemctl --user status`
+and `journalctl --user -u dcs-water-customer-preview.service` inspect the service.
+Restarting this temporary launcher creates a fresh training run under
+`preview-run/<UTC timestamp>`; it is not a production deployment or restart
+continuity claim. The launcher is local process glue outside the immutable
+archive; the delivered customer run guide provides the equivalent generic
+runtime commands. Both network previews remain available.
+
+### Acceptance scope and earlier preserved cuts
 
 `crates/dcs-build/tests/water_area.rs` compares every engineered point sample
 at every scan and all terminal receipts across repeated runs. It also proves
@@ -243,22 +319,22 @@ an older identical request, another boot or an unidentified receipt cannot
 settle it. These checks remain supplemental to actual browser review.
 
 Native origin publishing was attempted as a dry run and refused because Git HTTPS
-credentials are unavailable. All commits remain local on `main`; no remote CI
-or release publication is claimed. Configure Git credentials before publishing
-and collecting reviewed CI results.
+credentials are unavailable. Local `main` retains the original commit history.
+Source review is now published through the connected GitHub app as described
+below; native Git publishing still requires credentials.
 
 The connected GitHub app subsequently authenticated as `Jan-Kaspar1` with
 repository write access. [Draft PR #1529](https://github.com/Jan-Kaspar1/dcs/pull/1529)
-publishes the 12 original cuts from identical file trees. Every returned blob
+publishes the 14 implementation and acceptance cuts from identical file trees. Every returned blob
 and tree hash was checked against its original Git identity. The API-generated
 commits have different metadata and IDs; local `main` history is preserved.
 The [publication mapping](connected-water-publication.json) retains the paired
 commit and file-tree identities; the initial tool record is also retained at
 `/tmp/dcs-water-github-commit-mapping.json`.
-Its initial head is `cb279d7e27f48f09d72e22da1726e3d26f23a1b5` on
-`codex/connected-water-milestone-20261011`. Remote CI is now a running gate;
-the earlier local evidence does not claim its result. The current receipt
-follow-up will be added after its applicable local checks. This is source
+The implementation head is `381aced75b2f76a72eb5afd482fb56a19a28543c` on
+`codex/connected-water-milestone-20261011`. Remote CI is a running gate;
+the earlier local evidence does not claim its result. Evidence-only commits
+may follow those mapped cuts. This is source
 review publication, not a public release tag, image or candidate binary upload.
 
 An earlier historical test hung after a 256-scan batch overflowed the released
@@ -308,8 +384,9 @@ functions using Node 22, including adjacent large identities, false matches,
 malformed identities, arbitrary parameter/event map names and `__proto__` own
 keys. HTTP acceptance serves the exact same-origin scripts and preserves large
 identities through admission, carried receipt and journal settlement. These
-are source/transport contract checks, not browser review. Full repository gates
-and a fresh external candidate are being collected for this change.
+are source/transport contract checks, not browser review. The fast repository
+gates and fresh external candidate pass as recorded above; final historical
+proofs, remote CI and actual browser review remain open at this evidence cut.
 
 An asynchronous writer can fail after a successful queue offer while the
 monitor failure latch still appears unset. Scans and promotion now inspect
@@ -325,7 +402,10 @@ diagnostics and point display bounds, `7c056e6a` for the gated offline rebuild,
 and `9fd5b8a1` for the CLI-emitted candidate schema version guards. `7550819b`
 retains known command receipt identity during reconciliation. Acceptance fixes
 are `299e00f7` (writer lifetime), `91932bca` (complete transport request body)
-and `ebc24dfa` (genuinely overflowing positive timestep). Each cut records its applicable verification.
+and `ebc24dfa` (genuinely overflowing positive timestep). `e3d61e8c` checks
+asynchronous sink failure before scans/promotion, and `85434aaf` preserves exact
+operator receipt identity with the required production UI contract gate.
+Each cut records its applicable verification.
 Remote CI and public publication are distinct from local commits and local
 repository gates. No automatic backlog generation or unrelated Git work is
 performed. The unrelated mode-only change to `ci/simulate.py` is preserved.

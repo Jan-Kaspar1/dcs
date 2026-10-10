@@ -77,6 +77,20 @@
       "remote": "cb279d7e27f48f09d72e22da1726e3d26f23a1b5",
       "tree": "44e507b54d6a6751b190c19b87ed9168088dae90",
       "subject": "Record final connected-water gates and exact external delivery evidence\n\nAll five local verification phases pass, plus the current candidate frozen offline rebuild. Preserve reproducible artifact/model identities and distinguish remaining browser, credential, publication and commissioning gates from completed simulated control evidence."
+    },
+    {
+      "local": "e3d61e8c3b3fea572287ff4daba827394c4e9da3",
+      "remote": "64e8b7a3e08e2253dee8f0761a2ba0c8037e677f",
+      "tree": "e5f3234e35368c424442520853aca293ff479291",
+      "subject": "Check asynchronous recorder failure before scans and promotion"
+    },
+    {
+      "local": "85434aaf0e97e06897f227ef8947c4cbec5c6098",
+      "remote": "381aced75b2f76a72eb5afd482fb56a19a28543c",
+      "tree": "e7fb194527eb7da2899926a5488c4bfa65f2072f",
+      "subject": "Preserve exact operator receipt identity and gate production UI contracts"
     }
-  ]
+  ],
+  "mapped_source_head": "381aced75b2f76a72eb5afd482fb56a19a28543c",
+  "scope": "Fourteen implementation and acceptance cuts; later evidence-only commits are intentionally outside this self-referencing mapping."
 }
