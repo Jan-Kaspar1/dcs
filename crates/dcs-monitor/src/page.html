@@ -4622,6 +4622,9 @@ function sameCommand(a, b) {
 // declared actor and reason the receipt echoes agree, so another
 // console's identical command cannot claim the pending entry.
 function sameSubmission(receipt, pending) {
+  if (pending.submission && (!receipt.submission ||
+      receipt.submission.origin !== pending.submission.origin ||
+      receipt.submission.seq !== pending.submission.seq)) return false;
   return sameCommand(receipt.command, pending.command) &&
     (receipt.actor || null) === pending.actor &&
     (receipt.reason || null) === pending.reason;
@@ -4657,6 +4660,7 @@ function abandonedSubmission(command, reason, error) {
     command: command,
     actor: operator,
     reason: reason || null,
+    submission: error.admittedReceipt?.submission || null,
     notice: notice,
   });
   if (pendingCommands.length > PENDING_LIMIT) pendingCommands.shift();
