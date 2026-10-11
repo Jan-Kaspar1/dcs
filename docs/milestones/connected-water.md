@@ -7,6 +7,11 @@ The implementation is review work in [PR #1529](https://github.com/Jan-Kaspar1/d
 Completion remains open: actual browser review and reviewed CI are required,
 and the versioned delivery is a local candidate rather than a public release.
 
+Kaspar requested five visual alternatives on 2026-10-11 before choosing a
+design change. The [design comparison](../design/operator-styles/README.md)
+provides a read-only live gallery and reproducible static studies; production
+presentation remains unchanged pending that choice.
+
 ## Inventory and actual gaps
 
 | Family | Existing engineering/runtime contract and transitions | Diagnostics, alarms, persistence and redundancy | Operator surface and evidence | Gap closed in this slice |
