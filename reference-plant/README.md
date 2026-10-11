@@ -1028,3 +1028,10 @@ before promotion — stop the `--revised` peer while the old active
 still owns the field — or, after promotion, by restoring the
 pre-roll backup set; runtime state does not carry backward across
 the revision boundary.
+
+## Connected control-area candidate
+
+[CONNECTED-WATER.md](CONNECTED-WATER.md) describes the feature-gated customer
+engineering example and its operator acceptance. It requires the next reviewed
+release and an exact tooling/engineering repin; the pending v0.10.0 pin does not
+contain that API. The platform's candidate proof makes that boundary explicit.

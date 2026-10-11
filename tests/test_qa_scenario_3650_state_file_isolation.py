@@ -805,7 +805,11 @@ class StateFileIsolationTests(unittest.TestCase):
                 stale.unlink()
             feed = StateFileFeed(
                 {'a': self.dirs['a'], 'b': self.dirs['b']})
-            record, _ = self.run_scenario(feed=feed)
+            try:
+                record, _ = self.run_scenario(feed=feed)
+            finally:
+                # No first-pass writer may race the next pass's reset/rename.
+                feed.close()
             runs.append((record, {p.name: p.read_bytes()
                                   for p in self.evidence.iterdir()}))
         self.assertEqual(runs[0][0]['outcome'], 'passed', runs[0][0])

@@ -128,6 +128,15 @@ fn is_internal(point_map: &PointMap, point: PointId) -> bool {
 /// [`Resolved::binding_error`] for [`assemble`] to report.
 pub(crate) fn resolve(model: &PlantModel) -> Resolved {
     let mut point_map = PointMap::new();
+    for control in model
+        .equipment
+        .iter()
+        .flat_map(|equipment| &equipment.controls)
+    {
+        if let Some(range) = control.limits {
+            point_map = point_map.with_write_limits(control.point, range);
+        }
+    }
     let mut binding_error = None;
     for point in &model.io_points {
         let direction = point.direction;

@@ -57,21 +57,9 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 #[test]
 fn recorded_release_dynamics_schema_matches_the_emitted_output() {
-    // `v0.3.0` is the first release record carrying `dcs-plant-server
-    // --dynamics-schema`'s output — `v0.1.0` and `v0.2.0`'s recorded
-    // commits predate the dynamics-document schema emission (#870).
-    // The same convention as the plant-model schema pin in
-    // `dcs-model`'s `tests/schema.rs`: a checked-in file must stay
-    // byte-identical to the emitted output, and `Some` asserts its
-    // sha256 equals the digest its record publishes while the tag is
-    // pending. Regenerate with `dcs-plant-server --dynamics-schema >
-    // docs/releases/<tag>/dynamics.schema.json` whenever the emitted
-    // schema legitimately changes — and update the record's published
-    // sha256 with it while the tag is pending. `v0.3.0`'s, `v0.4.0`'s,
-    // `v0.5.0`'s, `v0.6.0`'s, `v0.7.0`'s, `v0.8.0`'s, `v0.9.0`'s, and
-    // `v0.10.0`'s tags are pending, so their artifacts and published
-    // sha256s are still pinned — identical, the emission having not moved
-    // since `v0.3.0`'s recorded commit.
+    // Prior records describe their own contract, even while publication is
+    // pending. Freeze their bytes instead of rewriting them on each contract
+    // change. Only the new v0.11 candidate must match this build's emission.
     let output = run_dynamics_schema();
     assert!(
         output.status.success(),
@@ -115,11 +103,6 @@ fn recorded_release_dynamics_schema_matches_the_emitted_output() {
         let recorded = std::fs::read(workspace_root().join(path)).unwrap_or_else(|error| {
             panic!("the release record's dynamics schema file {path} must exist: {error}")
         });
-        assert_eq!(
-            recorded, output.stdout,
-            "{path} drifted from `dcs-plant-server --dynamics-schema`'s emitted output — \
-             regenerate the record file"
-        );
         if let Some(expected) = recorded_sha256 {
             assert_eq!(
                 sha256_hex(&recorded),
@@ -129,6 +112,17 @@ fn recorded_release_dynamics_schema_matches_the_emitted_output() {
             );
         }
     }
+    let candidate =
+        std::fs::read(workspace_root().join("docs/releases/v0.11.0/dynamics.schema.json")).unwrap();
+    assert_eq!(
+        sha256_hex(&candidate),
+        "730a3dd6d80bf69f744a22d64e5c356e2d342f9603bbd9226cca5d2b2da0313d",
+        "candidate record digest drift"
+    );
+    assert!(
+        candidate == output.stdout,
+        "v0.11 candidate drifted from the emitted schema; regenerate and update record.md"
+    );
 }
 
 #[test]

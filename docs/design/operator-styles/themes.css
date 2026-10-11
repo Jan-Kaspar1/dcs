@@ -1,0 +1,270 @@
+/* Design alternatives only. These overrides are served by the review proxy;
+   the production monitor neither loads them nor stores a selected theme.
+   Alarm priorities, lifecycle, fault and degraded-state cues remain inherited.
+   We intentionally do not recolor generic symbol bodies or state classes. */
+body[data-review-style] #plant-canvas { background: transparent; }
+body[data-review-style] .review-panel-note { font-size: 11px; color: var(--plant-muted); margin: 0 0 18px; padding-bottom: 10px; border-bottom: 1px solid var(--plant-line); }
+body[data-review-style] button[data-review-read-only] { opacity: .8; cursor: default; }
+body[data-review-style] #plant-canvas .plant-node.is-selected .plant-node-hit,
+body[data-review-style] #plant-canvas .plant-node:focus-visible .plant-node-hit { fill: var(--plant-blue-soft); }
+body[data-review-style] #plant-canvas .plant-gauge-marker:not(.is-offscale) { fill: var(--plant-ink); }
+
+/* 01 — Precision. Compact, flat operator console with ruled rows. */
+body[data-review-style="precision"] {
+  --plant-ink: #202b34; --plant-muted: #606b76; --plant-line: #dce1e5;
+  --plant-blue: #315d8f; --plant-blue-soft: #eaf0f6;
+  --plant-background: #f4f5f6; --plant-radius: 2px;
+  --plant-sidebar-width: 176px; --plant-drawer-width: 320px;
+  --plant-chrome-height: 48px; --plant-alarm-height: 68px;
+  font-family: "Segoe UI", system-ui, sans-serif; font-size: 12px;
+}
+body[data-review-style="precision"] button,
+body[data-review-style="precision"] input,
+body[data-review-style="precision"] select { border-radius: 2px; min-height: 32px; }
+body[data-review-style="precision"] .plant-brand { font-size: 15px; padding-inline: 16px; letter-spacing: .08em; }
+body[data-review-style="precision"] .plant-brand svg { border-radius: 2px; width: 25px; height: 25px; }
+body[data-review-style="precision"] .plant-brand small { display: none; }
+body[data-review-style="precision"] #plant-sidebar { background: #f4f5f6; padding: 18px 8px 10px; }
+body[data-review-style="precision"] .plant-area,
+body[data-review-style="precision"] .plant-nav-button { border-radius: 2px; min-height: 34px; font-size: 12px; }
+body[data-review-style="precision"] #plant-alarm-strip { background: #eef0f2; padding: 6px 12px; }
+body[data-review-style="precision"] #plant-alarm-strip .plant-alarm-count { flex-basis: 148px; }
+body[data-review-style="precision"] #plant-alarm-strip .plant-alarm-card { min-height: 52px; border-radius: 2px; }
+body[data-review-style="precision"] .plant-alarm-priority { border-radius: 2px; }
+body[data-review-style="precision"] #plant-workspace { padding: 20px; }
+body[data-review-style="precision"] #plant-view-title { font-size: 23px; letter-spacing: -.02em; }
+body[data-review-style="precision"] .plant-eyebrow { text-transform: uppercase; font-size: 10px; letter-spacing: .09em; }
+body[data-review-style="precision"] .plant-canvas-wrap { border-radius: 2px 2px 0 0; }
+body[data-review-style="precision"] #plant-canvas .plant-pipe { stroke-width: 2; }
+body[data-review-style="precision"] #plant-canvas .plant-label { font-size: 16px; }
+body[data-review-style="precision"] #plant-canvas .plant-value { font-family: "SFMono-Regular", Consolas, monospace; font-size: 25px; letter-spacing: -.04em; }
+body[data-review-style="precision"] #equipment { padding: 18px 16px; }
+body[data-review-style="precision"] .equipment-heading h2 { font-size: 21px; font-weight: 700; }
+body[data-review-style="precision"] #equipment-state { border-radius: 2px; padding: 10px 12px; }
+body[data-review-style="precision"] #equipment .equipment-feedback { margin-top: 18px; }
+body[data-review-style="precision"] #equipment .equipment-feedback dd { font-family: "SFMono-Regular", Consolas, monospace; }
+body[data-review-style="precision"] #equipment .faceplate .role { padding-block: 9px; }
+body[data-review-style="precision"] .equipment-command-options { padding: 2px; border-radius: 2px; }
+body[data-review-style="precision"] #equipment .equipment-write { border-radius: 1px; }
+
+/* 02 — Civic. Warm utility workspace; soft geometry and larger controls. */
+body[data-review-style="civic"] {
+  --plant-ink: #223a39; --plant-muted: #60716d; --plant-line: #dde5df;
+  --plant-blue: #176d69; --plant-blue-soft: #e7f2ed;
+  --plant-background: #f5f6f1; --plant-radius: 16px;
+  --plant-sidebar-width: 208px; --plant-drawer-width: 376px;
+  --plant-chrome-height: 62px; --plant-alarm-height: 82px;
+  font-family: "Avenir Next", "Segoe UI", system-ui, sans-serif; font-size: 14px;
+}
+body[data-review-style="civic"] button,
+body[data-review-style="civic"] input,
+body[data-review-style="civic"] select { min-height: 38px; border-radius: 9px; }
+body[data-review-style="civic"] .plant-brand { letter-spacing: -.02em; }
+body[data-review-style="civic"] .plant-brand svg { width: 32px; height: 32px; border-radius: 10px; padding: 4px; }
+body[data-review-style="civic"] .plant-brand small { display: none; }
+body[data-review-style="civic"] #plant-header { background: #fffefa; }
+body[data-review-style="civic"] #plant-sidebar { background: #fffefa; padding: 24px 12px; }
+body[data-review-style="civic"] .plant-area,
+body[data-review-style="civic"] .plant-nav-button { min-height: 42px; border-radius: 9px; }
+body[data-review-style="civic"] #plant-alarm-strip { background: #f1f4ee; }
+body[data-review-style="civic"] #plant-alarm-strip .plant-alarm-card { border-radius: 10px; }
+body[data-review-style="civic"] #plant-workspace { padding: 28px; }
+body[data-review-style="civic"] #plant-view-title { font-size: 28px; font-weight: 600; }
+body[data-review-style="civic"] .plant-view-heading { margin-bottom: 22px; }
+body[data-review-style="civic"] .plant-canvas-wrap { background: #fffefa; border-color: #e4e8e0; }
+body[data-review-style="civic"] .plant-canvas-footer { background: #fffefa; padding: 15px 20px; }
+body[data-review-style="civic"] #plant-canvas .plant-pipe { stroke: #92a29d; stroke-width: 3.5; }
+body[data-review-style="civic"] #plant-canvas .plant-value { font-size: 29px; font-weight: 600; }
+body[data-review-style="civic"] #plant-canvas .plant-node-hit { rx: 12px; }
+body[data-review-style="civic"] #equipment { top: calc(var(--plant-header-height) + 14px); right: 14px; bottom: 14px; width: calc(var(--plant-drawer-width) - 14px); background: #fffefa; padding: 26px 24px; border: 1px solid #dde5df; border-radius: 16px; box-shadow: 0 4px 16px #223a3908; }
+body[data-review-style="civic"] .equipment-heading h2 { font-size: 28px; font-weight: 600; }
+body[data-review-style="civic"] #equipment-state:not(.is-fault) { background: #f1f6f0; border-color: #dde7dc; }
+body[data-review-style="civic"] #equipment-state { padding: 17px; }
+body[data-review-style="civic"] #equipment-state strong { font-size: 25px; }
+body[data-review-style="civic"] #equipment .faceplate { background: transparent; }
+body[data-review-style="civic"] #equipment .equipment-feedback { padding: 16px; background: #f4f6f1; border-radius: 12px; }
+body[data-review-style="civic"] #equipment .equipment-feedback dl > div { padding: 10px 0; }
+body[data-review-style="civic"] .equipment-command-options { background: #edf2eb; border-radius: 10px; padding: 4px; }
+body[data-review-style="civic"] #equipment .equipment-write { min-height: 36px; border-radius: 7px; }
+body[data-review-style="civic"] #equipment .equipment-write[aria-pressed="true"] { color: var(--plant-blue); border-color: #bfd5c9; }
+
+/* 03 — Drafting. Ruled engineering sheet, technical type, crisp geometry. */
+body[data-review-style="drafting"] {
+  --plant-ink: #22384e; --plant-muted: #5a7086; --plant-line: #d4e0eb;
+  --plant-blue: #315b94; --plant-blue-soft: #eaf2fb;
+  --plant-background: #f5f8fc; --plant-radius: 0px;
+  --plant-sidebar-width: 190px; --plant-drawer-width: 344px;
+  --plant-chrome-height: 52px; --plant-alarm-height: 72px;
+  font-family: "Segoe UI", system-ui, sans-serif; font-size: 13px;
+}
+body[data-review-style="drafting"] button,
+body[data-review-style="drafting"] input,
+body[data-review-style="drafting"] select { border-radius: 0; border-color: #c6d5e4; }
+body[data-review-style="drafting"] .plant-brand { font-family: Consolas, monospace; letter-spacing: .08em; font-size: 16px; }
+body[data-review-style="drafting"] .plant-brand small { display: none; }
+body[data-review-style="drafting"] .plant-brand svg { border-radius: 0; background: transparent; }
+body[data-review-style="drafting"] #plant-sidebar { background: #f4f8fc; }
+body[data-review-style="drafting"] .plant-sidebar-heading,
+body[data-review-style="drafting"] .plant-eyebrow { font-family: Consolas, monospace; text-transform: uppercase; letter-spacing: .08em; }
+body[data-review-style="drafting"] .plant-area,
+body[data-review-style="drafting"] .plant-nav-button { border-radius: 0; }
+body[data-review-style="drafting"] .plant-area.is-current { border-left: 3px solid var(--plant-blue); }
+body[data-review-style="drafting"] #plant-alarm-strip { background: #f0f5fa; }
+body[data-review-style="drafting"] #plant-alarm-strip .plant-alarm-card,
+body[data-review-style="drafting"] .plant-alarm-priority { border-radius: 0; }
+body[data-review-style="drafting"] #plant-view-title { font-family: Consolas, monospace; font-size: 25px; letter-spacing: -.035em; }
+body[data-review-style="drafting"] .plant-view-heading { padding-bottom: 14px; border-bottom: 1px solid #bdcedf; }
+body[data-review-style="drafting"] .plant-canvas-wrap { border-radius: 0; background-color: #fcfdff; background-image: radial-gradient(#cfdde9 .7px, transparent .7px); background-size: 20px 20px; }
+body[data-review-style="drafting"] .plant-canvas-footer { border-radius: 0; font-family: Consolas, monospace; }
+body[data-review-style="drafting"] #plant-canvas .plant-pipe { stroke: #67829d; stroke-width: 2; stroke-linecap: square; }
+body[data-review-style="drafting"] #plant-canvas .plant-symbol-line { stroke-linecap: square; }
+body[data-review-style="drafting"] #plant-canvas .plant-node-hit { rx: 0; }
+body[data-review-style="drafting"] #plant-canvas .plant-label { font-family: Consolas, monospace; font-size: 16px; font-weight: 600; }
+body[data-review-style="drafting"] #plant-canvas .plant-value,
+body[data-review-style="drafting"] #plant-canvas .plant-tag { font-family: "SFMono-Regular", Consolas, monospace; }
+body[data-review-style="drafting"] #plant-canvas .plant-value { font-size: 26px; letter-spacing: -.05em; }
+body[data-review-style="drafting"] #equipment { border-left: 2px solid #b7cbde; padding: 22px 20px; }
+body[data-review-style="drafting"] .equipment-heading h2 { font-family: Consolas, monospace; font-size: 25px; }
+body[data-review-style="drafting"] #equipment-state { border-radius: 0; }
+body[data-review-style="drafting"] #equipment-state:not(.is-fault) { border-left: 3px solid #6b8eb3; }
+body[data-review-style="drafting"] #equipment .equipment-feedback dd { font-family: Consolas, monospace; }
+body[data-review-style="drafting"] .equipment-command-options { border: 1px solid #c6d5e4; background: #f1f6fa; border-radius: 0; }
+body[data-review-style="drafting"] #equipment .equipment-write { border-radius: 0; }
+body[data-review-style="drafting"] #equipment .equipment-observation > summary { font-family: Consolas, monospace; }
+
+/* 04 — Editorial. Open canvas; typography and rules replace dashboard chrome. */
+body[data-review-style="editorial"] {
+  --plant-ink: #20252a; --plant-muted: #697078; --plant-line: #e1e2df;
+  --plant-blue: #375cd2; --plant-blue-soft: #edf1ff;
+  --plant-background: #fff; --plant-radius: 0px;
+  --plant-sidebar-width: 184px; --plant-drawer-width: 384px;
+  --plant-chrome-height: 64px; --plant-alarm-height: 80px;
+  font-family: "Avenir Next", "Segoe UI", system-ui, sans-serif; font-size: 14px;
+}
+body[data-review-style="editorial"] button,
+body[data-review-style="editorial"] input,
+body[data-review-style="editorial"] select { border-radius: 3px; }
+body[data-review-style="editorial"] .plant-brand { font-size: 18px; font-weight: 600; letter-spacing: -.04em; }
+body[data-review-style="editorial"] .plant-brand small { display: none; }
+body[data-review-style="editorial"] .plant-brand svg { background: transparent; color: #20252a; }
+body[data-review-style="editorial"] #plant-sidebar { padding: 30px 12px 18px; }
+body[data-review-style="editorial"] .plant-area,
+body[data-review-style="editorial"] .plant-nav-button { border-radius: 0; min-height: 43px; }
+body[data-review-style="editorial"] .plant-area.is-current,
+body[data-review-style="editorial"] .plant-nav-button[aria-current="page"] { background: transparent; color: #20252a; border-left: 2px solid #20252a; }
+body[data-review-style="editorial"] #plant-alarm-strip { background: #fafaf8; }
+body[data-review-style="editorial"] #plant-alarm-strip .plant-alarm-card { border-radius: 0; background: transparent; border-top: 0; border-right: 0; border-bottom: 0; }
+body[data-review-style="editorial"] .plant-alarm-priority { border-radius: 2px; }
+body[data-review-style="editorial"] #plant-workspace { padding: 34px 30px 24px; }
+body[data-review-style="editorial"] #plant-view-title { font-family: "Iowan Old Style", "Palatino Linotype", Georgia, serif; font-size: 34px; letter-spacing: -.035em; font-weight: 400; }
+body[data-review-style="editorial"] .plant-eyebrow { text-transform: uppercase; letter-spacing: .12em; font-size: 10px; }
+body[data-review-style="editorial"] .plant-view-heading { align-items: end; margin-bottom: 26px; }
+body[data-review-style="editorial"] .plant-canvas-wrap { border: 0; border-top: 1px solid #c8cccf; border-radius: 0; }
+body[data-review-style="editorial"] .plant-canvas-footer { border: 0; border-top: 1px solid #c8cccf; border-radius: 0; padding: 14px 0; }
+body[data-review-style="editorial"] #plant-canvas .plant-pipe { stroke: #989fa6; stroke-width: 2; }
+body[data-review-style="editorial"] #plant-canvas .plant-value { font-size: 31px; font-weight: 500; letter-spacing: -.055em; }
+body[data-review-style="editorial"] #plant-canvas .plant-label { font-size: 17px; font-weight: 500; }
+body[data-review-style="editorial"] #equipment { padding: 30px 26px; border-left-color: #c8cccf; }
+body[data-review-style="editorial"] .equipment-heading h2 { font-family: "Iowan Old Style", "Palatino Linotype", Georgia, serif; font-size: 32px; font-weight: 400; }
+body[data-review-style="editorial"] #equipment-state { border-radius: 0; padding: 18px 0; }
+body[data-review-style="editorial"] #equipment-state:not(.is-fault) { border: 0; border-top: 1px solid #969da4; border-bottom: 1px solid #c8cccf; background: transparent; }
+body[data-review-style="editorial"] #equipment-state.is-degraded { border: 1px dashed var(--plant-line); }
+body[data-review-style="editorial"] #equipment-state strong { font-size: 28px; font-weight: 500; }
+body[data-review-style="editorial"] #equipment .equipment-feedback { margin: 28px 0; }
+body[data-review-style="editorial"] #equipment .equipment-feedback dd { font-size: 14px; font-weight: 600; }
+body[data-review-style="editorial"] #equipment .faceplate .role { padding-block: 16px; }
+body[data-review-style="editorial"] .equipment-command-options { background: transparent; padding: 0; gap: 7px; }
+body[data-review-style="editorial"] #equipment .equipment-write { border: 1px solid #e0e3e7; border-radius: 3px; }
+body[data-review-style="editorial"] #equipment .equipment-write[aria-pressed="true"] { border-color: #8d9dc9; background: #f5f7ff; }
+
+/* 05 — Instrument. Compact chrome, bounded readouts and a layered inspector. */
+body[data-review-style="instrument"] {
+  --plant-ink: #263344; --plant-muted: #617286; --plant-line: #d5dfe9;
+  --plant-blue: #2d5aa9; --plant-blue-soft: #e9f0fc;
+  --plant-background: #eef2f6; --plant-radius: 6px;
+  --plant-sidebar-width: 184px; --plant-drawer-width: 356px;
+  --plant-chrome-height: 50px; --plant-alarm-height: 70px;
+  font-family: "Segoe UI", system-ui, sans-serif; font-size: 12.5px;
+}
+body[data-review-style="instrument"] .plant-brand { background: #263b55; color: #fff; font-size: 16px; letter-spacing: -.02em; }
+body[data-review-style="instrument"] .plant-brand svg { color: #d5e3fa; background: transparent; }
+body[data-review-style="instrument"] .plant-brand small { display: none; }
+body[data-review-style="instrument"] #plant-sidebar { background: #263b55; padding: 18px 10px; border-right-color: #263b55; }
+body[data-review-style="instrument"] #plant-sidebar .plant-sidebar-heading,
+body[data-review-style="instrument"] #plant-sidebar h2,
+body[data-review-style="instrument"] #plant-sidebar h3,
+body[data-review-style="instrument"] .plant-sidebar-footer,
+body[data-review-style="instrument"] .plant-area-count { color: #b9c9dc; }
+body[data-review-style="instrument"] #plant-sidebar .plant-sidebar-footer { border-top-color: #52647c; }
+body[data-review-style="instrument"] .plant-area,
+body[data-review-style="instrument"] .plant-nav-button { border-radius: 4px; font-size: 12px; color: #e1e9f2; }
+body[data-review-style="instrument"] .plant-area.is-current,
+body[data-review-style="instrument"] .plant-nav-button[aria-current="page"] { color: #2d5aa9; background: #fff; border: 1px solid #c8d6e8; box-shadow: 0 1px 2px #233b5510; }
+body[data-review-style="instrument"] #plant-alarm-strip { background: #e9eef5; padding: 7px 12px; }
+body[data-review-style="instrument"] #plant-alarm-strip .plant-alarm-card { border-radius: 4px; min-height: 54px; }
+body[data-review-style="instrument"] #plant-alarm-strip .plant-alarm-count { flex-basis: 155px; }
+body[data-review-style="instrument"] #plant-workspace { padding: 18px; }
+body[data-review-style="instrument"] #plant-view-title { font-size: 24px; letter-spacing: -.03em; }
+body[data-review-style="instrument"] .plant-eyebrow { text-transform: uppercase; font-size: 10px; letter-spacing: .08em; }
+body[data-review-style="instrument"] .plant-canvas-wrap { box-shadow: 0 2px 6px #22364c06; }
+body[data-review-style="instrument"] #plant-canvas .plant-value { font-family: "SFMono-Regular", Consolas, monospace; font-size: 27px; letter-spacing: -.04em; }
+body[data-review-style="instrument"] #plant-canvas .plant-measurement-body { stroke: #bdccdc; stroke-width: 2; }
+body[data-review-style="instrument"] #plant-canvas .plant-gauge-track { fill: #d2dce7; height: 7px; }
+body[data-review-style="instrument"] #plant-canvas .plant-gauge-normal { height: 9px; }
+body[data-review-style="instrument"] #equipment { background: #f5f7fa; padding: 20px 16px; }
+body[data-review-style="instrument"] .equipment-heading h2 { font-size: 25px; font-weight: 700; }
+body[data-review-style="instrument"] #equipment-state { padding: 13px 14px; }
+body[data-review-style="instrument"] #equipment-state:not(.is-fault) { background: #fff; border-top: 3px solid #7894bc; }
+body[data-review-style="instrument"] #equipment-state strong { font-size: 23px; }
+body[data-review-style="instrument"] #equipment .equipment-feedback { margin: 18px 0; padding: 14px; border: 1px solid #d5dfe9; border-radius: 6px; background: #fff; }
+body[data-review-style="instrument"] #equipment .equipment-feedback dl > div { padding-block: 7px; }
+body[data-review-style="instrument"] #equipment .equipment-feedback dd { font-family: Consolas, monospace; }
+body[data-review-style="instrument"] #equipment .faceplate { border-radius: 6px; background: transparent; }
+body[data-review-style="instrument"] #equipment .faceplate .role { padding-block: 10px; }
+body[data-review-style="instrument"] .equipment-command-options { border: 1px solid #cfdce9; border-radius: 4px; background: #e8edf4; }
+body[data-review-style="instrument"] #equipment .equipment-write { border-radius: 3px; }
+body[data-review-style="instrument"] #equipment .equipment-observation { margin-top: 9px; padding: 0 10px; background: #fff; border: 1px solid #d5dfe9; border-radius: 5px; }
+body[data-review-style="instrument"] #equipment .equipment-observation > summary { font-weight: 600; }
+
+/* Selection stays separate from attention, including on themed pipe work. */
+body[data-review-style] #plant-canvas .plant-pipe.is-selected { stroke: var(--plant-blue); stroke-width: 5; }
+body[data-review-style] #equipment-state.is-degraded { border-style: dashed; }
+
+/* The common mobile behavior survives every density and typography choice. */
+@media (max-width: 1100px) and (min-width: 701px) {
+  body[data-review-style] { --plant-sidebar-width: 166px; --plant-drawer-width: 336px; }
+  body[data-review-style] #plant-workspace { padding: 18px; }
+}
+@media (max-width: 900px) and (min-width: 701px) {
+  body[data-review-style] { --plant-alarm-height: 142px; }
+}
+@media (max-width: 700px) {
+  body[data-review-style] { --plant-sidebar-width: 0px; --plant-drawer-width: 100%; --plant-chrome-height: 50px; --plant-alarm-height: 188px; }
+  body[data-review-style] .plant-brand { padding-inline: 10px; font-size: 14px; letter-spacing: 0; }
+  body[data-review-style] .plant-brand svg { width: 22px; height: 22px; }
+  body[data-review-style] #plant-sidebar { padding: 6px; }
+  body[data-review-style] .plant-area,
+  body[data-review-style] .plant-nav-button { min-height: 36px; padding: 6px 10px; font-size: 12px; }
+  body[data-review-style] #plant-workspace { padding: 16px 12px; }
+  body[data-review-style] #plant-view-title { font-size: 24px; }
+  body[data-review-style] .plant-view-heading { margin-bottom: 16px; }
+  body[data-review-style] #plant-alarm-strip { padding: 8px 10px; }
+  body[data-review-style] #plant-alarm-strip .plant-alarm-count { min-height: 34px; padding: 3px 6px; }
+  body[data-review-style] #plant-alarm-strip .plant-alarm-card { min-height: 56px; }
+  body[data-review-style] #equipment { top: var(--plant-header-height); right: 0; bottom: 0; width: 100%; padding: 18px; border-radius: 0; }
+  body[data-review-style] .equipment-heading h2 { font-size: 26px; }
+  body[data-review-style] .plant-canvas-footer { padding: 10px; }
+}
+@media (pointer: coarse) {
+  body[data-review-style] button,
+  body[data-review-style] input,
+  body[data-review-style] select,
+  body[data-review-style] #equipment-close,
+  body[data-review-style] #equipment .equipment-write { min-height: 44px; }
+  body[data-review-style] input,
+  body[data-review-style] select { font-size: 16px; }
+}
+@media (max-width: 700px) and (pointer: coarse) {
+  body[data-review-style] { --plant-alarm-height: 194px; }
+  body[data-review-style] #plant-alarm-strip .plant-alarm-count { min-height: 40px; }
+}

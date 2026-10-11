@@ -3576,10 +3576,22 @@ fn run_monitored(
     options: &Options,
     period: Duration,
 ) -> ExitCode {
+    let done = AtomicBool::new(false);
     std::thread::scope(|scope| {
         scope.spawn(|| monitor.serve());
+        scope.spawn(|| persistence_failure_watchdog(monitor, &done));
+        let mut scan = scan;
         let result = scan_loop(
-            scan,
+            || {
+                if let Some(error) = monitor.failure() {
+                    return Err(error);
+                }
+                let tick = scan()?;
+                match monitor.failure() {
+                    Some(error) => Err(error),
+                    None => Ok(tick),
+                }
+            },
             || monitor.snapshot(),
             || monitor.persist_state(),
             step,
@@ -3588,6 +3600,7 @@ fn run_monitored(
             Some(period),
         );
         monitor.shutdown();
+        done.store(true, Ordering::SeqCst);
         result
     })
 }
@@ -3604,6 +3617,7 @@ fn run_monitored(
 fn graceful_serve(monitor: &Monitor<'_>) {
     let done = std::sync::atomic::AtomicBool::new(false);
     std::thread::scope(|scope| {
+        scope.spawn(|| persistence_failure_watchdog(monitor, &done));
         scope.spawn(|| {
             while !shutdown_requested() && !done.load(Ordering::SeqCst) {
                 std::thread::sleep(SHUTDOWN_POLL);
@@ -3613,6 +3627,41 @@ fn graceful_serve(monitor: &Monitor<'_>) {
         monitor.serve();
         done.store(true, Ordering::SeqCst);
     });
+}
+
+/// Terminal persistence failure cannot depend on socket consumers or a
+/// stalled disk completing teardown. The monitor already closed the field
+/// gate and released its claim at the failing boundary. Give the explicit
+/// failure response a short grace, then drain admitted records within one
+/// shared five-second budget and exit nonzero even if a lane or writer is
+/// wedged. Do not run destructors that would join the failed writer forever.
+fn persistence_failure_watchdog(monitor: &Monitor<'_>, done: &AtomicBool) {
+    loop {
+        if let Some(error) = monitor.failure() {
+            RUN_FAILED.store(true, Ordering::SeqCst);
+            eprintln!("error: terminal persistence failure: {error}");
+            let deadline = Instant::now() + SHUTDOWN_FLUSH_WAIT;
+            std::thread::sleep(Duration::from_millis(100));
+            monitor.shutdown();
+            let state =
+                monitor.flush_state_sink(deadline.saturating_duration_since(Instant::now()));
+            let journal =
+                monitor.flush_journal_sink(deadline.saturating_duration_since(Instant::now()));
+            let history =
+                monitor.flush_history_sink(deadline.saturating_duration_since(Instant::now()));
+            eprintln!(
+                "error: persistence failure stand-down complete; state={state:?}; \
+                 journal={journal:?}; history={history:?}; in-flight request outcomes \
+                 remain unattested; do not retry automatically; recover from an \
+                 attested checkpoint or compatible peer"
+            );
+            std::process::exit(1);
+        }
+        if done.load(Ordering::SeqCst) {
+            return;
+        }
+        std::thread::sleep(SHUTDOWN_POLL);
+    }
 }
 
 /// The bound on [`SnapshotSink`]'s handoff queue: at most this many

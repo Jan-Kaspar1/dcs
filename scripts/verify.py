@@ -16,10 +16,10 @@ else:
 
 
 BUILD_SLOTS = 4
-PHASES = ("rust-format", "supervisor-tests", "rust-clippy", "rust-tests", "rust-proofs")
-# The demo build is an optional artifact phase, not an additional CI gate.
-OPTIONAL_PHASES = ("rust-demo",)
-RUST_PHASES = frozenset(("rust-clippy", "rust-tests", "rust-proofs", "rust-demo"))
+PHASES = ("rust-format", "supervisor-tests", "ui-tests", "rust-clippy", "rust-tests", "rust-proofs")
+# Artifact/reproduction phases are optional; they do not replace required CI gates.
+OPTIONAL_PHASES = ("rust-demo", "water-area-proof")
+RUST_PHASES = frozenset(("rust-clippy", "rust-tests", "rust-proofs", "rust-demo", "water-area-proof"))
 
 
 def _try_lock(handle):
@@ -99,9 +99,14 @@ def phase_command(name):
     commands = {
         "rust-format": ["cargo", "fmt", "--all", "--", "--check"],
         "supervisor-tests": [sys.executable, "scripts/run_tests.py", "--workers", "4"],
+        "ui-tests": [sys.executable, "scripts/run_ui_tests.py"],
         "rust-clippy": ["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"],
         "rust-tests": [sys.executable, "scripts/run_rust_tests.py", "--scope", "workspace"],
         "rust-proofs": [sys.executable, "scripts/run_rust_tests.py", "--scope", "proofs"],
+        "water-area-proof": [
+            "cargo", "test", "-p", "dcs-build", "--test", "water_area", "--locked",
+            "clean_connected_area_consumer_uses_immutable_release_artifacts",
+        ],
         "rust-demo": [
             "cargo", "build", "--locked", "-p", "dcs-controller", "-p", "dcs-plant",
             "-p", "dcs-build", "--bins", "--examples",
@@ -123,7 +128,7 @@ def main(argv=None):
     env = dict(os.environ, CARGO_BUILD_JOBS="4", CARGO_TARGET_DIR=str(root / "target"))
     started = time.monotonic()
     if options.phase is None:
-        for name in ("rust-format", "supervisor-tests"):
+        for name in ("rust-format", "supervisor-tests", "ui-tests"):
             run_phase(name, phase_command(name), root, env)
         with build_slot() as slot:
             held = time.monotonic()
@@ -132,7 +137,7 @@ def main(argv=None):
             inherit = {"pass_fds": (slot.fileno(),)} if os.name == "posix" else {}
             for name in ("rust-clippy", "rust-tests", "rust-proofs"):
                 phase_env = env
-                if name in ("rust-tests", "rust-proofs") and os.name == "posix":
+                if name in ("rust-tests", "rust-proofs", "water-area-proof") and os.name == "posix":
                     phase_env = dict(env, DCS_BUILD_SLOT_FD=str(slot.fileno()))
                 run_phase(name, phase_command(name), root, phase_env, **inherit)
         print(f"verify.py: cargo build slot held for {time.monotonic() - held:.1f}s", flush=True)
@@ -143,7 +148,7 @@ def main(argv=None):
                 held = time.monotonic()
                 inherit = {"pass_fds": (slot.fileno(),)} if os.name == "posix" else {}
                 phase_env = env
-                if name in ("rust-tests", "rust-proofs") and os.name == "posix":
+                if name in ("rust-tests", "rust-proofs", "water-area-proof") and os.name == "posix":
                     phase_env = dict(env, DCS_BUILD_SLOT_FD=str(slot.fileno()))
                 run_phase(name, phase_command(name), root, phase_env, **inherit)
             print(f"verify.py: cargo build slot held for {time.monotonic() - held:.1f}s", flush=True)

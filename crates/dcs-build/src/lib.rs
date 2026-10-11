@@ -156,6 +156,7 @@ mod builder;
 pub mod dosing;
 pub mod dynamics;
 mod endpoint;
+pub mod equipment;
 pub mod ethercat;
 pub mod filter_bank;
 pub mod ijmuiden;
@@ -166,6 +167,7 @@ pub mod specs;
 pub mod station;
 pub mod unit;
 pub mod wago;
+pub mod water_area;
 
 pub use builder::{BuildError, PlantBuilder, SignalBuilder};
 pub use dynamics::{BoolPoint, DynamicsBuilder, DynamicsElement, DynamicsError, FloatPoint};
@@ -179,7 +181,7 @@ pub use spec::{
 // `dcs-build` consumer needs no other crate's imports.
 pub use dcs_core::{Direction, PointId, PointType, SignalId, Value, ValueKind};
 pub use dcs_model::{
-    ChannelRef, ComponentId, DeviceId, Endpoint, Equipment, EquipmentControl, PlantView,
-    PlantViewBinding, PlantViewNode, PlantViewPipe, PlantViewPipeEnd, PlantViewPort,
-    PlantViewSymbol, PortRef, Rationalization, RecordingDuty,
+    ChannelRef, ComponentId, DeviceId, Endpoint, Equipment, EquipmentControl, EquipmentControlRole,
+    MeasurementDisplay, PlantView, PlantViewBinding, PlantViewNode, PlantViewPipe,
+    PlantViewPipeEnd, PlantViewPort, PlantViewSymbol, PortRef, Rationalization, RecordingDuty,
 };

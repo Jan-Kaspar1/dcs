@@ -856,16 +856,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The payload a `panic!` carries, as a string — the fatal-report
-    /// message the sink tests assert on.
-    fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
-        payload
-            .downcast::<String>()
-            .map(|message| *message)
-            .or_else(|payload| payload.downcast::<&'static str>().map(|s| s.to_string()))
-            .unwrap_or_default()
-    }
-
     /// #942's stalled sink (adopting unmanaged finding #546): a write
     /// that parks forever drains nothing — yet the recording point's
     /// pushes keep returning, because the handoff is a bounded queue's
@@ -935,17 +925,17 @@ mod tests {
         );
 
         // The next journaled entry meets the full queue: the push is
-        // refused and fatal at the recording point — the panic names
+        // refused and fatal at the recording point — the latched failure names
         // the file and the bound, and the served ring never takes the
         // entry (seq 4 lands nowhere).
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            recorder.push(Tick(4), event(4));
-        }));
+        recorder.push(Tick(4), event(4));
         assert!(
             pushed.elapsed() < Duration::from_secs(1),
             "the pushes waited on the sink: the lock's hold would stretch with it"
         );
-        let message = panic_message(panic.expect_err("a full drain queue must refuse the push"));
+        let message = recorder
+            .failure()
+            .expect("a full drain queue must latch its refusal");
         assert!(message.contains("journal file"), "{message}");
         assert!(message.contains(path.to_str().unwrap()), "{message}");
         assert!(message.contains("refused journal seq 4"), "{message}");
@@ -1024,9 +1014,7 @@ mod tests {
         // each push may already be the fatal one — the accounting is
         // what must hold.
         for n in 1..=3_u64 {
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                recorder.push(Tick(n), event(n));
-            }));
+            recorder.push(Tick(n), event(n));
         }
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -1049,10 +1037,10 @@ mod tests {
 
         // Every push after the recorded failure is refused — the run
         // dies at its next journaled entry naming the file's error.
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            recorder.push(Tick(9), event(9));
-        }));
-        let message = panic_message(panic.expect_err("a failed sink must refuse the push"));
+        recorder.push(Tick(9), event(9));
+        let message = recorder
+            .failure()
+            .expect("a failed sink must latch its refusal");
         assert!(message.contains(path.to_str().unwrap()), "{message}");
         assert!(message.contains("the simulated sink refuses"), "{message}");
 

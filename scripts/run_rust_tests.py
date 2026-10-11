@@ -39,6 +39,11 @@ NESTED_PROOFS = (
         "reference_plant",
         "the_upgrade_stage_proves_the_repin_and_the_named_crossings",
     ),
+    (
+        "connected-water-consumer",
+        "water_area",
+        "clean_connected_area_consumer_uses_immutable_release_artifacts",
+    ),
 )
 
 OUTPUT_LOCK = threading.Lock()
@@ -139,7 +144,7 @@ def main(argv=None):
     started = time.monotonic()
     failed = False
 
-    with ThreadPoolExecutor(max_workers=len(plan)) as pool:
+    with ThreadPoolExecutor(max_workers=min(4, len(plan))) as pool:
         futures = {
             pool.submit(
                 run_command,

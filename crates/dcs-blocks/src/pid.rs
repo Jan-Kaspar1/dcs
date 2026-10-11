@@ -210,8 +210,9 @@ impl Component for Pid {
 
         // Conditional integration: refuse the integral update only while
         // the output saturates in the direction the error pushes it.
-        let winding_up = (unclamped > self.config.out_max && error > 0.0)
-            || (unclamped < self.config.out_min && error < 0.0);
+        let integral_delta = self.config.ki * error * self.config.dt;
+        let winding_up = (unclamped > self.config.out_max && integral_delta > 0.0)
+            || (unclamped < self.config.out_min && integral_delta < 0.0);
         if !winding_up {
             self.integrator = candidate;
         }
@@ -481,6 +482,38 @@ mod tests {
             panic!("out must be Float")
         };
         assert!((u - 0.55).abs() < 1e-12, "u={u}");
+    }
+
+    #[test]
+    fn draining_loop_negative_gains_clamp_in_the_output_direction() {
+        let mut pid = Pid::new(
+            "drain",
+            SP,
+            PV,
+            OUT,
+            PidConfig {
+                kp: -10.0,
+                ki: -1.0,
+                out_max: 100.0,
+                ..config()
+            },
+        )
+        .unwrap();
+        let inputs = io(2.0, 20.0);
+        for tick in 1..=100 {
+            pid.step(&inputs, Tick(tick)).unwrap();
+        }
+        assert_eq!(pid.integral(), 0.0);
+        assert_eq!(inputs.written(OUT).unwrap().value, Value::Float(100.0));
+        inputs.feed(PV, Sample::good(Value::Float(0.0), Tick(101)));
+        for tick in 101..=200 {
+            pid.step(&inputs, Tick(tick)).unwrap();
+        }
+        assert_eq!(pid.integral(), 0.0);
+        assert_eq!(inputs.written(OUT).unwrap().value, Value::Float(0.0));
+        inputs.feed(PV, Sample::good(Value::Float(2.5), Tick(201)));
+        pid.step(&inputs, Tick(201)).unwrap();
+        assert!((pid.integral() - 0.05).abs() < 1e-12);
     }
 
     #[test]

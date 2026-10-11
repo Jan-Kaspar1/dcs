@@ -235,6 +235,7 @@ fn entry(point: PointId, direction: Direction, kind: ValueKind, writable: bool) 
         group: None,
         writable,
         requires_reason: false,
+        display: None,
     }
 }
 

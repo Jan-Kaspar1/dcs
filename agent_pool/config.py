@@ -6,7 +6,7 @@ import re
 from . import findings
 from . import review
 
-DEFAULT_CHECKS = ['rust-format', 'rust-clippy', 'rust-tests', 'supervisor-tests']
+DEFAULT_CHECKS = ['rust-format', 'rust-clippy', 'rust-tests', 'supervisor-tests', 'ui-tests']
 
 # Verified no-cost backends only; anything else is a rejected paid fallback.
 FREE_MODELS = ('swe-2-high', 'swe-2-medium', 'swe-2-max',

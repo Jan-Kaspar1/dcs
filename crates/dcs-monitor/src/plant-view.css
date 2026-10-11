@@ -376,3 +376,17 @@ tr.alarm .priority.p3 { background: #f6df9a; color: #704b0b; }
   #plant-canvas .plant-node.has-attention-alarm:not(.has-degraded-alarm):not(.has-stale-alarm) .plant-alarm-badge { animation: plant-unacknowledged-pulse 1.8s ease-in-out infinite; }
 }
 @keyframes plant-unacknowledged-pulse { 0%, 45%, 100% { opacity: 1; } 70% { opacity: 0.6; } }
+
+/* Measurement context is declared by the model; quality never becomes position. */
+.plant-gauge-track { fill: #dce3e9; }
+.plant-gauge-normal { fill: #adcec3; }
+.plant-gauge-marker { fill: #253e53; }
+.plant-gauge-marker.is-offscale { fill: #b95c22; }
+.plant-gauge-marker[hidden] { display: none; }
+.equipment-demand-note { font-size: .78rem; color: #526478; line-height: 1.45; padding: .7rem 0; }
+.equipment-member { border-top: 1px solid #e2e8ef; padding: .6rem 0; }
+.equipment-member summary { cursor: pointer; font-size: .82rem; color: #344b60; }
+.equipment-feedback small { color: #617286; }
+.equipment-protection { background: #fff3e7; border-left: 3px solid #c67619; border-radius: 5px; padding: .6rem .8rem; margin-bottom: .8rem; }
+.equipment-protection h3 { margin: 0 0 .3rem; font-size: .95rem; }
+.equipment-protection p { margin: 0; color: #764816; }

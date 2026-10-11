@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DCS — five operator design directions</title>
+  <link rel="stylesheet" href="/review/gallery.css">
+  <script defer src="/review/gallery.js"></script>
+</head>
+<body>
+  <header class="review-header">
+    <div><p class="eyebrow">DCS / Design studies</p><h1>Five ways to see the same plant.</h1></div>
+    <p class="intro">Choose a direction below. Each uses the existing operator UI, shared plant model and live simulated readings. The production design stays in place until you choose.</p>
+  </header>
+  <nav class="directions" aria-label="Visual direction">
+    <button type="button" data-style="precision" aria-pressed="true"><span class="number">01</span><strong>Precision</strong><span class="description">Compact · industrial · flat</span><span class="swatches precision" aria-hidden="true"><i></i><i></i><i></i></span></button>
+    <button type="button" data-style="civic" aria-pressed="false"><span class="number">02</span><strong>Civic</strong><span class="description">Warm · calm · approachable</span><span class="swatches civic" aria-hidden="true"><i></i><i></i><i></i></span></button>
+    <button type="button" data-style="drafting" aria-pressed="false"><span class="number">03</span><strong>Drafting</strong><span class="description">Technical · precise · ruled</span><span class="swatches drafting" aria-hidden="true"><i></i><i></i><i></i></span></button>
+    <button type="button" data-style="editorial" aria-pressed="false"><span class="number">04</span><strong>Editorial</strong><span class="description">Open · typographic · minimal</span><span class="swatches editorial" aria-hidden="true"><i></i><i></i><i></i></span></button>
+    <button type="button" data-style="instrument" aria-pressed="false"><span class="number">05</span><strong>Instrument</strong><span class="description">Structured · dense · analytical</span><span class="swatches instrument" aria-hidden="true"><i></i><i></i><i></i></span></button>
+  </nav>
+  <section class="preview-description" aria-live="polite">
+    <div><h2 id="style-title">01 / Precision</h2><p id="style-description">A crisp operator console: square edges, thin rules, tightly aligned values and a compact inspector.</p></div>
+    <p id="style-tradeoff">Best for scan speed and frequent operation. The most restrained of the five.</p>
+  </section>
+  <div class="preview-toolbar">
+    <div class="viewport-options" role="group" aria-label="Preview viewport">
+      <button type="button" data-viewport="desktop" aria-pressed="true">Desktop</button>
+      <button type="button" data-viewport="phone" aria-pressed="false">Phone · 390 px</button>
+    </div>
+    <span class="read-only">Live simulation · read-only design preview</span>
+    <a id="open-preview" href="/operator?style=precision" target="_blank" rel="noopener">Open full screen ↗</a>
+  </div>
+  <div class="preview-stage" data-viewport="desktop">
+    <iframe id="operator-preview" src="/operator?style=precision" title="Precision operator design preview"></iframe>
+  </div>
+  <p class="review-note">Select a pump, valve, measurement or loop to inspect its standard panel. Navigation, alarm details and disclosures work; commands are disabled in this review. Phone mode changes the viewport width; it is not a device certification.</p>
+  <details class="study-overview">
+    <summary>Compare all five static design studies</summary>
+    <p>Illustrative vector studies, captured from the same declared area and simulated snapshot. The interactive preview above uses the actual operator renderer.</p>
+    <img src="/review/overview.svg" alt="Five labeled design studies: Precision, Civic, Drafting, Editorial and Instrument" loading="lazy">
+    <div class="study-links"><a href="/review/precision.svg">01 Precision</a><a href="/review/civic.svg">02 Civic</a><a href="/review/drafting.svg">03 Drafting</a><a href="/review/editorial.svg">04 Editorial</a><a href="/review/instrument.svg">05 Instrument</a></div>
+  </details>
+</body>
+</html>

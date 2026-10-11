@@ -919,18 +919,24 @@ pub fn pump(
         points,
         controls: vec![
             EquipmentControl {
+                role: Some(dcs_model::EquipmentControlRole::Mode),
+                limits: None,
                 point: mode.id(),
                 label: "Operating mode".to_string(),
                 false_label: Some("Auto".to_string()),
                 true_label: Some("Manual".to_string()),
             },
             EquipmentControl {
+                role: Some(dcs_model::EquipmentControlRole::Request),
+                limits: None,
                 point: hand.id(),
                 label: "Manual run request".to_string(),
                 false_label: Some("Stop request".to_string()),
                 true_label: Some("Run request".to_string()),
             },
             EquipmentControl {
+                role: Some(dcs_model::EquipmentControlRole::OutOfService),
+                limits: None,
                 point: oos.id(),
                 label: "Service state".to_string(),
                 false_label: Some("In service".to_string()),

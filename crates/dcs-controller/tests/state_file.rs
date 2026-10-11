@@ -335,6 +335,185 @@ fn a_driven_run_resumes_from_its_state_file() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A failed write at an admitted command's durability boundary returns the
+/// receipt and an explicit unattested outcome. The controller stands down
+/// nonzero instead of poisoning the peer mutex or claiming a rejection for
+/// a request already admitted. Restart uses the last attested tail.
+#[test]
+fn a_failed_admission_exits_named_and_recovers_only_the_attested_tail() {
+    let dir = scratch("failed-admission");
+    let state = dir.join("state.json");
+    let temporary = dir.join("state.json.tmp");
+    let mut controller = spawn_driven(&[
+        TANK_LOOP.to_string(),
+        "--listen".to_string(),
+        "127.0.0.1:0".to_string(),
+        "--driven".to_string(),
+        "--state-file".to_string(),
+        state.to_str().unwrap().to_string(),
+    ]);
+    let client = MonitorClient::with_timeout(controller.addr, Duration::from_secs(3));
+    client.advance(5).unwrap();
+    let attested = std::fs::read(&state).unwrap();
+    // The next atomic-replacement write fails deterministically before
+    // touching the existing target, without changing host permissions.
+    std::fs::create_dir(&temporary).unwrap();
+    let command = Command::WriteValue {
+        point: PointId(10),
+        kind: ValueKind::Float,
+        value: Value::Float(2.5),
+    };
+    let started = Instant::now();
+    let (status, body) = client
+        .request(
+            "POST",
+            "/command",
+            Some(&serde_json::to_string(&command).unwrap()),
+        )
+        .unwrap();
+    assert_eq!(status, 500, "{body}");
+    let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let receipt: dcs_core::CommandReceipt =
+        serde_json::from_value(body["receipt"].clone()).unwrap();
+    assert_eq!(receipt.command, command);
+    assert_eq!(
+        receipt.outcome,
+        CommandOutcome::Accepted {
+            apply_tick: Tick(6)
+        }
+    );
+    assert!(receipt.submission.is_some());
+    assert_eq!(body["durability"], "unattested");
+    assert_eq!(body["retry"], false);
+    assert!(
+        !controller
+            .wait_exit(Duration::from_secs(7))
+            .expect("failure teardown hung")
+            .success()
+    );
+    assert!(started.elapsed() < Duration::from_secs(7));
+    let error = controller.stderr_tail();
+    assert!(error.contains("terminal persistence failure"), "{error}");
+    assert!(error.contains("do not retry automatically"), "{error}");
+    assert!(!error.contains("panicked"), "{error}");
+    assert_eq!(std::fs::read(&state).unwrap(), attested);
+    assert_eq!(persisted(&state).tick, Tick(5));
+    assert!(persisted(&state).receipts.is_empty());
+    std::fs::remove_dir(&temporary).unwrap();
+    let recovered = run(&[
+        TANK_LOOP,
+        "--ticks",
+        "10",
+        "--state-file",
+        state.to_str().unwrap(),
+    ]);
+    let reference = run(&[TANK_LOOP, "--ticks", "15"]);
+    assert!(
+        recovered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recovered.stderr)
+    );
+    assert_eq!(recovered.stdout, reference.stdout);
+    assert_eq!(persisted(&state).tick, Tick(15));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Real bounded queue saturation with a writer blocked in the filesystem:
+/// a FIFO stands in for a stalled share, and a client stalled mid-body
+/// proves the failure exit does not join UI-facing workers indefinitely.
+#[test]
+#[cfg(target_os = "linux")]
+fn a_stalled_state_writer_and_ui_cannot_hang_failure_teardown_or_restart() {
+    use std::io::Write;
+    use std::net::TcpStream;
+    let dir = scratch("saturated-state");
+    let state = dir.join("state.json");
+    let temporary = dir.join("state.json.tmp");
+    let mut controller = spawn_driven(&[
+        TANK_LOOP.to_string(),
+        "--listen".to_string(),
+        "127.0.0.1:0".to_string(),
+        "--driven".to_string(),
+        "--state-file".to_string(),
+        state.to_str().unwrap().to_string(),
+    ]);
+    let client = MonitorClient::with_timeout(controller.addr, Duration::from_secs(3));
+    client.advance(5).unwrap();
+    let attested = std::fs::read(&state).unwrap();
+    assert!(
+        Process::new("mkfifo")
+            .arg(&temporary)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut slow_ui = TcpStream::connect(controller.addr).unwrap();
+    slow_ui
+        // The command-body lane is separate from /scan submission workers.
+        // Unbuffered role-change bodies also use the submission quarantine,
+        // so /promote would occupy its second worker along with the first
+        // scan's durability wait rather than exercise persistence failure.
+        .write_all(b"POST /command HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4096\r\n\r\n{")
+        .unwrap();
+    let addr = controller.addr;
+    let first = std::thread::spawn(move || {
+        MonitorClient::with_timeout(addr, Duration::from_secs(10)).advance(1)
+    });
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while client.role().unwrap().tick < Tick(6) {
+        assert!(
+            Instant::now() < deadline,
+            "first scan did not reach its boundary"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let started = Instant::now();
+    let (status, body) = client
+        .request("POST", "/scan", Some(r#"{"scans":256}"#))
+        .unwrap();
+    assert_eq!(status, 500, "{body}");
+    let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(body["error"].as_str().unwrap().contains("bound (64)"));
+    assert!(body["scans_completed"].as_u64().unwrap() <= 65);
+    assert!(body["scans_completed"].as_u64().unwrap() > 0);
+    assert_eq!(body["durability"], "unattested");
+    assert_eq!(body["retry"], false);
+    assert!(
+        !controller
+            .wait_exit(Duration::from_secs(7))
+            .expect("stalled writer/UI hung failure exit")
+            .success()
+    );
+    assert!(started.elapsed() < Duration::from_secs(7));
+    assert!(
+        first.join().unwrap().is_err(),
+        "the stalled request cannot attest durability"
+    );
+    let error = controller.stderr_tail();
+    assert!(error.contains("terminal persistence failure"), "{error}");
+    assert!(error.contains("capacity: 64"), "{error}");
+    assert!(!error.contains("panicked"), "{error}");
+    assert_eq!(std::fs::read(&state).unwrap(), attested);
+    drop(slow_ui);
+    std::fs::remove_file(&temporary).unwrap();
+    let recovered = run(&[
+        TANK_LOOP,
+        "--ticks",
+        "10",
+        "--state-file",
+        state.to_str().unwrap(),
+    ]);
+    let reference = run(&[TANK_LOOP, "--ticks", "15"]);
+    assert!(
+        recovered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recovered.stderr)
+    );
+    assert_eq!(recovered.stdout, reference.stdout);
+    assert_eq!(persisted(&state).tick, Tick(15));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// The QA finding `state-file-shared-between-processes-not-detected`:
 /// the checkpoint carries one run's state — its tick domain, its
 /// receipt log, its component state — so `--state-file` is

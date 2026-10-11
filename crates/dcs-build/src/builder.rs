@@ -203,6 +203,83 @@ impl PlantBuilder {
         }
     }
 
+    /// Continues a structurally validated model without renumbering its entities.
+    /// Existing parameter semantics remain checked by controller assembly; newly
+    /// added specs receive the ordinary builder checks. Point/signal ids remain
+    /// engineer-owned. Device and component allocation resumes above the maximum.
+    pub fn from_model(model: PlantModel) -> Result<Self, BuildError> {
+        let errors = model.validate();
+        if !errors.is_empty() {
+            return Err(BuildError::Invalid(errors));
+        }
+        let next_device = model
+            .devices
+            .iter()
+            .map(|d| d.id.0)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1);
+        let next_component = model
+            .components
+            .iter()
+            .map(|c| c.id.0)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1);
+        let (Some(next_device), Some(next_component)) = (next_device, next_component) else {
+            return Err(BuildError::InvalidConfiguration {
+                field: "model identity allocation".into(),
+                reason: "no remaining device or component identities".into(),
+            });
+        };
+        Ok(Self {
+            devices: model.devices,
+            io_points: model.io_points,
+            signals: model.signals,
+            components: model.components,
+            connections: model.connections,
+            equipment: model.equipment,
+            views: model.views,
+            parameter_sets: vec![],
+            port_sets: vec![],
+            next_device,
+            next_component,
+        })
+    }
+
+    /// Resolves a previously declared input by direction and Rust value type.
+    /// This is the checked seam for extending an emitted assembly.
+    pub fn input<T: PointType>(&self, id: PointId) -> Result<InPoint<T>, BuildError> {
+        if self
+            .io_points
+            .iter()
+            .any(|p| p.id == id && p.direction == Direction::In && p.value_type == T::KIND)
+        {
+            Ok(InPoint::new(id))
+        } else {
+            Err(BuildError::InvalidConfiguration {
+                field: format!("input {}", id.0),
+                reason: format!("expected a declared {:?} input", T::KIND),
+            })
+        }
+    }
+
+    /// Resolves a previously declared output by direction and Rust value type.
+    pub fn output<T: PointType>(&self, id: PointId) -> Result<OutPoint<T>, BuildError> {
+        if self
+            .io_points
+            .iter()
+            .any(|p| p.id == id && p.direction == Direction::Out && p.value_type == T::KIND)
+        {
+            Ok(OutPoint::new(id))
+        } else {
+            Err(BuildError::InvalidConfiguration {
+                field: format!("output {}", id.0),
+                reason: format!("expected a declared {:?} output", T::KIND),
+            })
+        }
+    }
+
     /// Registers an equipment's ownership and operator surface using the
     /// already declared component and point identities. [`build`](Self::build)
     /// validates references, exclusive ownership, and writable controls.
@@ -299,6 +376,7 @@ impl PlantBuilder {
             stale_after_ticks: None,
             journaled: false,
             record: None,
+            display: None,
             unit: None,
         });
         InPoint::new(id)
@@ -340,6 +418,7 @@ impl PlantBuilder {
             stale_after_ticks: None,
             journaled: false,
             record: None,
+            display: None,
             unit: None,
         });
         OutPoint::new(id)
@@ -369,6 +448,7 @@ impl PlantBuilder {
             stale_after_ticks: None,
             journaled: false,
             record: None,
+            display: None,
             unit: None,
         });
         InPoint::new(id)
@@ -389,6 +469,7 @@ impl PlantBuilder {
             stale_after_ticks: None,
             journaled: false,
             record: None,
+            display: None,
             unit: None,
         });
         OutPoint::new(id)
@@ -531,6 +612,23 @@ impl PlantBuilder {
             panic!("io_point {} already declares unit {existing:?}", point.0);
         }
         declared.unit = Some(unit.to_string());
+        self
+    }
+
+    /// Declares numeric gauge/trend bounds in the shared point contract.
+    /// Model validation checks value kind, finite bounds and normal band;
+    /// these bounds never constrain commands or configure process alarms.
+    pub fn display(
+        &mut self,
+        point: impl Into<PointId>,
+        display: crate::MeasurementDisplay,
+    ) -> &mut Self {
+        let point = point.into();
+        self.io_points
+            .iter_mut()
+            .find(|p| p.id == point)
+            .unwrap_or_else(|| panic!("display names undeclared io_point {}", point.0))
+            .display = Some(display);
         self
     }
 
@@ -877,7 +975,15 @@ impl PlantBuilder {
         }
 
         let model = PlantModel {
-            version: MODEL_VERSION,
+            version: if self
+                .equipment
+                .iter()
+                .any(|e| e.controls.iter().any(|c| c.limits.is_some()))
+            {
+                dcs_model::CONTROL_LIMITS_MODEL_VERSION
+            } else {
+                MODEL_VERSION
+            },
             devices: self.devices,
             io_points: self.io_points,
             signals: self.signals,

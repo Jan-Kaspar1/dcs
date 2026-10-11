@@ -1,0 +1,96 @@
+{
+  "repository": "Jan-Kaspar1/dcs",
+  "mode": "GitHub app Git data API; identical file trees, new commit metadata",
+  "pull_request": 1529,
+  "branch": "codex/connected-water-milestone-20261011",
+  "base": "f53400ed39ccb2e0cced76a3bdbe3935e0360f68",
+  "original_local_main_preserved": true,
+  "commits": [
+    {
+      "local": "f7068e504946218807a151ea34226a7b6347a264",
+      "remote": "0234fb0b91ff699bd981365b2d6a5190a8d2f72d",
+      "tree": "f0c8159e9f2f5bfc247c7ff01c15ffa368223c38",
+      "subject": "Compose a connected water area from typed reusable equipment\n\nAdd bounded operator controls, declared displays and simulated hydraulics to the shared Rust model. Exercise deterministic operation, faults, alarm workflows, restart and compatible takeover from a pinned independent customer checkout.\n\nValidation: scripts/verify.py passed all five repository phases, including 4512 supervisor tests and all five external-consumer proofs. Preserve candidate/customer Git bundles in CI; browser review and public release publication remain explicit pending evidence."
+    },
+    {
+      "local": "a4c4cfdd3f9bb32201d14b9d8e02213ed390a688",
+      "remote": "106e82665b800a6fd52cf2c0154f2a3caca51886",
+      "tree": "ecf16c488aa211892be486f3e0c94581ae54588a",
+      "subject": "Bundle exact water candidate artifacts for offline customer delivery\n\nPackage hashed candidate and customer sources, tested generic executables, engineering output and vendored locked Cargo dependencies. Restore an independent plant checkout with its original Cargo pins and refuse changed or unsafe artifacts.\n\nValidation: 12 integrity tests pass; two independent exports have identical archive bytes; an external restored checkout resolves frozen metadata and reproduces both two- and three-pump documents with the delivered tools. Offline compilation will also run in the gated connected-area proof."
+    },
+    {
+      "local": "299e00f7cac33879128bd4d46d4ed7de85115140",
+      "remote": "e6765681cc13b603462a15c2092393bb990ce9f2",
+      "tree": "d37f06b1c35d92874bc0bc37570debc2c5229723",
+      "subject": "Stop simulated persistence writers before resetting acceptance evidence\n\nThe supervisor gate exposed a first-pass writer racing the second deterministic pass reset. Close each feed before touching its files, including when the scenario raises. The repeated-evidence test passes with the original outcome and digest assertions."
+    },
+    {
+      "local": "88246e8a9b0a95457015f8a22ce9e840e60c1785",
+      "remote": "847d44912af07c26653a735b058611b780ece4a9",
+      "tree": "6e25e6c98eaacbce2f886c5d3c980cc5601dd364",
+      "subject": "Fence terminal persistence failures and bound controller teardown\n\nPreserve admitted receipts without claiming durability, stop mutation after sink failure, and keep diagnostic locks usable. Prove saturated state, journal and history sinks plus real failed-write and stalled-writer recovery; preserve uncertain outcomes in operator controls."
+    },
+    {
+      "local": "24abeb77525dad55bbb7cf6439356c5e8ef31ed0",
+      "remote": "7ebf1885ba6bbe2d9c2a042c1132458449a6afbc",
+      "tree": "b2eb498cb528efa948442e330b464e69f47f4ce3",
+      "subject": "Conserve water inventory and engineer reusable measurement diagnostics\n\nCap actual draws by tank inventory, expose and record overflow, and separate physical storage from faulted measurements. Make actuator agreement and dwell typed configuration, declare bounds on every recorded point, and derive monitor presentation from that contract. Hydraulic, healthy-travel, stuck-feedback, schema and independent-consumer checks pass."
+    },
+    {
+      "local": "7c056e6a682c0b71fd5b8e9729cc29fd0d77f683",
+      "remote": "8d8ab9d99144a82780ed99718fc20b02ea881b51",
+      "tree": "e254fe2ca465a059384710def89fe9eff4a380b0",
+      "subject": "Gate exact artifact delivery and independent frozen customer rebuild\n\nExport the tested executables and locked vendor sources from the candidate proof, remove the original release origin, and rebuild outside the platform with frozen metadata and an empty Cargo cache. Override inherited Cargo target configuration so the customer build stays inside its own checkout."
+    },
+    {
+      "local": "9fd5b8a1824349f431181fe8e68450c8ca10cb0d",
+      "remote": "762ab03c1b3533fa586793942cf3bfc775e13d06",
+      "tree": "ad6b8e961fc46e40b2d74f7f2586246182d05f45",
+      "subject": "Record the emitted candidate schema with authoritative version guards\n\nGenerate through dcs-model schema so supported versions and the numeric-limit version barrier are retained. The release digest and emitted-byte regression now agree; historical release artifacts remain unchanged."
+    },
+    {
+      "local": "edce4970f902835991e53a485e5407fcd5efa209",
+      "remote": "568037715ca9680faad548e48b4ae20c0d7f1369",
+      "tree": "17af641a2222bef7db25d9f563a0f9449b1ae399",
+      "subject": "Record connected-area follow-up evidence and recovery boundaries\n\nTrace inventory, diagnostics, display metadata and exact offline delivery to the water requirements and roadmap. Keep browser/publication gates and customer policy explicit; distinguish gate closure, unattested admissions and attested recovery from physical safe-state claims."
+    },
+    {
+      "local": "91932bcae4ead4fe07ce0bbfac0a26a45295bf5c",
+      "remote": "307a6636f6abf021fd5888c58c76d78c247a0e19",
+      "tree": "d6d397bc49cf825274d1639b7880e1eed16e5abc",
+      "subject": "Consume stub command bodies before answering transport acceptance cases\n\nAvoid closing TCP with unread payload bytes, which can reset otherwise prompt receipt/refusal responses. Preserve the existing abort bounds and command semantics. Forty repeated answered cases and clippy pass."
+    },
+    {
+      "local": "7550819b68c24ee3611044c3d0efcc1ed3277356",
+      "remote": "2dee970338520042ae115dd425e8cb97a6529e34",
+      "tree": "6aa521f9ffbf7a84b1aad292c63a72d6bb567bb5",
+      "subject": "Reconcile known uncertain admissions by their original receipt identity\n\nPreserve the admitted submission origin and sequence in pending operator notices. An older identical request, another boot or an unidentified receipt cannot resolve that notice. Isolated production JavaScript checks match only the exact receipt mint."
+    },
+    {
+      "local": "ebc24dfae2954e4c5862250118da14a2237761cf",
+      "remote": "c9f8f394803acdc21bc35ac2f4f81f9b12921b0e",
+      "tree": "b6583aaddba13dc8fe6399d904e6427879c43140",
+      "subject": "Exercise a genuinely overflowing tank-flow conversion in acceptance\n\nThe original minimum-normal timestep still produced a finite capacity. Halve that positive step to exercise hold-last-finite and bad quality on arithmetic overflow; all seven inventory-flow tests pass."
+    },
+    {
+      "local": "c0a1ffd5a2140550192c04f303452b0ae2f89f3e",
+      "remote": "cb279d7e27f48f09d72e22da1726e3d26f23a1b5",
+      "tree": "44e507b54d6a6751b190c19b87ed9168088dae90",
+      "subject": "Record final connected-water gates and exact external delivery evidence\n\nAll five local verification phases pass, plus the current candidate frozen offline rebuild. Preserve reproducible artifact/model identities and distinguish remaining browser, credential, publication and commissioning gates from completed simulated control evidence."
+    },
+    {
+      "local": "e3d61e8c3b3fea572287ff4daba827394c4e9da3",
+      "remote": "64e8b7a3e08e2253dee8f0761a2ba0c8037e677f",
+      "tree": "e5f3234e35368c424442520853aca293ff479291",
+      "subject": "Check asynchronous recorder failure before scans and promotion"
+    },
+    {
+      "local": "85434aaf0e97e06897f227ef8947c4cbec5c6098",
+      "remote": "381aced75b2f76a72eb5afd482fb56a19a28543c",
+      "tree": "e7fb194527eb7da2899926a5488c4bfa65f2072f",
+      "subject": "Preserve exact operator receipt identity and gate production UI contracts"
+    }
+  ],
+  "mapped_source_head": "381aced75b2f76a72eb5afd482fb56a19a28543c",
+  "scope": "Fourteen implementation and acceptance cuts; later evidence-only commits are intentionally outside this self-referencing mapping."
+}

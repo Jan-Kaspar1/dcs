@@ -271,35 +271,40 @@ fn target_dir() -> PathBuf {
     PathBuf::from(metadata["target_directory"].as_str().unwrap())
 }
 
-/// Ensures the released tooling's local stand-ins — `dcs-model`,
+/// Builds immutable tooling for the existing pending v0.10.0 record.
+/// PR #1526's source is the baseline that emitted that uncut record; the
+/// customer's older engineering lock is not a completed v0.10.0 release.
+/// This preserves the old stand-in proof without rewriting its artifacts.
+/// The connected-area proof separately builds engineering and tooling from
+/// one exact candidate artifact and reports the pending public cut honestly.
+/// The tooling includes `dcs-model`,
 /// `dcs-controller`, `dcs-plant-server`, `dcs-ctl`,
-/// `dcs-alarm-report`, and the plant-side `dcs-plant-ctl` — are built
-/// for the check's `DCS_TOOLS` substitution.
+/// `dcs-alarm-report`, and the plant-side `dcs-plant-ctl` for the
+/// check's `DCS_TOOLS` substitution.
 fn build_tools() -> PathBuf {
-    let output = Command::new(CARGO)
-        .args([
-            "build",
-            "--quiet",
-            "-p",
-            "dcs-model",
-            "-p",
-            "dcs-controller",
-            "-p",
-            "dcs-plant",
-            "-p",
-            "dcs-monitor",
-            "-p",
-            "dcs-sim-net",
-        ])
-        .current_dir(root())
-        .output()
-        .expect("cargo build of the released tooling runs");
-    assert!(
-        output.status.success(),
-        "building the released tooling failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    target_dir().join("debug")
+    static TOOLS: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    TOOLS
+        .get_or_init(|| {
+            let output = Command::new("python3")
+                .arg(root().join("scripts/release_test_tools.py"))
+                .arg("--root")
+                .arg(root())
+                .arg("--revision")
+                .arg("f53400ed39ccb2e0cced76a3bdbe3935e0360f68")
+                .arg("--cargo")
+                .arg(CARGO)
+                .arg("--target-root")
+                .arg(target_dir().join("released-consumer-tooling"))
+                .output()
+                .expect("immutable release tooling builds");
+            assert!(
+                output.status.success(),
+                "building pinned release tooling failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
+        })
+        .clone()
 }
 
 /// The release pin the template's manifest records for the release

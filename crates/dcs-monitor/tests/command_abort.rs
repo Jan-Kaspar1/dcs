@@ -1,30 +1,18 @@
-//! Issue #948 — the `command-abort-shows-failed-while-applied` QA
-//! finding — and issue #1036's
-//! `command-abort-reports-failure-after-apply` follow-up: the page's
-//! `AbortSignal.timeout` on `POST /command` cancels the client's wait,
-//! never the server's work — the request may already sit buffered in
-//! the listen backlog — and a killed response path ends the wait the
-//! same way without an answer, so an unanswered submission's outcome
-//! is genuinely unknown and rendering it "command failed" asserts a
-//! non-application that is not true. The page now answers the
-//! indeterminate "outcome unknown" verdict for every post that ends
-//! without an answered receipt — no fetch rejection proves the request
-//! never left — never retries a submission whose fate is unresolved (a
-//! landed invoke would apply twice), and holds the declared
-//! `{command, actor, reason}` pending so the journaled
-//! `command_settled` — the receipted contract's truth about a command —
-//! resolves the standing notice. Only the endpoint's own answered 4xx,
-//! a refusal provably delivered before admission, stays an honest
-//! "command failed". These tests drive the page's `submitCommand`,
-//! mirrored here, against a stub transport answering `/command` past
-//! the abort bound or closing the socket unanswered, then serve the
-//! applied settle the buffered request produced once the listener ran
-//! again — the `docker pause`/`unpause` reproduction and the killed
-//! response path simulated.
+//! Rust transport checks and a limited mirror of operator notice semantics.
+//! Production frontend behavior is proved separately by the gated Node suite
+//! that executes the actual page and wire adapter; this mirror is not that
+//! frontend proof. The HTTP stub preserves #948/#1036's independent truth:
+//! an aborted or killed response can leave a request applied server-side.
+//!
+//! Every unanswered POST remains unknown and must not be retried. A matching
+//! journal command, actor and reason cannot identify which identical request
+//! applied. Only an exact, previously answered admission identity permits a
+//! pending notice to reconcile against a settled receipt. Legacy/no-identity
+//! requests remain unknown even while their possible application is visible.
 
 use dcs_core::{
-    Command, CommandOutcome, CommandReceipt, JournalEntry, JournalEvent, PointId, Tick, Value,
-    ValueKind,
+    Command, CommandOutcome, CommandReceipt, JournalEntry, JournalEvent, PointId, SubmissionId,
+    Tick, Value, ValueKind,
 };
 use dcs_monitor::MonitorClient;
 use std::io::{ErrorKind, Read, Write};
@@ -146,6 +134,27 @@ impl StubTransport {
                     };
                     if !filled {
                         return;
+                    }
+                    // Read the declared body before replying. Head and body
+                    // are separate client writes; closing with unread body
+                    // bytes can reset TCP and erase a prompt response, making
+                    // the answered cases depend on packet scheduling.
+                    let header_end = head
+                        .windows(4)
+                        .position(|window| window == b"\r\n\r\n")
+                        .unwrap()
+                        + 4;
+                    let body_length = String::from_utf8_lossy(&head[..header_end])
+                        .lines()
+                        .filter_map(|line| line.split_once(':'))
+                        .find(|(name, _)| name.eq_ignore_ascii_case("Content-Length"))
+                        .and_then(|(_, length)| length.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    while head.len() < header_end + body_length {
+                        match stream.read(&mut chunk) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => head.extend_from_slice(&chunk[..n]),
+                        }
                     }
                     let request = String::from_utf8_lossy(&head);
                     let mut parts = request.lines().next().unwrap_or("").split_whitespace();
@@ -283,6 +292,7 @@ struct Pending {
     command: serde_json::Value,
     actor: Option<String>,
     reason: Option<String>,
+    submission: Option<SubmissionId>,
     notice: String,
 }
 
@@ -311,9 +321,10 @@ fn submit_command(addr: SocketAddr, command: &serde_json::Value, bound: Duration
             command: command.clone(),
             actor: None,
             reason: None,
-            notice: "command outcome unknown — no receipt answered the submission \
-                     and it may still apply; the journaled settled receipt is the \
-                     verdict — resubmitting now risks applying the command twice."
+            submission: None,
+            notice: "command outcome unknown — no admission identity answered the submission \
+                     and it may still apply; matching journal commands cannot identify it; \
+                     resubmitting now risks applying the command twice."
                 .to_string(),
         }),
         PostEnd::Refused { status, body } => Submission::Failed(format!(
@@ -341,15 +352,15 @@ fn same_json(a: &serde_json::Value, b: &serde_json::Value) -> bool {
     }
 }
 
-/// The page's `sameSubmission`, mirrored: the settled receipt answers
-/// the abandoned submission when the command matches structurally and
-/// the declared actor and reason the receipt echoes agree.
+/// Limited Rust mirror: only an exact known admission identity can resolve
+/// the pending request. Command, actor and reason must also still agree.
 fn same_submission(receipt: &CommandReceipt, pending: &Pending) -> bool {
-    serde_json::to_value(&receipt.command).is_ok_and(|command| {
-        same_json(&command, &pending.command)
-            && receipt.actor == pending.actor
-            && receipt.reason == pending.reason
-    })
+    matches!((receipt.submission, pending.submission), (Some(a), Some(b)) if a == b)
+        && serde_json::to_value(&receipt.command).is_ok_and(|command| {
+            same_json(&command, &pending.command)
+                && receipt.actor == pending.actor
+                && receipt.reason == pending.reason
+        })
 }
 
 /// The page's `describeOutcome`, mirrored for the outcomes these tests
@@ -365,9 +376,8 @@ fn describe_outcome(outcome: &CommandOutcome) -> String {
 }
 
 /// The page's pending-resolution fold in `refreshJournal`, mirrored:
-/// the first journaled `command_settled` whose receipt matches the
-/// abandoned submission resolves the indeterminate notice with the
-/// authority's verdict.
+/// a journaled settle resolves an unknown notice only for a previously known
+/// admission identity. Structural command equality alone proves nothing.
 fn resolve_pending(pending: &Pending, entries: &[JournalEntry]) -> Option<String> {
     entries.iter().find_map(|entry| match &entry.event {
         JournalEvent::CommandSettled { receipt } if same_submission(receipt, pending) => {
@@ -384,8 +394,8 @@ fn resolve_pending(pending: &Pending, entries: &[JournalEntry]) -> Option<String
 /// bound with the request bytes already buffered, then unpaused — the
 /// buffered write applies and the journal settles it. The mirrored
 /// `submitCommand` must answer the indeterminate verdict, and the
-/// journaled settle must resolve it to `applied` — where the page once
-/// printed `command failed: AbortError` beside the landed write.
+/// journal must independently expose the applied write while this request's
+/// unidentified notice remains unknown.
 #[test]
 fn an_abandoned_command_reports_indeterminate_then_the_journaled_settle() {
     let command = serde_json::json!({
@@ -413,7 +423,7 @@ fn an_abandoned_command_reports_indeterminate_then_the_journaled_settle() {
         tick: Tick(8019),
         event: JournalEvent::CommandSettled {
             receipt: CommandReceipt {
-                command: submitted,
+                command: submitted.clone(),
                 outcome: CommandOutcome::Applied { tick: Tick(8019) },
                 actor: None,
                 reason: None,
@@ -450,15 +460,17 @@ fn an_abandoned_command_reports_indeterminate_then_the_journaled_settle() {
         .expect("the abandoned POST's bytes never reached the listener");
 
     // The buffered request applied once the listener ran again: the
-    // journal serves the applied settle, and the pending submission
-    // resolves to the authority's verdict rather than the failure the
-    // page once claimed.
+    // journal serves the applied settle. The pending notice still lacks an
+    // admission identity, so this particular request remains unknown.
     let entries = MonitorClient::new(transport.addr).journal(0).unwrap();
-    let resolved = resolve_pending(&pending, &entries)
-        .expect("the journaled settle must answer the abandoned submission");
+    assert!(entries.iter().any(|entry| matches!(&entry.event,
+        JournalEvent::CommandSettled { receipt }
+        if receipt.command == submitted && receipt.outcome == CommandOutcome::Applied { tick: Tick(8019) }
+    )), "the journal independently proves the buffered request can apply");
+    assert!(pending.submission.is_none());
     assert!(
-        resolved.contains("applied at tick 8019"),
-        "the settle must resolve the notice to the applied verdict: {resolved}"
+        resolve_pending(&pending, &entries).is_none(),
+        "matching journal commands must not resolve an unidentified request"
     );
 }
 
@@ -501,7 +513,8 @@ fn an_answered_receipt_reports_normally() {
 /// The fetch surface cannot prove the request never left, so the
 /// mirrored `submitCommand` must answer the same indeterminate verdict
 /// the abort bound produces — never "command failed" — and the
-/// journaled settle resolves it.
+/// journal independently exposes an applied write, without identifying this
+/// unanswered request.
 #[test]
 fn a_killed_response_path_reports_indeterminate_then_the_journaled_settle() {
     let command = serde_json::json!({
@@ -517,7 +530,7 @@ fn a_killed_response_path_reports_indeterminate_then_the_journaled_settle() {
         tick: Tick(7864),
         event: JournalEvent::CommandSettled {
             receipt: CommandReceipt {
-                command: submitted,
+                command: submitted.clone(),
                 outcome: CommandOutcome::Applied { tick: Tick(7864) },
                 actor: None,
                 reason: None,
@@ -553,12 +566,73 @@ fn a_killed_response_path_reports_indeterminate_then_the_journaled_settle() {
         .expect("the abandoned POST's bytes never reached the listener");
 
     let entries = MonitorClient::new(transport.addr).journal(0).unwrap();
-    let resolved = resolve_pending(&pending, &entries)
-        .expect("the journaled settle must answer the abandoned submission");
+    assert!(entries.iter().any(|entry| matches!(&entry.event,
+        JournalEvent::CommandSettled { receipt }
+        if receipt.command == submitted && receipt.outcome == CommandOutcome::Applied { tick: Tick(7864) }
+    )), "the journal independently proves an unanswered request can apply");
+    assert!(pending.submission.is_none());
     assert!(
-        resolved.contains("applied at tick 7864"),
-        "the settle must resolve the notice to the applied verdict: {resolved}"
+        resolve_pending(&pending, &entries).is_none(),
+        "matching journal commands must not resolve an unidentified request"
     );
+}
+
+/// A persistence-error response can preserve its accepted receipt's identity
+/// while leaving durability unknown. Its later settle can reconcile only that
+/// admission, not an identical command from another boot or sequence.
+#[test]
+fn a_known_admission_reconciles_only_its_exact_settled_identity() {
+    let id = SubmissionId {
+        origin: 17_307_262_437_741_370_921,
+        seq: u64::MAX,
+    };
+    let pending = Pending {
+        command: serde_json::json!({
+            "write_value": {"point": 10, "kind": "float", "value": {"float": 1}}
+        }),
+        actor: Some("operator".to_string()),
+        reason: Some("level adjustment".to_string()),
+        submission: Some(id),
+        notice: "Request admitted; persistence unconfirmed".to_string(),
+    };
+    let receipt = CommandReceipt {
+        command: Command::WriteValue {
+            point: PointId(10),
+            kind: ValueKind::Float,
+            value: Value::Float(1.0),
+        },
+        outcome: CommandOutcome::Applied { tick: Tick(7) },
+        actor: pending.actor.clone(),
+        reason: pending.reason.clone(),
+        submission: Some(id),
+    };
+    let entry = |receipt| JournalEntry {
+        seq: 1,
+        tick: Tick(7),
+        event: JournalEvent::CommandSettled { receipt },
+    };
+    assert_eq!(
+        resolve_pending(&pending, &[entry(receipt.clone())]),
+        Some("the abandoned submission settled — applied at tick 7".to_string())
+    );
+    for other in [
+        None,
+        Some(SubmissionId {
+            origin: id.origin + 1,
+            seq: id.seq,
+        }),
+        Some(SubmissionId {
+            origin: id.origin,
+            seq: id.seq - 1,
+        }),
+    ] {
+        let mut different = receipt.clone();
+        different.submission = other;
+        assert!(resolve_pending(&pending, &[entry(different)]).is_none());
+    }
+    let mut unidentified = pending;
+    unidentified.submission = None;
+    assert!(resolve_pending(&unidentified, &[entry(receipt)]).is_none());
 }
 
 /// The split's dead-listener end: a refused connect throws the same
