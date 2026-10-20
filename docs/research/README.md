@@ -17,4 +17,8 @@ Prefer primary sources: standards publishers, regulators, vendor manuals, owner 
 
 [Documented training plants](training-plants.md) compares Siemens, Festo, university benchmarks, a physical water-treatment testbed, and municipal operating guidance. It records the code-based control/UI library goal, a proposed first station slice with measurable next steps, source-access limits, and the proposed deployment workflow boundary.
 
+[Chemical production scheduling and reusable batch foundations](chemical-production-scheduling.md) preserves the Maravelias / ISA-88 investigation for #1531: source-access limits, candidate requirements, scheduling/execution/resource boundaries, alternatives and review scenarios. It remains future research under the deferred batch requirements.
+
+The [platform requirements](../requirements/platform.md) record the 2026-10-20 customer-engineering brief and candidate commissioning workflow; [deployment and commissioning research](deployment-commissioning.md) supplies the existing lifecycle evidence and open site-policy questions.
+
 A research issue is complete when the note and affected requirements agree, every claim is traceable, open assumptions are visible, and the planner can either write measurable acceptance criteria or defer the requirement with a concrete revisit condition.
