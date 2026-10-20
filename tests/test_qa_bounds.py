@@ -106,6 +106,11 @@ class StorageBoundTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.cfg = cfg_for(self.tmp.name)
+        # Exercise the lane footprint gate independently of host disk pressure.
+        free_space = patch.object(runner, '_free_bytes',
+                                  return_value=self.cfg['min_free_bytes'] * 2)
+        free_space.start()
+        self.addCleanup(free_space.stop)
         self.st = qa_state.State(Path(self.cfg['state_dir']) / 'state.db')
 
     def tearDown(self):
@@ -147,6 +152,22 @@ class StorageBoundTests(unittest.TestCase):
             runner.run(self.st, record, self.cfg, log=lambda m: None)
         self.assertEqual(self.st.run('qa-1')['outcome'], 'inconclusive')
         self.assertIn('network', str(calls))  # builder net was created
+
+    def test_low_disk_blocks_before_storage_bound(self):
+        self.cfg['qa_storage_max_bytes'] = 1
+        record = self._run_record()
+        with patch.object(runner, '_free_bytes',
+                          return_value=self.cfg['min_free_bytes'] - 1), \
+                patch.object(runner, 'docker', fake_docker_ok), \
+                patch.object(runner, 'qa_storage_usage') as usage:
+            runner.run(self.st, record, self.cfg, log=lambda m: None)
+        rec = self.st.run('qa-1')
+        self.assertEqual(rec['outcome'], 'blocked')
+        report = json.loads(Path(rec['report']).read_text())
+        self.assertEqual([f['key'] for f in report['infrastructure_failures']],
+                         ['preflight-disk'])
+        usage.assert_not_called()
+        self.assertIsNone(self.st.last_attempted_sha())
 
 
 class ReclaimTests(unittest.TestCase):
