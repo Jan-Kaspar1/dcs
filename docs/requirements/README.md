@@ -2,6 +2,8 @@
 
 Requirement files are the bridge between market evidence and implementation work. Each requirement has a stable ID, a statement of observable need, acceptance evidence, and a status.
 
+[Platform and customer engineering requirements](platform.md) capture the shared customer promise and the candidate commissioning workflow. Market files retain their specific scope, gates and evidence; [batch control](batch-control.md) remains deferred with its research linked for future use.
+
 Use these statuses:
 
 - `candidate` — plausible need that still requires research or customer validation;
