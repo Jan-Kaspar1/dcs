@@ -286,10 +286,10 @@ it follows:
 
 1. Land release-affecting changes on `main`; bump
    `[workspace.package] version` when the compat policy requires it.
-   The `rust-proofs` release-assembly check — the nested clean-target
+   The `Release integration tests` release-assembly check — the nested clean-target
    consumer and reference-plant proofs — runs on every `main` push, so
    each candidate commit arrives with its assembly evidence.
-2. Tag the commit `v<version>` only when `rust-proofs` is green on that
+2. Tag the commit `v<version>` only when `Release integration tests` is green on that
    exact commit; the tag push reruns the gate as final confirmation.
 3. Produce the release record `docs/releases/<tag>/`:
    - `record.md` — tag, commit sha, the release set's crate versions,

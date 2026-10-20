@@ -6,7 +6,9 @@ import re
 from . import findings
 from . import review
 
-DEFAULT_CHECKS = ['rust-format', 'rust-clippy', 'rust-tests', 'supervisor-tests']
+# GitHub check names are the workflow jobs' display names.
+LEGACY_CHECKS = ['rust-format', 'rust-clippy', 'rust-tests', 'supervisor-tests']
+DEFAULT_CHECKS = ['Rust formatting', 'Rust linting', 'Rust tests', 'Python tests']
 
 # Verified no-cost backends only; anything else is a rejected paid fallback.
 FREE_MODELS = ('swe-2-high', 'swe-2-medium', 'swe-2-max',
@@ -98,6 +100,9 @@ def load(path=None):
         raise ValueError('planning.enabled must be a boolean')
     config['planning'] = dict(planning, enabled=planning.get('enabled', True))
     config.setdefault('required_checks', DEFAULT_CHECKS)
+    # Existing installs retain their config file across supervisor upgrades.
+    if config['required_checks'] == LEGACY_CHECKS:
+        config['required_checks'] = list(DEFAULT_CHECKS)
     if config['required_checks'] != DEFAULT_CHECKS:
         raise ValueError('Required CI checks cannot be weakened in active configuration')
     config.setdefault('poll_seconds', 60)

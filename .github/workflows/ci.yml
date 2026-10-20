@@ -9,6 +9,7 @@ permissions:
   contents: read
 jobs:
   rust-format:
+    name: Rust formatting
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -16,6 +17,7 @@ jobs:
       - name: Timed formatting check
         run: python3 scripts/verify.py --phase rust-format
   rust-clippy:
+    name: Rust linting
     runs-on: ubuntu-latest
     env:
       CARGO_BUILD_JOBS: 4
@@ -58,6 +60,7 @@ jobs:
           echo "target-cache-hit=${{ steps.target-cache.outputs.cache-hit }}"
           du -sh ~/.cargo/registry ~/.cargo/git target 2>/dev/null || true
   rust-tests:
+    name: Rust tests
     runs-on: ubuntu-latest
     env:
       CARGO_BUILD_JOBS: 4
@@ -104,13 +107,14 @@ jobs:
           echo "registry-cache-hit=${{ steps.registry-cache.outputs.cache-hit }}"
           echo "target-cache-hit=${{ steps.target-cache.outputs.cache-hit }}"
           du -sh ~/.cargo/registry ~/.cargo/git target 2>/dev/null || true
-  # The release-assembly gate (issue #905): the nested clean-target
+  # Release integration tests (issue #905): the nested clean-target
   # consumer and reference-plant proofs. Not in the merge-required set —
   # the tradeoff is recorded in docs/agent-operations.md — but it runs on
   # every PR as an early signal and unconditionally on every main commit
   # and v* tag, and docs/release-contract.md requires it green on a
   # tagged commit before release.
   rust-proofs:
+    name: Release integration tests
     runs-on: ubuntu-latest
     env:
       CARGO_BUILD_JOBS: 4
@@ -148,7 +152,7 @@ jobs:
           key: cargo-target-${{ runner.os }}-${{ steps.rust-version.outputs.version }}-${{ hashFiles('Cargo.lock') }}-proofs-${{ github.sha }}
           restore-keys: |
             cargo-target-${{ runner.os }}-${{ steps.rust-version.outputs.version }}-${{ hashFiles('Cargo.lock') }}-proofs-
-      - name: Timed release-assembly proofs
+      - name: Timed release integration tests
         run: python3 scripts/verify.py --phase rust-proofs
       - name: Report feedback metrics
         if: always()
@@ -157,8 +161,9 @@ jobs:
           echo "target-cache-hit=${{ steps.target-cache.outputs.cache-hit }}"
           du -sh ~/.cargo/registry ~/.cargo/git target 2>/dev/null || true
   supervisor-tests:
+    name: Python tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Timed supervisor tests
+      - name: Timed Python tests
         run: python3 scripts/verify.py --phase supervisor-tests

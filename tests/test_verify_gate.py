@@ -138,10 +138,33 @@ class CiWorkflowGateTests(unittest.TestCase):
     def test_required_checks_are_the_fast_legs_and_proofs_are_separate(self):
         from agent_pool.config import DEFAULT_CHECKS
 
-        for check in DEFAULT_CHECKS:
-            self.assertIn(check, verify.PHASES)
-        self.assertNotIn("rust-proofs", DEFAULT_CHECKS)
+        display_names = {
+            name: re.search(r"^    name: (.+)$", self.job_body(name), re.M).group(1)
+            for name in self.job_names()
+        }
+        self.assertEqual(display_names, {
+            "rust-format": "Rust formatting",
+            "rust-clippy": "Rust linting",
+            "rust-tests": "Rust tests",
+            "rust-proofs": "Release integration tests",
+            "supervisor-tests": "Python tests",
+        })
+        self.assertEqual(set(DEFAULT_CHECKS), set(display_names.values()) - {"Release integration tests"})
+        self.assertNotIn("Release integration tests", DEFAULT_CHECKS)
         self.assertIn("rust-proofs", self.job_names())
+
+    def test_existing_supervisor_config_migrates_without_weakening_checks(self):
+        import json
+        from agent_pool.config import DEFAULT_CHECKS, LEGACY_CHECKS, load
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            for checks in (LEGACY_CHECKS, DEFAULT_CHECKS):
+                path.write_text(json.dumps({"required_checks": checks}))
+                self.assertEqual(load(path)["required_checks"], DEFAULT_CHECKS)
+            path.write_text(json.dumps({"required_checks": DEFAULT_CHECKS[:-1]}))
+            with self.assertRaisesRegex(ValueError, "cannot be weakened"):
+                load(path)
 
     def test_assembly_gate_triggers_cover_pr_main_and_release_tags(self):
         match = re.search(r"^on:\n((?: {2}[^\n]*\n)+)", self.text, re.M)

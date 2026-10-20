@@ -189,6 +189,6 @@ production `main`:
    `qa-<key>-fix2` follow-up, bounded by `max_fix_cycles`.
 
 Remaining for a fully live demo: a real worker pass against the sandbox repo
-needs CI checks (`rust-*`, `supervisor-tests`) and a dispatcher instance; both
+needs CI checks (`Rust formatting`, `Rust linting`, `Rust tests`, `Python tests`) and a dispatcher instance; both
 are exercised by the fakes test, and a real-agent run is gated on Task 1's
 runner plus deliberate supervisor config (`qa.enabled`/`mode`).
